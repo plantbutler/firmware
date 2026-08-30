@@ -3,22 +3,22 @@
 #PATH := /usr/local/bin:$(PATH)
 
 all:
-    pio -f -c vim run
+	pio -f -c vim run
 
 upload:
-    pio -f -c vim run --target upload
+	pio -f -c vim run --target upload
 
 clean:
-    pio -f -c vim run --target clean
+	pio -f -c vim run --target clean
 
 program:
-    pio -f -c vim run --target program
+	pio -f -c vim run --target program
 
 uploadfs:
-    pio -f -c vim run --target uploadfs
+	pio -f -c vim run --target uploadfs
 
 compiledb:
-    pio run -t compiledb
+	pio run -t compiledb
 
 update:
-    pio -f -c vim update
+	pio -f -c vim update
