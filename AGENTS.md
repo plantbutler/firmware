@@ -1,7 +1,7 @@
 # Working on the firmware
 
 PlatformIO project for an **Arduino UNO R4 WiFi** (Renesas RA4M1 + ESP32-S3 for WiFi, 32 KB RAM).
-Read the umbrella's [AGENTS.md](https://github.com/plantbutler/plantbutler/blob/main/AGENTS.md) and
+Read the umbrella's [AGENTS.md](https://github.com/plantbutler/plantbutler/blob/main/AGENTS.md) (on this machine: `~/projects/plant-butler/AGENTS.md`) and
 [DECISIONS.md](https://github.com/plantbutler/plantbutler/blob/main/DECISIONS.md) first: decisions
 #4 (protocol), #5 (what the firmware may decide) and #7 (safety) are what this code has to keep.
 
