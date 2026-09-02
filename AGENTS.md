@@ -24,10 +24,12 @@ Arduino_SensorKit, LiquidCrystal_I2C).
 - `src/main.cpp` — inits both screens, `initialize()`s and `test()`s the manifold (cycles valves
   1-5, minutes of blocking delays), then loops once a second reading A0-A3 onto the screens.
   Network is commented out.
-- `lib/Manifold` — a continuous-rotation servo on pin 8 stepping a rotary valve between 5
-  outputs. Purely time-based: 21.7 s between valves, 12.5 s from home to valve 1, `delay()`
-  throughout. `reset()` drives backwards for one valve-width and declares position 0 — from
-  valve 5 that is wrong by about 80 s. Logs to a `Screen*` unconditionally.
+- `lib/Manifold` — a continuous-rotation servo on pin 8 turning a lead screw (through reduction
+  gears) that moves a magnet cart over 5 gates; the magnet lifts the gate under it. Purely
+  time-based: 21.7 s between gates, 12.5 s from home to gate 1, `delay()` throughout. `reset()`
+  drives backwards for one gate-width and declares position 0 — from gate 5 that is wrong by about
+  80 s (the threadless start of the screw is the real home; the cart parks there only if driven
+  back far enough). Logs to a `Screen*` unconditionally.
 - `lib/Screen` — one wrapper over the SensorKit OLED (u8x8) and a 16x2 I2C LCD at 0x27.
 - `lib/Network` — WiFiS3 connect and a blocking HTTP GET `?potnr=…&k=v` to a PHP page that no
   longer matters. Leaks the socket and spins forever on a lost connection.
@@ -45,7 +47,8 @@ In the plan, under the project "Board that reports and waters":
    a WiFi drop, a router reboot and 48 hours unattended.
 2. **Pump on command** — execute one bounded water command from the backend's response; strip
    the test-at-boot; every long delay becomes a watchdog-fed bounded wait.
-3. **Manifold that knows where it is** — homing (hard stop or a microswitch), 50-cycle endurance.
+3. **Manifold that knows where it is** — a hall sensor counting screw revolutions plus a home
+   hall per manifold, 50-cycle endurance.
 4. **Don't flood the flat** — float switch on a sense pin and in the driver circuit, refuse when
    position is unknown, status fields in every report.
 
