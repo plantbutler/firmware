@@ -60,7 +60,16 @@
    not a bound exactly when the meter -- the thing it stands in for -- has failed. Once 7b
    measures the rate, this clamps the cap to 2x the requested millilitres. It is ALSO the
    constant -DPB_DOSE_BY_TIME=1 uses; there is no second ml/s constant (§6). */
-#define PB_ML_PER_S_MEASURED     0     /* 7b fills this in; 0 == clamp disabled, status says so */
+/* -D-overridable, same reason and same shape as PB_PULSES_PER_GATE below: [env:native_measured]
+   defines this at 30 on the command line to compile the measured-clamp arm. Found missing this
+   guard while bringing that environment up for task 17 -- without it, this unconditional #define
+   silently WINS over the earlier command-line -D (a same-value-required macro redefinition, and
+   GCC's tie-break rule is "the later definition in translation order", which is this header's, not
+   the command line's): every native_measured run before this fix built with the clamp compiled
+   OUT, so PB_ML_PER_S_MEASURED > 0 was never actually exercised by any test in this tree, silently. */
+#ifndef PB_ML_PER_S_MEASURED
+#  define PB_ML_PER_S_MEASURED   0     /* 7b fills this in; 0 == clamp disabled, status says so */
+#endif
 #define PB_CAP_SLACK_NUM         2
 #define PB_CAP_SLACK_DEN         1
 /* Delivered-vs-elapsed plausibility on the DOSE_OK path (§2.8): a dose that reaches its

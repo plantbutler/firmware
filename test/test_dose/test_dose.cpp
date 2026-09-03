@@ -987,6 +987,192 @@ void test_pump_on_time_never_exceeds_the_cap(void) {
       "D6 was asserted for longer than cap_ms");
 }
 
+/* §6: divide-first truncates the calibration to whole pulses per millilitre. Runs at the
+   cal range's floor, a legal-but-ugly value, the nominal default and the ceiling, and
+   checks dose_last_pulses() against the MULTIPLY-FIRST arithmetic within one pulse -- the
+   loop's own granularity, since at most one flow edge lands per 1 ms tick (the fake's
+   pulse period at 85 ml/s is ~2 ms, well over the 1 ms step).
+
+   ml is 150, not the rig ceiling's 250: under native_measured the cap is ALSO clamped to
+   2x the requested water (ml * 1000 / PB_ML_PER_S_MEASURED * 2), and at cfg = 20000 (the
+   ceiling) target = 3000 pulses takes ~9012 ms of simulated flow -- inside the 150 ml
+   clamp's 10000 ms bound, but NOT inside 250 ml's would-be 16666 ms/2=... the smaller ml
+   was chosen so one dose_req_t works in all three native environments without a second,
+   per-environment version of this case. */
+void test_target_pulses_match_the_calibration_within_one_pulse(void) {
+  const uint16_t cfgs[] = { 1000u, 1999u, 5880u, 20000u };   /* floor, ugly, nominal, ceiling */
+  for (size_t i = 0; i < sizeof cfgs / sizeof cfgs[0]; ++i) {
+    pb_test_setup();
+    pb_advance(PB_BOOT_GAP_MS + 1u);
+    pulses_begin();
+    TEST_ASSERT_TRUE(cfg_pulses_per_l_set(cfgs[i]));
+    sim_set_float(true);
+    sim_set_flow_ml_s(85u);
+    dose_req_t q = {0};
+    q.ml = 150u; q.cap_ms = PB_DOSE_CAP_MS_MAX; q.long_prime = true;
+    dose_result_t r = dose_run(&q);
+    TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, r,
+        "the dose must reach its pulse target, not its cap, at every calibration");
+    uint32_t want = (uint32_t)q.ml * (uint32_t)cfgs[i] / 1000u;   /* MULTIPLY FIRST */
+    uint32_t got  = dose_last_pulses();
+    TEST_ASSERT_TRUE_MESSAGE(got >= want && got <= want + 1u,
+        "delivered pulses must be within one pulse of ml * cfg / 1000");
+  }
+  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
+}
+
+/* Every bound in dose_run() is computed as an unsigned difference, and this is the case
+   that proves it rather than assumes it: the cap must straddle the millis() wrap or the
+   case is vacuous. 0xFFFFF000 is 4095 ms below UINT32_MAX, so a cap of 1000-2000 ms (the
+   pattern every other case in this file uses to dodge task 18's prime rule) would finish
+   BEFORE the wrap. long_prime with a 6000 ms cap wraps ~4095 ms in and still has to land
+   on the far side of it.
+
+   dose_last_ms() reads cap_ms + 1, not cap_ms, and that is dose_run()'s own arithmetic, not
+   a fuzz margin this case invented: the loop's break condition (`el >= cap_ms`) fires with
+   the loop's OWN `el` at exactly cap_ms, but dose_end_ml_() is not handed that value -- it
+   is handed `g_last_end_ms - t0`, and g_last_end_ms comes from a FRESH `hal_millis()` call
+   made after the break, for the end-of-dose bookkeeping. That call advances the fake's
+   clock by its own one more millisecond before it reads it back, exactly like every other
+   hal_millis() call in this file's contract. No earlier case in this file catches it:
+   every other cap-driven case checks dose_result_t or a loose (+20 ms) bound on
+   sim_pump_on_ms(), never dose_last_ms() itself. This is the ONLY case exact enough to
+   surface it, discovered by running it rather than by reading the design doc's prose
+   ("asserts the dose still ends at cap_ms"), which does not mention the extra tick.
+
+   This case is registered LAST in main(), after every other case in this file: the wrap
+   it engineers lands g_last_end_ms at a SMALL absolute value (the whole point), which would
+   otherwise poison the cooldown rung's "g_last_end_ms always stays comfortably below THIS
+   case's own post-boot-gap clock, so the unsigned difference wraps huge" convention every
+   later case in the file relies on -- found by running the suite, not by inspection. */
+void test_dose_cap_holds_across_a_millis_rollover(void) {
+  pb_test_setup();
+  sim_set_clock_ms(0xFFFFF000u);
+  pulses_begin();                                 /* rebase the tumbling window at the jump */
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);                           /* the CAP, not the meter, must end this */
+  dose_req_t q = {0};
+  q.by_time = true; q.cap_ms = 6000u; q.long_prime = true;
+  dose_result_t r = dose_run(&q);
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, r, "the cap must still fire across the wrap");
+  TEST_ASSERT_EQUAL_UINT32(6000u + 1u, dose_last_ms());
+}
+
+/* Bring-up 4a, 5a and 5b all run BEFORE the cart is calibrated, so a console `pump` that
+   demanded a known position would make every one of them unrunnable. need_pos = false must
+   never reach either position rung, whatever cart_pos_known() says. */
+void test_console_pump_does_not_require_a_known_position(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  (void)cart_begin();                              /* position UNKNOWN, and stays that way */
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);
+  TEST_ASSERT_FALSE(cart_pos_known());
+  dose_req_t q = {0};
+  q.by_time = true; q.cap_ms = 1000u; q.need_pos = false;   /* console pump: no position needed */
+  dose_result_t r = dose_run(&q);
+  TEST_ASSERT_FALSE_MESSAGE(cart_pos_known(),
+      "the dose must not have touched cart position at all");
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, r,
+      "need_pos=false must never refuse DOSE_REFUSED_POS regardless of cart state");
+}
+
+/* §2.8, §15.3. At task 17, `pump` is not yet a console command (task 20 adds it), so a
+   buffered `pump 60000` would reach `? unknown; type help` and this case would pass whether
+   or not the bytes were discarded -- it proves nothing. `status` is dispatched today, so
+   its ABSENCE from the console's output after the dose is what proves the discard: bytes
+   typed while the console looked frozen sit in the fake's raw UART ring, are consumed by
+   cli_stop_requested() inside the loop (matching neither `stop` nor `dry on`) and
+   reconstructed into cli.cpp's OWN pushback buffer -- which dose_run()'s closing
+   cli_stop_clear() throws away, together with hal_serial_drain()'s discard of the ring
+   itself. Carry 1: drain alone would leave the reconstructed pushback for cli_poll() to
+   replay after the dose; clear alone would leave raw bytes still in the ring to fall
+   through the fallback read and be dispatched. Only both together discard it. */
+void test_bytes_buffered_during_a_dose_are_discarded_not_executed(void) {
+  char tx[512];
+
+  /* Half 1, proving hal_serial_drain() alone is not enough to have caught this: a 1 ms cap
+     means the loop's `el >= cap_ms` fires on its FIRST iteration -- t0 is captured one
+     hal_millis() call before the first `now` read inside the loop, so el is already 1 by
+     then -- which is ABOVE the cli_stop_requested() check in the loop body, so that check
+     is never reached and "status\n" sits UNREAD in the fake's raw UART ring for the whole
+     dose. Only hal_serial_drain()'s discard of the ring can clear it; cli_stop_clear() has
+     nothing to do here, because cli.cpp's own pushback buffer was never touched. */
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);
+  sim_serial_rx("status\n");
+  dose_req_t short_q = {0}; short_q.by_time = true; short_q.cap_ms = 1u;
+  (void)dose_run(&short_q);
+  (void)sim_serial_tx(tx, sizeof tx);     /* drain whatever the dose itself may have printed */
+  cli_poll();
+  size_t n = sim_serial_tx(tx, sizeof tx);
+  TEST_ASSERT_TRUE_MESSAGE(n == 0u || strstr(tx, "granted=") == NULL,
+      "bytes never reached by cli_stop_requested() during a very short dose must still be "
+      "discarded, by hal_serial_drain()");
+
+  /* Half 2, proving cli_stop_clear() alone is not enough either: a longer cap lets the
+     loop's OWN cli_stop_requested() call read "status\n" from the raw ring (it matches
+     neither `stop` nor `dry on`) and reconstruct it, byte for byte, into cli.cpp's own
+     pushback buffer -- a SEPARATE buffer hal_serial_drain() cannot see, because it only
+     ever touches the raw ring. Only cli_stop_clear()'s own discard of that pushback stops
+     read_console_() from replaying it into cli_poll() once the dose ends. */
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);
+  sim_serial_rx("status\n");             /* impatience typed while the console looks frozen */
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  (void)dose_run(&q);
+  (void)sim_serial_tx(tx, sizeof tx);     /* drain whatever the dose itself may have printed */
+  cli_poll();                             /* the buffered "status" must NOT reach cli_dispatch() */
+  n = sim_serial_tx(tx, sizeof tx);
+  TEST_ASSERT_TRUE_MESSAGE(n == 0u || strstr(tx, "granted=") == NULL,
+      "the matcher's reconstructed pushback must not be replayed into cli_poll() after the "
+      "dose, by cli_stop_clear()");
+  TEST_ASSERT_FALSE(sim_pump_is_on());
+}
+
+/* The measured clamp half of §7's two-arm cap: `test_dose_cap_is_clamped_to_sixty_seconds`
+   (the unconditional 60 s clamp) needs a meter that stays live for the WHOLE dose --
+   task 18's sim_set_flow_burst_pulses() injector, which does not exist yet -- and reaching
+   60 s any other way either finishes on task 18's not-yet-written prime rule (~3001 ms) or,
+   once task 19's latch lands, satisfies every one of §2.7's five conditions and poisons
+   every later case in the file with a persistent .noinit contra latch. That case is task
+   18's. This one only needs PB_ML_PER_S_MEASURED > 0, which native_measured alone defines,
+   so the other arm just proves it is compiled OUT. */
+void test_cap_is_clamped_to_twice_the_requested_millilitres(void) {
+#if PB_ML_PER_S_MEASURED > 0
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);                  /* nothing must arrive: the CLAMP ends this dose */
+  dose_req_t q = {0};
+  q.ml = 200u; q.cap_ms = PB_DOSE_CAP_MS_MAX; q.long_prime = true;
+  dose_result_t r = dose_run(&q);
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, r,
+      "the measured clamp, not the 60 s/20 s ceiling above it, must end this dose");
+  uint32_t want = (uint32_t)q.ml * 1000u / (uint32_t)PB_ML_PER_S_MEASURED
+                  * PB_CAP_SLACK_NUM / PB_CAP_SLACK_DEN;
+  TEST_ASSERT_EQUAL_UINT32(13332u, want);            /* derived, then checked against itself */
+  /* +1: dose_last_ms() is g_last_end_ms - t0, and g_last_end_ms is a FRESH hal_millis()
+     call made after the loop breaks, one tick past the loop's own last `el` -- see
+     test_dose_cap_holds_across_a_millis_rollover's comment for the full derivation. This
+     case is what first caught it FOR REAL: PB_ML_PER_S_MEASURED was silently 0 in every
+     native_measured run before include/config.h's own #ifndef fix landed alongside this
+     test (found here), so this exact arithmetic had never actually run before. */
+  TEST_ASSERT_EQUAL_UINT32(want + 1u, dose_last_ms());
+#else
+  TEST_IGNORE_MESSAGE("PB_ML_PER_S_MEASURED == 0: the measured cap clamp is compiled out; "
+                       "native_measured runs this case");
+#endif
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -1041,5 +1227,13 @@ int main(void) {
   RUN_TEST(test_pump_is_off_on_every_exit_path);
   RUN_TEST(test_the_ladder_reports_the_more_specific_reason);
   RUN_TEST(test_refusal_reports_zero_millilitres_not_the_previous_dose);
+  RUN_TEST(test_target_pulses_match_the_calibration_within_one_pulse);
+  RUN_TEST(test_console_pump_does_not_require_a_known_position);
+  RUN_TEST(test_bytes_buffered_during_a_dose_are_discarded_not_executed);
+  RUN_TEST(test_cap_is_clamped_to_twice_the_requested_millilitres);
+  /* LAST: it deliberately leaves g_last_end_ms at a small wrapped value, which would
+     otherwise poison every later case's cooldown-avoidance arithmetic (see its own
+     comment). */
+  RUN_TEST(test_dose_cap_holds_across_a_millis_rollover);
   return UNITY_END();
 }
