@@ -5,6 +5,7 @@
 #include "../support/harness.h"
 #include "config.h"
 #include "noinit.h"
+#include "safety.h"
 
 void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
@@ -119,6 +120,49 @@ static void test_wdt_alive_is_true_on_a_counter_that_moves_at_the_real_2929_hz(v
   TEST_ASSERT_TRUE(hal_wdt_last_delta() <= 130u);
 }
 
+/* §2.4: idle ACTIVELY re-asserts OFF, every pass, using the whole-word form of §2.1 —
+   so the re-assert repairs a stray pinMode on D6 as well as a stray level. Then, and
+   only then, the dog is fed. */
+static void test_idle_safety_tick_rewrites_the_off_level(void) {
+  sim_events_clear();
+  safety_tick();
+  const sim_ev_t *ev; size_t n = sim_events(&ev);
+  TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)n);
+  TEST_ASSERT_EQUAL_INT(SIM_EV_PUMP_WRITE, (int)ev[0].kind);
+  TEST_ASSERT_TRUE(ev[0].arg & SIM_PFS_DIR_OUT);      /* direction restated */
+  TEST_ASSERT_FALSE(ev[0].arg & SIM_PFS_LEVEL_HI);    /* at the OFF level */
+  TEST_ASSERT_EQUAL_INT(SIM_EV_WDT_FEED, (int)ev[1].kind);   /* and the feed comes SECOND */
+
+  /* mid-dose the pump write is skipped — but the feed is not, which is what makes a
+     60 s dose legal under a 5592 ms window (§3). */
+  safety_set_dosing(true);
+  sim_events_clear();
+  safety_tick();
+  n = sim_events(&ev);
+  TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)n);
+  TEST_ASSERT_EQUAL_INT(SIM_EV_WDT_FEED, (int)ev[0].kind);
+  safety_set_dosing(false);
+}
+
+static void test_safety_wait_ms_feeds_on_every_iteration(void) {
+  sim_events_clear();
+  uint32_t t0 = hal_millis();
+  safety_wait_ms(100);
+  uint32_t t1 = hal_millis();
+  TEST_ASSERT_TRUE(t1 - t0 >= 100u);
+
+  const sim_ev_t *ev; size_t n = sim_events(&ev);
+  uint32_t feeds = 0, prev = 0;
+  bool have_prev = false;
+  for (size_t i = 0; i < n; ++i) {
+    if (ev[i].kind != SIM_EV_WDT_FEED) continue;
+    if (have_prev) TEST_ASSERT_TRUE(ev[i].at_ms - prev <= 1u);   /* no gap wider than a tick */
+    prev = ev[i].at_ms; have_prev = true; feeds++;
+  }
+  /* the fake advances 1 ms per hal_millis() call, so a 100 ms wait is 99 iterations */
+  TEST_ASSERT_TRUE(feeds >= 99u);
+}
+
 static void test_a_cold_boot_zeroes_the_noinit_struct(void) {
   g_nv.dry_latched = true; g_nv.contra_latched = true; g_nv.cmd_high_water = 42u;
   noinit_commit();
@@ -207,6 +251,8 @@ int main(void) {
   RUN_TEST(test_wdt_alive_is_false_only_when_the_counter_is_frozen);
   RUN_TEST(test_wdt_alive_does_not_feed_inside_its_probe_window);
   RUN_TEST(test_wdt_alive_is_true_on_a_counter_that_moves_at_the_real_2929_hz);
+  RUN_TEST(test_idle_safety_tick_rewrites_the_off_level);
+  RUN_TEST(test_safety_wait_ms_feeds_on_every_iteration);
   RUN_TEST(test_a_cold_boot_zeroes_the_noinit_struct);
   RUN_TEST(test_a_bad_checksum_reads_as_a_cold_boot);
   RUN_TEST(test_a_warm_boot_restores_the_latches_and_the_high_water_mark);
