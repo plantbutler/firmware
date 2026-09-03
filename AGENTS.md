@@ -49,8 +49,16 @@ In the plan, under the project "Board that reports and waters":
    the test-at-boot; every long delay becomes a watchdog-fed bounded wait.
 3. **Manifold that knows where it is** — a hall sensor counting screw revolutions plus a home
    hall per manifold, 50-cycle endurance.
-4. **Don't flood the flat** — float switch on a sense pin and in the driver circuit, refuse when
-   position is unknown, status fields in every report.
+4. **Don't flood the flat** — put the hardware gate back between the pump pin, the float and the
+   relay's input; refuse when position is unknown; status fields in every report.
+
+The bench wiring is drawn and generated in `cad/wiring` (pin map, what switches the pump, power,
+bring-up order). Two things there bind this code from cycle 2 on. The pump is switched by a relay
+module, so nothing in hardware ANDs "firmware says pump" with "the tank has water": the IWDT, a
+hard maximum run time in the same code path that asserts the pump pin, and a no-flow abort from
+the meter are mandatory, not nice to have. And the bench uses A4/A5 for I2C (the expander that
+carries the mux select lines and the home hall), so cycle 1's "A4 becomes channel 5" holds only
+until the mux is wired; after that the five channels arrive through the mux on A0.
 
 The board reports `(controller, channel)` raw counts and accepts a valve index; it never knows
 what a pot or a plant is. The backend decides when to water; the firmware only enforces the caps.
