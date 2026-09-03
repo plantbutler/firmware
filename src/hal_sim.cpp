@@ -17,6 +17,10 @@
 #define SIM_PIN_SDA  18
 #define SIM_PIN_SCL  19
 #define SIM_WDT_RELOAD 16384u
+/* The PCF8575's P4 bit, mirrored from sensors.cpp's own EXP_HOME_BIT (sensors.cpp is the
+   only file allowed to give the wiring meaning; this is the fake modelling what the pin
+   physically does, not a second source of truth for what it means). */
+#define SIM_EXP_HOME_BIT (1u << 4)
 
 /* ---- clock ---- */
 static uint32_t g_us, g_ms;
@@ -48,6 +52,16 @@ static uint8_t  g_mux_sel;
 static bool     g_adc_settled;
 static uint16_t g_adc_prev;
 static uint16_t g_servo_us = 1500u;        /* 1500 == stopped; task 6 drives the screw off it */
+static uint32_t g_servo_stops;             /* count of writes of 1500 (task 14) */
+
+/* ---- the screw + home region model (task 14). g_screw_pos is the fake's own notion of
+   the cart's PHYSICAL position, in pulses -- separate from pulses.cpp's g_screw, which is
+   a directionless total of accepted edges since boot, exactly like the real hall sensor.
+   Saturates at 0 rather than going negative: the threadless start of the screw is a hard
+   stop the fake gives itself, for the same reason a physical screw has one. ---- */
+static uint32_t g_screw_pulse_ms;          /* 0 == the screw does not turn at all */
+static uint32_t g_home_lo, g_home_hi;      /* sim_reset() sets [0, 40] */
+static uint32_t g_screw_pos;
 
 /* ---- serial ---- */
 static char   g_rx[256]; static size_t g_rx_len, g_rx_pos;
@@ -95,9 +109,29 @@ static uint32_t sim_flow_hz_(uint32_t now_ms) {
   return 0u;
 }
 
+/* Task 6 step 6's placeholder returned a flat 20 Hz whenever the servo was off its stop
+   point. This is task 14's real model: a period of sim_set_screw_pulse_ms(), converted to
+   Hz for emit_(). 0 (the default) means the screw does not turn -- there is no calibrated
+   rate to fall back on, and a silent flat rate would give the screw two disagreeing
+   speeds if a case forgot to set one. */
 static uint32_t sim_screw_hz_(void) {
-  if (g_stall || g_servo_us == 1500u || g_servo_us == 0u) return 0u;
-  return 20u;                               /* task 14 owns the bench's real screw rate */
+  if (g_stall || g_servo_us == 1500u || g_servo_us == 0u || g_screw_pulse_ms == 0u) return 0u;
+  return 1000u / g_screw_pulse_ms;
+}
+
+/* true only while the physical position sits inside the home REGION -- a point would
+   never be found by a bounded traverse landing one pulse either side of it. */
+static bool screw_home_(void) { return g_screw_pos >= g_home_lo && g_screw_pos <= g_home_hi; }
+
+/* The ISR wrapper emit_() drives for the screw: counts the accepted edge exactly like the
+   real hall (pulses_isr_screw(), directionless), raises SIM_EV_SCREW, and ALSO walks the
+   fake's own physical position in the direction the servo was last commanded -- which is
+   what makes sim_set_home_region() and sensors_home_hall() agree with each other. */
+static void screw_isr_(void) {
+  pulses_isr_screw();
+  ev_(SIM_EV_SCREW, PIN_HALL_SCREW, g_servo_us);
+  if (g_servo_us > 1500u)      { g_screw_pos++; }
+  else if (g_servo_us < 1500u) { if (g_screw_pos > 0u) g_screw_pos--; }
 }
 
 /* An edge lands at its OWN microsecond inside the step, so the ISR's gap reject measures
@@ -121,7 +155,7 @@ static void advance_1ms_(void) {
   const uint32_t target = g_us + 1000u;
   tick_models_(1000u);
   emit_(sim_flow_hz_(target / 1000u), &g_next_flow_us,  target, pulses_isr_flow);
-  emit_(sim_screw_hz_(),              &g_next_screw_us, target, pulses_isr_screw);
+  emit_(sim_screw_hz_(),              &g_next_screw_us, target, screw_isr_);
   g_us = target;
   g_ms = g_us / 1000u;
 }
@@ -130,6 +164,17 @@ void     sim_advance(uint32_t ms) { for (uint32_t i = 0; i < ms; ++i) advance_1m
 uint32_t hal_millis(void) { advance_1ms_(); return g_ms; }   /* PB_SIM_TICK_US == 1000 */
 uint32_t hal_micros(void) { return g_us; }                   /* reads; never advances */
 void     hal_delay_us(uint16_t us) { tick_models_(us); g_us += us; g_ms = g_us / 1000u; }
+
+/* task 14 step 1's injector: not sim_advance()/hal_millis() by another name -- it jumps
+   the clock to an arbitrary value without walking through every millisecond between here
+   and there, which is the only way a host test can start near a rollover in bounded time.
+   emit_()'s own `if (*next_us < g_us) *next_us = g_us;` guard is what keeps the next
+   advance_1ms_() from trying to "catch up" the edge schedule across the jump. */
+void sim_set_clock_ms(uint32_t ms) {
+  g_us = ms * 1000u;
+  g_ms = ms;
+  tick_models_(0u);
+}
 
 /* ---- D6. ONE event per write, carrying the same whole word the board writes (§2.1).
    Polarity is the board's business and lives only in hal_uno.cpp; the fake models
@@ -185,7 +230,18 @@ bool hal_i2c_write16(uint8_t addr, uint16_t bits) {
 bool hal_i2c_read16(uint8_t addr, uint16_t *bits) {
   ev_(SIM_EV_I2C_READ, addr, 0);
   if (g_i2c_fail) return false;
-  *bits = g_exp_port;
+  uint16_t v = g_exp_port;
+  /* P4 is quasi-bidirectional (§2.10): writing it HIGH (EXP_INPUTS_HI, always) lets the
+     external circuit drive what a READ sees. sensors_select()/sensors_home_hall() both
+     write the select bits and then read them straight back, so the fake has to override
+     bit 4 on every expander read with the PHYSICAL home state rather than echo back
+     whatever a select last wrote there -- otherwise "home" would just be "P4 was written
+     HIGH", which is true on every select and would never terminate a traverse. */
+  if (addr == I2C_ADDR_EXPANDER) {
+    if (screw_home_()) v &= (uint16_t)~SIM_EXP_HOME_BIT;
+    else                v |= (uint16_t)SIM_EXP_HOME_BIT;
+  }
+  *bits = v;
   return true;
 }
 bool hal_i2c_probe(uint8_t addr) {
@@ -205,11 +261,21 @@ bool hal_i2c_recover(void) {
 void sim_set_i2c_fail(bool fail)  { g_i2c_fail = fail; }
 void sim_set_mux_stuck(bool stuck) { g_mux_stuck = stuck; }
 
-void hal_servo_us(uint16_t us) { g_servo_us = us; ev_(SIM_EV_SERVO, PIN_SERVO, us); }
+void hal_servo_us(uint16_t us) {
+  g_servo_us = us;
+  if (us == 1500u) g_servo_stops++;
+  ev_(SIM_EV_SERVO, PIN_SERVO, us);
+}
 void sim_set_stall(bool on) { g_stall = on; }
 void sim_set_leak(bool on)  { g_leak = on; }
 void sim_set_flow_ml_s(uint16_t ml_s) { g_flow_ml_s = ml_s; }
 void sim_flow_storm(uint32_t hz)      { g_storm_hz = hz; }
+
+uint16_t sim_servo_us(void)   { return g_servo_us; }
+uint32_t sim_servo_stops(void) { return g_servo_stops; }
+void sim_set_screw_pulse_ms(uint32_t ms)          { g_screw_pulse_ms = ms; }
+void sim_set_home_region(uint32_t lo, uint32_t hi) { g_home_lo = lo; g_home_hi = hi; }
+void sim_set_cart_at(uint32_t pulses)              { g_screw_pos = pulses; }
 
 /* ---- the watchdog ---- */
 bool     hal_wdt_start(void) { g_wdt_running = true; g_wdt_counter = SIM_WDT_RELOAD; g_wdt_frac = 0; return true; }
@@ -302,6 +368,8 @@ void sim_reset(bool warm) {
   g_rx_len = g_rx_pos = 0; g_tx_len = 0;
   g_ev_n = 0;
   g_next_flow_us = g_next_screw_us = 0;
+  g_servo_stops = 0;
+  g_screw_pulse_ms = 0; g_home_lo = 0; g_home_hi = 40; g_screw_pos = 0;
   if (!warm) memset(&g_nv, 0, sizeof g_nv);   /* a power cycle clears SRAM (§2.3) */
   noinit_begin();                             /* what setup() does, in the same order */
   hal_begin();

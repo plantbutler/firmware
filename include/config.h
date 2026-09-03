@@ -109,6 +109,17 @@
 #define PB_SERVO_CAP_MS      10000
 #define PB_SCREW_MIN_GAP_US   2000
 
+/* NOT FROM THE SPEC. §7 gives the cart's cap, stall window and servo cap but no drive
+   microseconds, and a continuous-rotation servo needs one value each side of the 1500 us
+   stop point. 1600/1400 is a deliberate slow crawl: if the sign is wrong, bring-up 6 sees
+   a slow wrong direction rather than a fast one. BRING-UP 6 COMMITS THE REAL PAIR, in the
+   same commit as PB_PULSES_PER_GATE. If forward turns out to be the other way, SWAP THESE
+   TWO VALUES -- do not add a sign flip inside cart.cpp, or the direction of travel stops
+   being readable from one place. */
+#define PB_SERVO_FWD_US       1600   /* toward gate 1..5 */
+#define PB_SERVO_REV_US       1400   /* toward home */
+#define PB_SERVO_STOP_US      1500   /* hal_servo_us(1500) == stop (hal.h) */
+
 /* ---- the float ---- */
 #define PB_FLOAT_OK_SAMPLES      3
 #define PB_FLOAT_SAMPLE_MS      20

@@ -41,6 +41,23 @@ bool     sim_pump_is_on(void);
 uint32_t sim_pump_on_ms(void);             /* cumulative ms with D6 asserted */
 uint32_t sim_feeds(void);
 
+/* The screw: one D3 pulse every sim_set_screw_pulse_ms() of commanded rotation, counted
+   up or down according to the servo microseconds last written through seam 1. The home
+   REGION, not a point: the hall reads asserted anywhere in [lo, hi] pulses, which is what
+   a magnet over a hall actually does and what makes "drive until home" terminate. */
+void     sim_set_screw_pulse_ms(uint32_t ms);      /* 0 == the screw does not turn at all */
+void     sim_set_home_region(uint32_t lo, uint32_t hi);
+void     sim_set_cart_at(uint32_t pulses);         /* place the cart without moving it */
+uint16_t sim_servo_us(void);                       /* what cart.cpp last commanded */
+uint32_t sim_servo_stops(void);                    /* count of writes of 1500 */
+
+/* The clock injector. It lands HERE, not in task 22, because task 14 step 9's rollover
+   case is its first consumer and a case that has to reach eight tasks forward for its
+   fixture is a case that gets written twice. Body: g_us = ms * 1000u; g_ms = ms; one
+   bounded tick_models_() call; nothing else. Task 22 step 13 adds sim_set_heap_break()
+   ONLY. */
+void     sim_set_clock_ms(uint32_t ms);
+
 typedef enum {
   SIM_EV_PIN_CFG,      /* a whole-word direction+level write: hal_boot_pump_off, hal_pin_write */
   SIM_EV_PIN_MODE,
@@ -49,7 +66,8 @@ typedef enum {
   SIM_EV_I2C_WRITE,
   SIM_EV_I2C_READ,
   SIM_EV_SERVO,
-  SIM_EV_ADC
+  SIM_EV_ADC,
+  SIM_EV_SCREW         /* ADDED HERE: one per accepted screw pulse (task 14) */
 } sim_ev_kind_t;
 
 typedef struct {
