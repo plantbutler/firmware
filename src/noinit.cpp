@@ -4,7 +4,7 @@
 
 /* On the board the struct must land in fsp.ld's uncleared NOLOAD section. On the host
    there is no such section and an ordinary definition is the whole model — which is why
-   survival across a REAL warm reset is a measurement bring-up 7c owes, not a claim this
+   survival across a REAL warm reset is a measurement bring-up 7c' owes, not a claim this
    file makes. */
 #ifdef PB_NATIVE
 pb_noinit_t g_nv;

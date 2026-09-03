@@ -1,4 +1,4 @@
-/* include/noinit.h — the ~44 bytes that survive a warm reset. Spec §2.3.
+/* include/noinit.h — the 24 bytes that survive a warm reset. Spec §2.3.
    SRAM survives a watchdog or RESET-button reset; only the startup code clears .bss, and
    fsp.ld provides a .noinit NOLOAD section (:222-231) that it does not clear. */
 #pragma once

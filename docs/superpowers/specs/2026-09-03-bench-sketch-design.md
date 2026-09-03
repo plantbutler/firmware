@@ -487,7 +487,8 @@ module. `status` prints the compiled level so bring-up 4a can confirm it.
 ### 2.3 The `.noinit` block — what survives a warm reset
 
 SRAM survives a watchdog or RESET-button reset; only the startup code clears `.bss`, and `fsp.ld`
-provides a `.noinit` NOLOAD section (`:222-231`) that it does not clear. One struct, ~44 bytes, with
+provides a `.noinit` NOLOAD section (`:222-231`) that it does not clear. One struct, **24 bytes**
+(measured with `sizeof`, not estimated — the figure was ~44 here until task 4 was built), with
 a magic word **and a checksum**:
 
 ```c
