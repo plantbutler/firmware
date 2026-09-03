@@ -32,6 +32,18 @@ void     sim_set_float(bool ok);           /* D5; consumed by the debounce, task
 void     sim_set_float_pattern(const char *pattern);
 void     sim_set_flow_ml_s(uint16_t ml_s); /* the pump's delivery rate; task 6 */
 void     sim_flow_storm(uint32_t hz);      /* an edge storm on D2; task 6 */
+/* A storm that begins on the ON write, not before it. The pre-dose PB_FLOW_IDLE_MAX_HZ
+   guard cannot see this one, and it is the scenario that matters: a floating D2 running
+   beside the 12 V pump leg starts counting garbage WHEN THE PUMP DOES. */
+void     sim_flow_storm_at_pump_on(uint32_t hz);
+/* Deliver exactly n flow pulses immediately after the ON write, then nothing, ever. The
+   stall rule's fixture: a dose that flowed briefly and stopped (task 18 step 7). */
+void     sim_set_flow_burst_pulses(uint32_t n);
+/* Scheduled injectors, both measured from the next pump-on: apply the change when the
+   fake's clock reaches `ms` into the dose. Task 18 step 8's two mid-dose console cases use
+   the second; task 19 step 4 uses both, and must not add a second spelling of either. */
+void     sim_set_float_at_ms(uint32_t ms, bool ok);
+void     sim_serial_rx_at_ms(uint32_t ms, const char *s);
 void     sim_set_i2c_fail(bool fail);      /* every expander transfer fails; task 7 */
 void     sim_set_mux_stuck(bool stuck);    /* every channel returns the canary's value; task 7 */
 void     sim_set_stall(bool on);           /* the screw stops pulsing while driven; task 14 */

@@ -60,6 +60,16 @@ static size_t   g_float_pat_len;
 static size_t   g_float_pat_idx;
 static uint16_t g_flow_ml_s;
 static uint32_t g_storm_hz;
+/* The four pump-relative injectors (task 18 step 1). Each scheduled one is an (armed,
+   offset, payload) triple PLUS a separate live deadline, so that a second dose in the
+   same test re-schedules from ITS pump-on rather than from the first one's. */
+static bool     g_storm_on_armed; static uint32_t g_storm_on_hz;
+static uint32_t g_burst_left;                     /* flow pulses still owed */
+static bool     g_float_at_armed; static uint32_t g_float_at_off_ms; static bool g_float_at_ok;
+static bool     g_float_due;      static uint32_t g_float_due_us;
+static bool     g_rx_at_armed;    static uint32_t g_rx_at_off_ms;
+static char     g_rx_at_buf[64];
+static bool     g_rx_due;         static uint32_t g_rx_due_us;
 static bool     g_i2c_fail;
 static bool     g_mux_stuck;
 static bool     g_stall;
@@ -114,18 +124,42 @@ static uint32_t g_next_flow_us, g_next_screw_us;
 /* now_ms is the millisecond THIS step reaches by its end (g_ms + 1), not g_ms, which
    at the call site below is still last step's value: emit_() runs between tick_models_()
    and the g_us/g_ms assignment, so a read of the bare global here is one step STALE
-   against what hal_millis() is about to return to the caller. Gating on the stale value
-   pushed the first edge to elapsed 3001 ms against a 3000 ms prime deadline that dose_run()
-   (task 18) checks with `>=` at elapsed 3000 ms — a healthy meter aborted DOSE_ABORT_NOFLOW
-   one millisecond before its own first pulse. Gating on the step's END millisecond instead
-   lands the first edge by elapsed 3000 ms, at or before the deadline. (Task 14: this used
-   to read target / 1000u, which is g_us's business, not g_ms's -- see the note by g_ms's
-   declaration for why that stopped being safe once a clock jump could put g_ms somewhere
-   g_us's own arithmetic cannot reach.) */
+   against what hal_millis() is about to return to the caller. (Task 14's fix: gating on the
+   stale value pushed an edge one whole millisecond late against any deadline dose_run()
+   checks with `>=` -- see the note by g_ms's declaration for why `now_ms` is passed rather
+   than read here.)
+
+   Task 18: task 14's fix above made the fake's onset LAND ON TIME; it did not make the
+   onset REALISTIC. Until this task the model was a pure step function -- silent, then at
+   full rate the instant `now_ms - g_pump_on_at_ms` reached PB_PRIME_MS_DEFAULT (3000) --
+   and PB_PRIME_MS_DEFAULT is ALSO the exact instant dose_run()'s prime rule samples `got`
+   (`el >= prime_ms && got < PB_PRIME_MIN_PULSES`). Those two facts collided: the step fired
+   in the SAME millisecond the rule read it, so at most one pulse could ever be on the
+   counter when the rule checked, never PB_PRIME_MIN_PULSES (5) -- a healthy dose on the
+   untouched default window could not pass a correct rule, because the rig, not the rule,
+   was unrealistic. A fake "dead until the deadline and instantly at full rate after" was
+   never an honest stand-in for a YF-S401: the sensor's own paddle wheel responds within a
+   couple of pulses of water reaching it, but the WATER reaching it ramps -- the small pump
+   motor takes real, if short, time to spin up, and the water already standing in a WET
+   line (the ordinary case; a genuinely DRY line is what PB_PRIME_MS_DEFAULT budgets for
+   and is modelled here as g_flow_ml_s staying 0, not as a delayed full rate) accelerates
+   over that same short span. SIM_FLOW_ONSET_MS below models that spin-up as a linear ramp
+   from 0 to the steady rate, starting AT pump-on rather than waiting out the deadline: a
+   healthy wet-line dose now has pulses on the counter within tens of milliseconds, with
+   the whole PB_PRIME_MS_DEFAULT budget still free as margin, exactly as the real hardware
+   the prime rule is written against would leave it. A storm (g_storm_hz, including
+   sim_flow_storm_at_pump_on()) is deliberately NOT ramped: it models electrical noise on a
+   floating D2, which has no motor to spin up and starts at full rate the instant the pump
+   leg beside it is energised. */
+#define SIM_FLOW_ONSET_MS 150u
 static uint32_t sim_flow_hz_(uint32_t now_ms) {
   if (g_storm_hz) return g_storm_hz;
-  if (g_pump_on && (now_ms - g_pump_on_at_ms) >= (uint32_t)PB_PRIME_MS_DEFAULT && g_flow_ml_s)
-    return ((uint32_t)g_flow_ml_s * (uint32_t)PB_PULSES_PER_L_DEFAULT) / 1000u;
+  if (g_pump_on && g_flow_ml_s) {
+    uint32_t full_hz  = ((uint32_t)g_flow_ml_s * (uint32_t)PB_PULSES_PER_L_DEFAULT) / 1000u;
+    uint32_t since_on = now_ms - g_pump_on_at_ms;
+    if (since_on >= SIM_FLOW_ONSET_MS) return full_hz;
+    return (full_hz * since_on) / SIM_FLOW_ONSET_MS;   /* linear ramp, integer only */
+  }
   if (!g_pump_on && g_leak) return 1u;      /* a slow weep past a closed gate */
   return 0u;
 }
@@ -180,6 +214,16 @@ static void emit_(uint32_t hz, uint32_t *next_us, uint32_t target_us, void (*isr
   }
 }
 
+/* one edge per 1 ms step, at the step's own microsecond, so the ISR's gap reject accepts
+   every one of them. Only while the pump is on: a burst is what the meter saw, not what
+   the fake felt like emitting. */
+static void emit_burst_(uint32_t target_us) {
+  if (!g_pump_on || g_burst_left == 0u) return;
+  g_us = target_us;
+  --g_burst_left;
+  pulses_isr_flow();
+}
+
 /* One millisecond of rig time. Task 6 hangs the flow and screw edge emitters here,
    between tick_models_() and the final clock assignment, so an edge can land at its own
    microsecond inside the step. */
@@ -188,8 +232,12 @@ static void advance_1ms_(void) {
   tick_models_(1000u);
   emit_(sim_flow_hz_(g_ms + 1u),       &g_next_flow_us,  target, pulses_isr_flow);
   emit_(sim_screw_hz_(),              &g_next_screw_us, target, screw_isr_);
+  emit_burst_(target);
   g_us = target;
   g_ms = g_ms + 1u;   /* its OWN counter -- see the note by its declaration */
+  /* the two scheduled injectors, applied at the step that reaches their deadline */
+  if (g_float_due && g_us >= g_float_due_us) { g_float_due = false; g_float_ok = g_float_at_ok; }
+  if (g_rx_due    && g_us >= g_rx_due_us)    { g_rx_due    = false; sim_serial_rx(g_rx_at_buf); }
 }
 
 void     sim_advance(uint32_t ms) { for (uint32_t i = 0; i < ms; ++i) advance_1ms_(); }
@@ -232,7 +280,16 @@ void hal_boot_pump_off(void) {
 }
 void hal_pump_write(bool on) {
   ev_(SIM_EV_PUMP_WRITE, SIM_PUMP_PIN, SIM_PFS_DIR_OUT | (on ? SIM_PFS_LEVEL_HI : 0u));
-  if (on && !g_pump_on) g_pump_on_at_ms = g_ms;    /* task 6's prime delay runs from here */
+  if (on && !g_pump_on) {
+    g_pump_on_at_ms = g_ms;                       /* task 6's prime delay runs from here */
+    if (g_storm_on_armed) g_storm_hz = g_storm_on_hz;   /* the storm begins WITH the pump */
+    if (g_float_at_armed) { g_float_due = true; g_float_due_us = g_us + g_float_at_off_ms * 1000u; }
+    if (g_rx_at_armed)    { g_rx_due    = true; g_rx_due_us    = g_us + g_rx_at_off_ms * 1000u; }
+  }
+  if (!on && g_pump_on) {
+    if (g_storm_on_armed) g_storm_hz = 0u;        /* and ends with it, as the 12 V leg does */
+    g_burst_left = 0u;
+  }
   g_pump_on = on;
 }
 bool     hal_pump_level_on(void) { return true; }
@@ -333,6 +390,26 @@ void sim_set_leak(bool on)  { g_leak = on; }
 void sim_set_flow_ml_s(uint16_t ml_s) { g_flow_ml_s = ml_s; }
 void sim_flow_storm(uint32_t hz)      { g_storm_hz = hz; }
 
+void sim_flow_storm_at_pump_on(uint32_t hz) {
+  g_storm_on_armed = (hz != 0u);
+  g_storm_on_hz    = hz;
+}
+void sim_set_flow_burst_pulses(uint32_t n) { g_burst_left = n; }
+
+void sim_set_float_at_ms(uint32_t ms, bool ok) {
+  g_float_at_armed  = true;
+  g_float_at_off_ms = ms;
+  g_float_at_ok     = ok;
+}
+void sim_serial_rx_at_ms(uint32_t ms, const char *s) {
+  size_t n = strlen(s);
+  if (n >= sizeof g_rx_at_buf) n = sizeof g_rx_at_buf - 1u;
+  memcpy(g_rx_at_buf, s, n);
+  g_rx_at_buf[n]   = '\0';
+  g_rx_at_armed    = true;
+  g_rx_at_off_ms   = ms;
+}
+
 uint16_t sim_servo_us(void)   { return g_servo_us; }
 uint32_t sim_servo_stops(void) { return g_servo_stops; }
 void sim_set_screw_pulse_ms(uint32_t ms)          { g_screw_pulse_ms = ms; }
@@ -424,6 +501,9 @@ void sim_reset(bool warm) {
   g_wdt_running = false; g_wdt_counter = SIM_WDT_RELOAD; g_wdt_rate_hz = 2929;
   g_wdt_frac = 0; g_wdt_delta = 0; g_feeds = 0;
   g_float_ok = true; g_float_pat_len = 0; g_float_pat_idx = 0; g_flow_ml_s = 0; g_storm_hz = 0;
+  g_storm_on_armed = false; g_storm_on_hz = 0u; g_burst_left = 0u;
+  g_float_at_armed = false; g_float_due = false;
+  g_rx_at_armed    = false; g_rx_due    = false; g_rx_at_buf[0] = '\0';
   g_i2c_fail = false; g_mux_stuck = false; g_stall = false; g_leak = false;
   g_adc_settled = false; g_adc_prev = 0;
   memset(g_chan, 0, sizeof g_chan);
