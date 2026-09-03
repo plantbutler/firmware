@@ -136,8 +136,8 @@
    already past PB_WDT_GRANTED_MS on its own, and send/write4bits/expanderWrite are
    private: this floor cannot be lowered without forking the library.
 
-   OLED: drawGlyph() is the finer public call in place of the opaque drawString()/
-   clearDisplay(). It is NOT one Wire transaction: this OLED is
+   OLED: drawGlyph() is the finer public call in place of the opaque whole-string draw
+   and whole-panel clear calls. It is NOT one Wire transaction: this OLED is
    U8X8_SSD1306_128X64_NONAME_HW_I2C, which selects u8x8_cad_ssd13xx_FAST_i2c
    (U8x8lib.h:806-808), and tracing the DRAW_TILE case through that cad
    (u8x8_d_ssd1306_128x64_noname.c's SendCmd/SendCmd/SendArg/SendArg/SendData sequence)

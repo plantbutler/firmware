@@ -40,7 +40,7 @@ bool Screen::paint_ok_(uint32_t unit_start_ms) {
    (5x6 = 30 tx) + backlight()'s own expanderWrite() (1 tx) = 44 Wire transactions,
    ~44000 ms worst case. This is the mandatory HD44780 4-bit init sequence from the
    datasheet (LiquidCrystal_I2C.cpp:30-43's own comment cites it) -- nothing in it is
-   optional, so unlike clear()'s old Oled.clearDisplay() below, there is no bounded
+   optional, so unlike clear()'s old whole-panel-clear call below, there is no bounded
    alternative to swap in here.
 
    OLED -- Oled.initDisplay(): the SSD1306 init byte sequence
@@ -50,7 +50,7 @@ bool Screen::paint_ok_(uint32_t unit_start_ms) {
    on the order of 16 Wire transactions and ~16000 ms worst case (traced from the
    visible byte sequence; the generic dispatch wrapper that sends it was not chased
    further, so treat this as a lower bound, not a certified count the way the LCD's 44
-   and the old clearDisplay()'s 144 are). Also mandatory: the controller's own required
+   and the old whole-panel clear's 144 are). Also mandatory: the controller's own required
    power-up configuration.
 
    Both together: at least ~60000 ms of unguarded boot-time bus exposure, non-optional,
@@ -69,8 +69,8 @@ void Screen::begin() {
     Oled.initDisplay();
     Oled.setFlipMode(true);
     Oled.setFont(u8x8_font_chroma48medium8_r);
-    /* Oled.begin() would be initDisplay();clearDisplay();setPowerSave(0)
-       (U8x8lib.h:258-259) -- clearDisplay() is the SAME 144-transaction function
+    /* Oled.begin() would be initDisplay(); the whole-panel clear call; setPowerSave(0)
+       (U8x8lib.h:258-259) -- that whole-panel clear is the SAME 144-transaction function
        clear() below was rewritten specifically to stop calling at runtime. Decision:
        it is not worth it here either. It buys nothing over the bounded path clear()
        already provides (a blank screen), at 144 unguarded transactions clear() no
@@ -100,19 +100,21 @@ void Screen::begin() {
    unlike begin(), is called repeatedly across the run (task 10: on every UI state
    transition), so it gets the same per-unit budget guard. The OLED path clears by
    painting 16 blank glyphs per row through row() itself, reusing its already-bounded
-   per-glyph unit (see row()'s comment) -- NOT Oled.clearDisplay() or Oled.clearLine().
-   Both of those are far more expensive than they look: u8x8's SSD1306 DRAW_TILE handler
-   (u8x8_d_ssd1306_128x64_noname.c's U8X8_MSG_DISPLAY_DRAW_TILE case) issues 2 Wire
-   transactions for the column/page address (two SendCmd calls, the second of which
-   forces the fast I2C cad, u8x8_cad_ssd13xx_fast_i2c, to close and reopen the transfer;
-   two more SendArg bytes ride along on the open one) plus ONE MORE Wire transaction per
-   SendData call. clearLine() asks for 16 tile-columns in one DRAW_TILE call, so its
-   inner `do { SendData(...); } while(arg_int>0)` loop calls SendData 16 times -- one
-   fresh Wire transaction each, because u8x8_cad_ssd13xx_fast_i2c's SEND_DATA case always
-   routes through u8x8_i2c_data_transfer(), which opens and closes its own transfer
-   every time regardless of the "fast" merge. That is 2 + 16 = 18 Wire transactions for
-   ONE clearLine() call -- an 18000 ms worst case, and clearDisplay() runs that 8 times
-   (once per tile row, u8x8_display.c's u8x8_ClearDisplayWithTile()) for 144 total. */
+   per-glyph unit (see row()'s comment) -- NOT the OLED library's whole-panel or
+   per-row clear calls. Both of those are far more expensive than they look: u8x8's
+   SSD1306 DRAW_TILE handler (u8x8_d_ssd1306_128x64_noname.c's
+   U8X8_MSG_DISPLAY_DRAW_TILE case) issues 2 Wire transactions for the column/page
+   address (two SendCmd calls, the second of which forces the fast I2C cad,
+   u8x8_cad_ssd13xx_fast_i2c, to close and reopen the transfer; two more SendArg
+   bytes ride along on the open one) plus ONE MORE Wire transaction per SendData
+   call. The per-row clear call asks for 16 tile-columns in one DRAW_TILE call, so
+   its inner `do { SendData(...); } while(arg_int>0)` loop calls SendData 16 times
+   -- one fresh Wire transaction each, because u8x8_cad_ssd13xx_fast_i2c's
+   SEND_DATA case always routes through u8x8_i2c_data_transfer(), which opens and
+   closes its own transfer every time regardless of the "fast" merge. That is
+   2 + 16 = 18 Wire transactions for ONE such per-row clear call -- an 18000 ms
+   worst case, and the whole-panel clear runs that 8 times (once per tile row,
+   u8x8_display.c's u8x8_ClearDisplayWithTile()) for 144 total. */
 void Screen::clear() {
   if (!present_) return;
   if (type == ScreenType::Oled) {
@@ -142,10 +144,11 @@ void Screen::clear() {
    the NEXT one -- so the guarantee here is "at most one such unit, ever, per boot", not
    "never exceeds the grant". See config.h's citation for the full accounting.
 
-   OLED: the opaque drawString() (u8x8_8x8.c's u8x8_draw_string() calls u8x8_DrawGlyph()
-   once per character with no hook between them) is replaced by drawGlyph() per
-   character, called directly. Traced through the ACTUAL cad callback this OLED class
-   uses -- U8X8_SSD1306_128X64_NONAME_HW_I2C selects u8x8_cad_ssd13xx_FAST_i2c
+   OLED: the opaque whole-string draw call (u8x8_8x8.c's u8x8_draw_string() calls
+   u8x8_DrawGlyph() once per character with no hook between them) is replaced by
+   drawGlyph() per character, called directly. Traced through the ACTUAL cad callback
+   this OLED class uses -- U8X8_SSD1306_128X64_NONAME_HW_I2C selects
+   u8x8_cad_ssd13xx_FAST_i2c
    (U8x8lib.h:806-808), not the "classic" u8x8_cad_ssd13xx_i2c -- one drawGlyph() is
    3 Wire.endTransmission() calls: the DRAW_TILE handler's two SendCmd calls collapse to
    2 transactions (the fast cad merges a SendCmd immediately followed by SendArg/SendArg

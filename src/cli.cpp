@@ -183,9 +183,10 @@ void cli_print_status(void) {
 
   /* The citation is spelled out by section TITLE, not number: "2.5)" is a digit, a dot
      and a digit, which is exactly the shape test_cli.cpp's float-formatting guard scans
-     every printed line for (spec §12 item 1, "no %f/%g anywhere in this program") - a
-     numeric subsection here would make this line indistinguishable from a stray float
-     and fail the very check it exists to satisfy. */
+     every printed line for (spec §12 item 1's rule against floating-point format
+     specifiers anywhere in this program) - a numeric subsection here would make this
+     line indistinguishable from a stray float and fail the very check it exists to
+     satisfy. */
   /* hal_wdt_alive() and hal_wdt_last_delta() may NOT be passed inline as two arguments
      of the same call: C++ leaves function-argument evaluation order unspecified, and
      hal_wdt_alive() is destructive (it probes, then caches the delta hal_wdt_last_delta()
