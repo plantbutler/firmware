@@ -39,7 +39,10 @@ uint32_t hal_wdt_granted(void);            /* OUR computed grant, never the time
 uint32_t hal_wdt_counter(void);            /* the raw down-counter; the sim makes it settable */
 bool     hal_wdt_alive(void);              /* counter DECREASED across an UNFED window — §2.5 */
 uint32_t hal_wdt_last_delta(void);         /* what the last probe measured; rides out as ch209 */
-void     hal_wdt_feed(void);               /* ONE caller: safety_tick(). NOT called by the probe. */
+void     hal_wdt_feed(void);               /* ONE caller: safety_tick(). Not called from inside
+                                              hal_wdt_alive()'s probe measurement window — the
+                                              probe itself brackets that window with a feed on
+                                              either side (§2.5). */
 
 bool     hal_irq_armed(uint8_t pin);       /* IELSR scan + NVIC enable for the pin's ICU channel */
 bool     hal_irq_filtered(uint8_t pin);    /* IRQCR[ch] FLTEN; `status` prints icufilter= from it */
