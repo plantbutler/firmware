@@ -86,7 +86,7 @@ passes. **It has a visible price on the phone**, stated in §4.6: butler raises 
 | **`WDT.begin(wdt_cfg_t)` never sets `_timeout`** | so `getTimeout()` returns **0** under the config overload even when running | `WDT.cpp:32-46` vs `:59,153` — **corrects the design** |
 | `WDT.getCounter()` | `R_WDT_CounterGet`, exists; **this design's liveness probe** | `WDT.cpp:91-100` |
 | the WDT counter is a **down**-counter clocked at PCLKB/8192 | 24 MHz / 8192 = **2929.7 Hz**, i.e. ~2.93 counts/ms; a refresh reloads it to 16384 | `WDT.cpp:32-45` (`R_WDT_Refresh` inside `begin`), `bsp_clock_cfg.h:8,14` — **this is what makes `hal_wdt_alive()` measurable, and why the probe must not feed (§2.5)** |
-| `begin(uint32_t)` sets `stop_control = WDT_STOP_CONTROL_ENABLE` | "count will automatically stop when device enters sleep mode" | `WDT.cpp:67`, `r_wdt_api.h:115-116` |
+| `begin(uint32_t)` sets `stop_control = WDT_STOP_CONTROL_ENABLE` | "count will automatically stop when device enters sleep mode" | `WDT.cpp:67`, `r_wdt_api.h:113-114` |
 | `wdt_cfg_t` has **nine** members, not six | `p_callback`, `p_context`, `p_extend` follow `stop_control` | `r_wdt_api.h:147-160` — initialise with `= {}` (§2.5) |
 | **`pinMode(pin, OUTPUT)` writes the whole PFS word and latches PODR = 0** | so it drives the pin **LOW**, discarding a preceding `digitalWrite` | `cores/arduino/digital.cpp:12-14` → `R_IOPORT_PinCfg` → `R_BSP_PinCfg` = `PmnPFS = cfg` (`bsp_io.h:391-395`); `IOPORT_CFG_PORT_DIRECTION_OUTPUT = 0x4`, `IOPORT_CFG_PORT_OUTPUT_HIGH = 0x1` (`r_ioport_api.h:184,186`) — **corrects the design and the wiring README** |
 | the core's own idiom proves it | `IOPORT_CFG_PORT_DIRECTION_OUTPUT \| IOPORT_CFG_PORT_OUTPUT_HIGH` | `Arduino_LED_Matrix.h:125`, `SoftwareSerial.cpp:228,232`, `pin_data.c:14` |
@@ -1853,7 +1853,9 @@ explicit field, so nothing else in the program changes meaning.
 
 /* ---- the watchdog. PCLKB = 24 MHz (bsp_clock_cfg.h:8,14: HOCO 48 / PCLKB_DIV 2).
    RL_16384 * PR_8192 / (PCLKB/1000) = 16384*8192/24000 = 5592 ms (WDT.cpp:105-113).
-   We use the wdt_cfg_t overload for stop_control = DISABLE (WDT.cpp:67, r_wdt_api.h:115-116),
+   We use the wdt_cfg_t overload to get stop_control = DISABLE. WDT.cpp:67 is the
+   OTHER overload, begin(uint32_t), setting ENABLE -- which is the reason this one
+   exists, not evidence for DISABLE. r_wdt_api.h:113-114 defines both values,
    and that overload NEVER assigns _timeout (WDT.cpp:32-46), so getTimeout() would
    return 0 on a running dog. hal_wdt_granted() computes this number instead.
    The counter is a DOWN-counter at PCLKB/8192 = 2929.7 Hz = 2.93 counts/ms, which is
