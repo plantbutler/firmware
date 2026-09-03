@@ -53,9 +53,12 @@ uint32_t sim_servo_stops(void);                    /* count of writes of 1500 */
 
 /* The clock injector. It lands HERE, not in task 22, because task 14 step 9's rollover
    case is its first consumer and a case that has to reach eight tasks forward for its
-   fixture is a case that gets written twice. Body: g_us = ms * 1000u; g_ms = ms; one
-   bounded tick_models_() call; nothing else. Task 22 step 13 adds sim_set_heap_break()
-   ONLY. */
+   fixture is a case that gets written twice. Body: g_us = ms * 1000u; g_ms = ms;
+   g_ms_frac_us = 0u; one bounded tick_models_() call; nothing else. The frac reset is not
+   optional: g_ms is tracked as its own counter (not derived from g_us — see the note by
+   its declaration in hal_sim.cpp), so a stale sub-millisecond remainder from before the
+   jump would otherwise carry into the value hal_delay_us() next reports. Task 22 step 13
+   adds sim_set_heap_break() ONLY. */
 void     sim_set_clock_ms(uint32_t ms);
 
 typedef enum {
