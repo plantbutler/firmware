@@ -89,8 +89,14 @@ extern "C" void setup(void) {
 
   /* spec §2.5: liveness, not a constant. The counter must DECREASE across a 40 ms UNFED
      window. A failure here also latches dry. (Task 15 replaces the two lines below with
-     safety_dry_set(true).) */
-  if (!hal_wdt_alive()) {
+     safety_dry_set(true).)
+     hal_wdt_alive() is DESTRUCTIVE, not a getter (hal_uno.cpp:151-160): it feeds the dog,
+     spins 40 ms deliberately UNFED, measures the delta, then feeds again. Call it EXACTLY
+     ONCE per boot and reuse the result -- a second call is a second, independent 40 ms
+     probe, not a re-read of this one's verdict, and could disagree with it near the
+     threshold. wdt_alive is what the banner below prints as alive=. */
+  const bool wdt_alive = hal_wdt_alive();
+  if (!wdt_alive) {
     g_net_disabled = true; g_boot_err = "wdt";
     g_nv.dry_latched = true;
     noinit_commit();
@@ -110,9 +116,11 @@ extern "C" void setup(void) {
     g_net_disabled = true; g_boot_err = "heap";
   }
 
-  cli_begin();
-
-  /* Bring-up step 0's pass criterion, read BEFORE 12 V goes onto COM (spec §13). */
+  /* Bring-up step 0's pass criterion, read BEFORE 12 V goes onto COM (spec §13). Printed
+     BEFORE cli_begin() below, so the console shows the banner first and "type help"
+     second -- the order spec §13's own transcript documents. cli_begin() writes "type
+     help" as its own first action, so the reverse order was a one-line ordering bug,
+     not a missing feature. */
   {
     char b[160];
     snprintf(b, sizeof b,
@@ -120,7 +128,7 @@ extern "C" void setup(void) {
              "wdt=%s granted=%lums alive=%s adc=%lu/%lu oled=%u lcd=%u net=%s last=%s\n",
              PB_BUILD_NAME, (unsigned)g_nv.dry_latched, (unsigned)g_nv.contra_latched,
              (unsigned)hal_pump_level_on(), hal_wdt_granted() ? "on" : "off",
-             (unsigned long)hal_wdt_granted(), hal_wdt_alive() ? "yes" : "no",
+             (unsigned long)hal_wdt_granted(), wdt_alive ? "yes" : "no",
              (unsigned long)PB_ADC_BITS, (unsigned long)hal_adc_bits(),
              /* Screen::present()'s one consumer. Bring-up step 0 reads the banner before
                 step 1 scans the bus, so a panel that did not answer probe() is named here
@@ -129,6 +137,8 @@ extern "C" void setup(void) {
              g_net_disabled ? "DISABLED" : "enabled", g_boot_err);
     hal_serial_write(b);
   }
+
+  cli_begin();
 }
 
 static void ui_fill_(ui_state_t *s) {
