@@ -404,7 +404,7 @@ boot, so the last line of defence would become a pump-restart pulse generator.
 never touches D6 at all:**
 
 ```c
-/* src/hal_uno.cpp. Do NOT re-declare g_pin_cfg here: Arduino.h:60-66 already declares it,
+/* src/hal_uno.cpp. Do NOT re-declare g_pin_cfg here: Arduino.h:61-65 already declares it,
    INSIDE an extern "C" block, and a second declaration in a .cpp without extern "C" is a
    hard error ("declaration of 'g_pin_cfg' with 'C++' linkage conflicts with previous
    declaration with 'C' linkage"). hal_uno.cpp includes <Arduino.h>; that is the declaration. */
