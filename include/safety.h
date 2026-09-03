@@ -103,4 +103,12 @@ bool          cfg_pulses_per_l_set(uint16_t v);
    got in some OTHER way — a corrupted .noinit, a future backend cal=, or a bug — and a
    test that cannot produce one is not testing it. */
 void safety_force_bad_cal_(void);
+
+/* Host-suite seam, same shape again (task 17 fix round 2): g_last_end_ms is a THIRD
+   process-lifetime static in safety.cpp, after g_dosing and g_float_refusals, and has no
+   production reset path of its own — a real boot starts the process fresh; a host suite
+   reruns hundreds of "boots" inside one binary and needs a way to say "no dose has ended
+   yet" between them, which no ordinary dose_run() call can express (every real reset is a
+   fresh non-zero stamp, never a clear). pb_test_teardown() is the only caller. */
+void safety_reset_dose_cooldown_(void);
 #endif

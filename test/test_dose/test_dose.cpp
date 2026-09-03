@@ -1251,6 +1251,102 @@ void test_the_ladder_reports_dry_above_boot(void) {
       "the dry latch must be reported even while still inside the boot gap");
 }
 
+/* Fix round 2, Important finding (review of this task): the flap counter's contract has
+   TWO halves. Fix round 1 proved the first -- dose_end_()'s guard increments ONLY on
+   DOSE_REFUSED_FLOAT -- through real dose_run() calls. Nothing proved the second:
+   dose_end_ml_()'s reset call is UNCONDITIONAL, on every path that reaches it, not only
+   DOSE_OK. The reviewer's own proof: make the reset conditional --
+   `if (r == DOSE_OK) safety_float_refusal_count(false);` -- and the whole native
+   environment (98 cases across all four suites) passes unchanged. A dose that reaches
+   dose_end_ml_() by ABORT_CAP, ABORT_NOFLOW or ABORT_STOP RAN -- water moved, nothing about
+   the float was wrong -- and under that mutation it would silently stop clearing stale
+   float refusals from earlier, unrelated doses, which then accumulate across doses that
+   have nothing to do with the float and eventually trip the flap for no proximate reason a
+   status line can point to.
+
+   This case is the mirror of the round-1 one: accumulate two genuine float refusals
+   (one short of PB_FLOAT_FLAP_LIMIT), run a dose that reaches dose_end_ml_() on a
+   NON-DOSE_OK path (ABORT_CAP -- the pump asserted, the cap ended it, nothing about the
+   float), then show a single FURTHER float refusal does not trip the flap. If the ABORT_CAP
+   dose had not cleared the counter, that third-in-total float refusal would be the count's
+   third -- exactly at the flap limit -- so this is where a conditional reset is caught. */
+void test_the_flap_counter_is_cleared_by_dose_run_on_any_granted_path(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+
+  /* Baseline: a granted-reaching dose, clearing whatever the counter held before this case
+     (teardown already guarantees 0, but this also stamps g_last_end_ms fresh in THIS
+     case's own clock domain, which the cooldown arithmetic below depends on). */
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, dose_run(&q), "arrange: the baseline dose");
+  TEST_ASSERT_FALSE(safety_float_flap());
+  pb_advance(PB_DOSE_MIN_GAP_MS + 1u);      /* past the gap, so the doses below reach their
+                                                own rungs rather than refusing on cooldown */
+
+  /* Two genuine float refusals -- count = 2, one short of the flap limit. */
+  sim_set_float(false);
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_FLOAT, dose_run(&q));
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_FLOAT, dose_run(&q));
+  TEST_ASSERT_FALSE(safety_float_flap());
+
+  /* The dose under test: reaches dose_end_ml_() on a NON-DOSE_OK path. Correct code --
+     dose_end_ml_()'s reset call is UNCONDITIONAL -- clears the counter here regardless of
+     what r is. */
+  sim_set_float(true);
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, dose_run(&q),
+      "arrange: a granted dose that is NOT DOSE_OK");
+  TEST_ASSERT_FALSE(safety_float_flap());
+
+  /* Past the gap again, then ONE more genuine float refusal. A conditional reset above
+     would have left the stale count of 2 in place, and this single refusal would push it
+     to 3 -- tripping the flap here instead of leaving it false. */
+  pb_advance(PB_DOSE_MIN_GAP_MS + 1u);
+  sim_set_float(false);
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_FLOAT, dose_run(&q));
+  TEST_ASSERT_FALSE_MESSAGE(safety_float_flap(),
+      "the counter must have been cleared by the ABORT_CAP dose above, not only by DOSE_OK");
+}
+
+/* This case and the next are a deliberate pair, run back-to-back in that order (see
+   main()) -- the same shape as the g_dosing and g_float_refusals pairs above, guarding the
+   same class of bug for the third static of it in this file (fix round 2):
+   g_last_end_ms is process-lifetime state in safety.cpp, and this case leaves it non-zero
+   and does NOT reset it inline. If pb_test_teardown() ever stops resetting it, the NEXT
+   case's own dose reads a leftover "a dose ended moments ago" and is refused
+   DOSE_REFUSED_COOLDOWN instead of the DOSE_ABORT_CAP it actually arranges for. */
+void test_g_last_end_ms_leaks_here_if_teardown_does_not_reset_it(void) {
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  (void)dose_run(&q);            /* reaches the loop; stamps g_last_end_ms non-zero, left
+                                     dirty on purpose -- see the next case */
+}
+
+/* The other half of the pair. Advances FURTHER than the usual PB_BOOT_GAP_MS + 1: a leaked
+   g_last_end_ms from the previous case sits at roughly PB_BOOT_GAP_MS + a dose's own cost
+   (about 11 s) in that case's own clock domain, and this case's clock starts back at zero
+   too -- so a plain PB_BOOT_GAP_MS + 1 advance would land BELOW the leaked value, wrapping
+   the unsigned "current minus stale" difference to a harmless huge number and missing the
+   leak entirely (the exact trap several standalone cases in this file were found to have
+   hit the OTHER way around, earlier in this task). Advancing to 2 x PB_BOOT_GAP_MS instead
+   lands ABOVE the leaked value but still inside its ten-second cooldown window, which is
+   the one zone that actually tells a leak apart from a correct reset. */
+void test_g_last_end_ms_does_not_leak_between_cases(void) {
+  pb_advance(2u * PB_BOOT_GAP_MS);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, dose_run(&q),
+      "a leaked g_last_end_ms from the previous case would read as a fresh dose that ended "
+      "moments ago and refuse this one with cooldown instead");
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -1311,9 +1407,15 @@ int main(void) {
   RUN_TEST(test_cap_is_clamped_to_twice_the_requested_millilitres);
   RUN_TEST(test_the_flap_counter_is_driven_by_dose_run_not_the_setter);
   RUN_TEST(test_the_ladder_reports_dry_above_boot);
+  RUN_TEST(test_the_flap_counter_is_cleared_by_dose_run_on_any_granted_path);
+  /* This pair MUST run back-to-back, in this order: the guarantee under test is that
+     pb_test_teardown() resets g_last_end_ms between them (task 17 fix round 2). */
+  RUN_TEST(test_g_last_end_ms_leaks_here_if_teardown_does_not_reset_it);
+  RUN_TEST(test_g_last_end_ms_does_not_leak_between_cases);
   /* LAST: it deliberately leaves g_last_end_ms at a small wrapped value, which would
      otherwise poison every later case's cooldown-avoidance arithmetic (see its own
-     comment). */
+     comment) -- redundant with teardown's own reset after fix round 2, but left in place
+     as the belt to teardown's braces, and to minimise churn on an already-passing case. */
   RUN_TEST(test_dose_cap_holds_across_a_millis_rollover);
   return UNITY_END();
 }

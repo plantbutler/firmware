@@ -38,12 +38,28 @@ static inline void pb_test_setup(void) {
    line, which is no protection at all against a PRIOR case that longjmped out mid-body
    with bytes still parked in the pushback. Without this line, a case whose earlier
    assertion fails leaves the next case in the binary reading a stale prefix or a stale
-   stop request instead of the console traffic it just sent. */
+   stop request instead of the console traffic it just sent.
+
+   safety_reset_dose_cooldown_() belongs here for the identical reason a third time (task 17
+   fix round 2): g_last_end_ms is process-lifetime state in safety.cpp exactly like the two
+   above, and it has no ordinary reset path -- only a granted-reaching dose_run() call ever
+   writes it, always to a fresh non-zero value, never to zero. Several cases in test_dose.cpp
+   are safe today only because a stale leftover g_last_end_ms happens to sit ABOVE their own
+   fresh clock (an unsigned "current minus stale" wraps to a huge number rather than a small
+   one), which is a real argument but a fragile one: it depends on PB_FLOAT_SAMPLE_MS and
+   PB_FLOAT_OK_SAMPLES keeping their current values, and the margin is about 38 ms. Resetting
+   it here removes the dependency on that margin entirely -- with g_last_end_ms at 0, the
+   cooldown rung's own `g_last_end_ms != 0u` guard skips the check outright, exactly as a
+   real "no dose has ended yet" boot would read it, rather than every case having to land its
+   own clock in the one safe zone above or below whatever the previous case left behind.
+   test_dose.cpp carries a g_last_end_ms proof pair, the same shape as the two above, to
+   guard this teardown line the same way. */
 static inline void pb_test_teardown(void) {
   sim_events_clear();
   safety_set_dosing(false);
   safety_float_refusal_count(false);
   cli_stop_clear();
+  safety_reset_dose_cooldown_();
 }
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }

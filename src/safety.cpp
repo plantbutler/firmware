@@ -250,4 +250,11 @@ dose_result_t dose_run(const dose_req_t *q) {
    the rung exists to catch a value that got in some OTHER way (a corrupted .noinit, a
    future backend cal=, or a bug), and a test that cannot produce one is not testing it. */
 void safety_force_bad_cal_(void) { g_pulses_per_l = 0u; }
+
+/* Host-suite seam (task 17 fix round 2). g_last_end_ms is the third process-lifetime
+   static of this shape in this file, after g_dosing and g_float_refusals -- no ordinary
+   dose_run() call can express "no dose has ever ended", only a fresh non-zero stamp, so
+   the host suite needs its own way to say it between the hundreds of "boots" one binary
+   runs. pb_test_teardown() is the only caller. */
+void safety_reset_dose_cooldown_(void) { g_last_end_ms = 0u; }
 #endif
