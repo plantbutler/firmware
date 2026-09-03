@@ -8,6 +8,7 @@
 #include "cli.h"
 #include "config.h"
 #include "hal.h"
+#include "safety.h"
 #include "sim.h"
 #include "ui.h"
 #include <stdlib.h>
@@ -153,6 +154,9 @@ static void test_parses_every_bench_command(void) {
   TEST_ASSERT_TRUE(cli_dispatch("flow"));
   TEST_ASSERT_TRUE(cli_dispatch("status"));
   TEST_ASSERT_TRUE(cli_dispatch("help"));
+  TEST_ASSERT_TRUE(cli_dispatch("dry on"));
+  TEST_ASSERT_TRUE(cli_dispatch("dry off"));
+  TEST_ASSERT_FALSE(cli_dispatch("dry"));          /* no bare form, and no abbreviation */
   TEST_ASSERT_FALSE(cli_dispatch("mux 16"));      /* out of range */
   TEST_ASSERT_FALSE(cli_dispatch("nonsense"));
 }

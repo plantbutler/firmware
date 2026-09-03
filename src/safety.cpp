@@ -3,6 +3,7 @@
 #include "safety.h"
 #include "config.h"
 #include "hal.h"
+#include "noinit.h"
 #include "pins.h"
 
 static bool g_dosing;                    /* true only between the ON and OFF writes */
@@ -30,3 +31,22 @@ bool safety_float_ok_debounced(void) {
   }
   return true;
 }
+
+/* §2.11. The checksum is recomputed on EVERY write (§2.3), so a partial clobber cannot
+   read back as a valid latch. */
+void safety_dry_set(bool on) {
+  g_nv.dry_latched = on;
+  noinit_commit();
+}
+bool safety_dry(void) { return g_nv.dry_latched; }
+
+/* §2.10's second consequence: the flap counter. Not persisted -- process-lifetime state,
+   exactly like g_dosing above. TWO call sites, both in task 17's dose_run() exit helpers;
+   see the header for the exact contract. */
+static uint8_t g_float_refusals;
+
+void safety_float_refusal_count(bool refused_for_float) {
+  if (refused_for_float) { if (g_float_refusals < 255u) g_float_refusals++; }
+  else                     g_float_refusals = 0u;
+}
+bool safety_float_flap(void) { return g_float_refusals >= PB_FLOAT_FLAP_LIMIT; }

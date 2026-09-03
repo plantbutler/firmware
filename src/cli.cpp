@@ -12,6 +12,7 @@
 #include "noinit.h"
 #include "pins.h"
 #include "pulses.h"
+#include "safety.h"
 #include "secrets.h"
 #include "sensors.h"
 #include <stdio.h>
@@ -162,6 +163,16 @@ bool cli_dispatch(const char *line) {
   if (strcmp(line, "flow")   == 0) { cmd_flow_();   return true; }
   if (strcmp(line, "status") == 0) { cli_print_status(); return true; }
   if (strcmp(line, "help")   == 0) { cmd_help_();   return true; }
+  if (strcmp(line, "dry on")  == 0) {
+    safety_dry_set(true);
+    hal_serial_write("dry=1 - every dose refused until `dry off`\n");
+    return true;
+  }
+  if (strcmp(line, "dry off") == 0) {
+    safety_dry_set(false);
+    hal_serial_write("dry=0\n");
+    return true;
+  }
   hal_serial_write("? unknown; type help\n");
   return false;
 }
@@ -256,6 +267,12 @@ void cli_print_status(void) {
            (unsigned long)g_hwm_max,
            (unsigned long)(hal_stack_limit() - hal_heap_break()));
   hal_serial_write(b);
+
+  /* §2.11: the boot banner and `status` both print dry=. This is safety_dry()'s verdict,
+     not a re-read of g_nv.dry_latched -- the two agree today, but this line is what the
+     operator and bring-up 6/7c actually read, so it goes through the same accessor
+     dose_run() (task 17) will. */
+  cli_printf_u32("dry=%lu\n", (uint32_t)(safety_dry() ? 1u : 0u));
 
   /* The raw .noinit struct: bring-up 7c' reads exactly this line after a forced reset.
      cold= and resetmid= are noinit.cpp's two accessors (task 4) and this is their only

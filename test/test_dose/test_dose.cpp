@@ -321,6 +321,43 @@ static void test_the_float_debounce_feeds_the_watchdog_between_samples(void) {
   TEST_ASSERT_TRUE(feeds >= 2u);
 }
 
+/* §2.11. `dry on` survives a WARM reset - watchdog or RESET button - because a brown-out
+   at pump start (the wiring README warns of 3-5x inrush on a sagging brick) used to clear
+   it silently while the operator's hands were in the plumbing. It does NOT survive a cold
+   boot, and it must not: a power cycle starts clean and PB_BOOT_GAP_MS refuses for the
+   first 10 s anyway. */
+static void test_the_dry_latch_survives_a_warm_reset_and_not_a_cold_one(void) {
+  pb_test_setup();
+  TEST_ASSERT_FALSE(safety_dry());
+  safety_dry_set(true);
+  TEST_ASSERT_TRUE(safety_dry());
+
+  /* sim_reset() re-enters the boot path (task 3), so noinit_begin() has already run by
+     the time it returns -- do not call it a second time or the boot counter, and with it
+     the salt, advances twice per reset. */
+  sim_reset(true);                     /* warm: SRAM intact, .noinit verifies */
+  TEST_ASSERT_TRUE_MESSAGE(safety_dry(), "the latch did not survive a warm reset");
+
+  sim_reset(false);                    /* cold: SRAM cleared, magic mismatches */
+  TEST_ASSERT_FALSE_MESSAGE(safety_dry(), "the latch survived a COLD boot");
+}
+
+/* §2.10's second consequence. The report's debounce and the dose's debounce are separate
+   samples taken minutes apart, so a float flapping at the waterline can grant in the
+   report and refuse in the dose. Above the limit the report forces float=0 and err=float
+   regardless of the report-time debounce (task 22), and butler's rules ladder goes dark. */
+static void test_the_flap_counter_trips_after_three_consecutive_float_refusals(void) {
+  pb_test_setup();
+  TEST_ASSERT_FALSE(safety_float_flap());
+  safety_float_refusal_count(true);
+  safety_float_refusal_count(true);
+  TEST_ASSERT_FALSE(safety_float_flap());          /* two is not yet a pattern */
+  safety_float_refusal_count(true);
+  TEST_ASSERT_TRUE(safety_float_flap());           /* the third trips it */
+  safety_float_refusal_count(false);               /* a GRANTED dose clears it */
+  TEST_ASSERT_FALSE(safety_float_flap());
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -349,5 +386,7 @@ int main(void) {
   RUN_TEST(test_three_consecutive_ok_samples_are_needed_to_grant);
   RUN_TEST(test_one_bad_sample_refuses_immediately);
   RUN_TEST(test_the_float_debounce_feeds_the_watchdog_between_samples);
+  RUN_TEST(test_the_dry_latch_survives_a_warm_reset_and_not_a_cold_one);
+  RUN_TEST(test_the_flap_counter_trips_after_three_consecutive_float_refusals);
   return UNITY_END();
 }

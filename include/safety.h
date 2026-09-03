@@ -28,3 +28,28 @@ void safety_set_dosing(bool on);
    pump lead. The wait between samples is safety_wait_ms(), which calls safety_tick() on
    every iteration, so the dog is fed and the pump idle-re-asserted throughout. */
 bool safety_float_ok_debounced(void);
+
+/* §2.11. The operator's `dry on|off`. Writes g_nv.dry_latched and recomputes the .noinit
+   checksum on every write (§2.3), so the latch survives a WARM reset (watchdog, RESET
+   button) — the case that mattered, because a brown-out at pump start used to silently
+   clear it while the operator's hands were in the plumbing. It does not survive a cold
+   boot: nothing in .noinit does, and PB_BOOT_GAP_MS refuses for the first 10 s after one
+   regardless. */
+void safety_dry_set(bool on);
+bool safety_dry(void);
+
+/* §2.10's second consequence. >= PB_FLOAT_FLAP_LIMIT (3) CONSECUTIVE DOSE_REFUSED_FLOAT
+   results trips it; task 22 forces float=0 and err=float on the wire while it holds,
+   regardless of the report-time debounce. Cleared by any GRANTED dose. (Spec §2.10's prose
+   says "above" PB_FLOAT_FLAP_LIMIT while §9's own test name says "after three" — the two
+   readings are reconciled in the test name's favour: the predicate below is >=, so the
+   THIRD consecutive refusal trips it.) */
+bool safety_float_flap(void);
+
+/* Exactly two call sites, both in dose_run()'s exit helpers (task 17): dose_end_() calls
+   this with `true` ONLY on the DOSE_REFUSED_FLOAT arm; dose_end_ml_() calls it with `false`
+   UNCONDITIONALLY, because §2.10 says the counter is cleared by any GRANTED dose and
+   dose_end_ml_() is the function only a granted dose reaches. A refusal for cooldown, i2c,
+   position or any other reason must leave the counter ALONE: a rig refusing for a stalled
+   cart must not quietly forget that the float has been flapping for an hour. */
+void safety_float_refusal_count(bool refused_for_float);
