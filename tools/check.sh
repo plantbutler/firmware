@@ -45,6 +45,16 @@ expect 1 "$(count 'WDT\.refresh' "${SCAN[@]}")" \
 expect 0 "$(count 'WDT\.getTimeout' "${SCAN[@]}")" \
   "the timeout getter is never used (it returns 0 under the wdt_cfg_t overload)"
 
+# ---- lib/Screen: spec §5 ----
+# spec §5: TwoWire::flush() spins with no bound and is never called by us.
+expect 0 "$(count 'Wire\.flush' "${SCAN[@]}")" \
+  "no Wire flush anywhere"
+
+# spec §5: the library's row printer offers no hook between characters, so an LCD row is
+# painted one character at a time with safety_tick() between them.
+expect 0 "$(count 'lcd\.print|lcd\.println' "${SCAN[@]}")" \
+  "no library row printer on the LCD"
+
 if [ "$fails" -gt 0 ]; then
   printf '\n%s invariant(s) FAILED\n' "$fails" >&2
   exit 1

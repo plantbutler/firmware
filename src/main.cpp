@@ -1,12 +1,16 @@
-/* src/main.cpp -- DEVICE ONLY. [env:native] filters this file out (no main()).
-   Task 12 fills in the setup order of spec §2.5/§5/§12 and the loop of spec §3.
-   No Arduino header here, ever: spec §9 allows it only in hal_uno.cpp, lib/Network
-   and lib/Screen. Everything this file needs arrives through include/hal.h.
+/* src/main.cpp -- DEVICE ONLY. Task 12 writes the full setup order of spec §2.5/§5/§12. */
+#include "Screen.h"
 
-   setup()/loop() need extern "C" linkage: cores/arduino/main.cpp's arduino_main()
-   calls them through the extern "C" declaration in api/Common.h (pulled in via
-   Arduino.h), so a plain C++ definition here links under a mangled name and the
-   framework's arduino_main() fails to find it. */
+Screen g_oled_screen(ScreenType::Oled);
+Screen g_lcd_screen(ScreenType::Lcd);
 
-extern "C" void setup(void) {}
+extern "C" void setup(void) {
+  /* Order is load-bearing and lands in task 12. Both panels are probed and opened BEFORE
+     sensors_begin(), because init_priv() re-opens the IIC peripheral (spec §5). */
+  g_oled_screen.probe();
+  g_oled_screen.begin();
+  g_lcd_screen.probe();
+  g_lcd_screen.begin();
+}
+
 extern "C" void loop(void) {}
