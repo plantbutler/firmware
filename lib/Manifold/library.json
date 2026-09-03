@@ -1,0 +1,6 @@
+{
+  "name": "Manifold",
+  "build": {
+    "srcFilter": ["+<*>", "-<Manifold.cpp>"]
+  }
+}
