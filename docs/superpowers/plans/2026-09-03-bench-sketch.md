@@ -5089,10 +5089,20 @@ Every invariant in spec 9's table that is decidable on a drop-1 tree is now a gr
    ```
    expected: `2 Tests 0 Failures` in each, with one `IGNORE` in each — the arm that does not apply.
 
+   **`lib/Manifold/library.json` goes with them, and forgetting it is the trap.** Task 10 added
+   it with `srcFilter: ["+<*>", "-<Manifold.cpp>"]`, because referencing `cart.h` makes
+   PlatformIO's dependency finder pull in the whole library — including the legacy
+   `Manifold.cpp`, which stopped compiling when task 9 deleted `Screen::print()`. Once
+   `Manifold.cpp` is gone the exclusion has nothing to exclude. It is not a build error (a glob
+   matching nothing is a no-op), which is exactly why it would survive: a `srcFilter` naming a
+   file that no longer exists is cruft that reads like a constraint, and the next person to add
+   a file to this library has to work out whether it means anything. Delete it in the same
+   commit that deletes the file it was written for.
+
 8. - [ ] **Delete the old manifold, and commit the two regressions with it.** Nothing includes `Manifold.h` any more: task 12's `main.cpp` was written against `cart.h`.
 
    ```bash
-   cd /Users/jcanton/projects/plant-butler/firmware && git rm lib/Manifold/include/Manifold.h lib/Manifold/src/Manifold.cpp && grep -rn 'Manifold' src include lib test --include=*.cpp --include=*.h
+   cd /Users/jcanton/projects/plant-butler/firmware && git rm lib/Manifold/include/Manifold.h lib/Manifold/src/Manifold.cpp lib/Manifold/library.json && grep -rn 'Manifold' src include lib test --include=*.cpp --include=*.h
    ```
    expected: no hits at all. Then:
 
