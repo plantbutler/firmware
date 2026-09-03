@@ -53,3 +53,54 @@ bool safety_float_flap(void);
    position or any other reason must leave the counter ALONE: a rig refusing for a stalled
    cart must not quietly forget that the float has been flapping for an hour. */
 void safety_float_refusal_count(bool refused_for_float);
+
+/* §2.7. g_nv.contra_latched, read-only from here — task 19 owns the setter and the
+   `clear contra` release. Declared now, ahead of its own setter, because dose_run()'s
+   ladder (below) checks it above the dry latch and task 19 step 4's own code assumes the
+   declaration already exists: writing the ladder without this arm and inserting it later
+   is how an ordering gets lost. */
+bool safety_contra(void);
+
+/* THIS TASK DECLARES dose_result_t, and it is the first declaration in the tree: task 5's
+   cut of safety.h carried only safety_tick/safety_wait_ms/safety_dosing/safety_set_dosing,
+   and tasks 15 and 16 named DOSE_REFUSED_FLOAT only in prose and comments. DOSE_RESULT_COUNT
+   is an ADDITION to spec §2.8's printed enum, and the only one: it is what lets
+   test_pump_is_off_on_every_exit_path loop over the enum, so a result added later without a
+   way to reach it fails a test instead of going quietly unreachable. err_of() must never
+   map it. */
+typedef enum { DOSE_OK = 0, DOSE_REFUSED_WDT, DOSE_REFUSED_DRY, DOSE_REFUSED_CONTRA,
+               DOSE_REFUSED_BOOT, DOSE_REFUSED_RANGE, DOSE_REFUSED_CAL, DOSE_REFUSED_FLOAT,
+               DOSE_REFUSED_POS, DOSE_REFUSED_I2C, DOSE_REFUSED_BUSY, DOSE_REFUSED_COOLDOWN,
+               DOSE_REFUSED_NOISE, DOSE_ABORT_CAP, DOSE_ABORT_NOFLOW, DOSE_ABORT_NOISE,
+               DOSE_ABORT_FLOAT, DOSE_ABORT_POS, DOSE_ABORT_STOP,
+               DOSE_RESULT_COUNT } dose_result_t;
+
+typedef struct { uint8_t outlet; uint16_t ml; bool by_time; uint32_t cap_ms;
+                 bool need_pos; bool long_prime; } dose_req_t;
+/* dose_req_t.outlet is NEVER a sentinel: water=0 is a legal backend command
+   (_int_in(v,"water",0,256), and butler's `outlet is None` guard does not catch 0), so 0
+   arrives from the wire and is refused here as well as by task 26's range check. There is
+   NO `return` between the ON write and the OFF write in dose_run(): the loop's only exit
+   is a `break`. */
+
+/* THE ONLY CALLER OF hal_pump_write(true) IN THE PROGRAM. Spec §2.8. */
+dose_result_t dose_run(const dose_req_t *q);
+uint16_t      dose_flow_ml(void);
+dose_result_t dose_last_result(void);
+uint32_t      dose_last_ms(void);
+uint32_t      dose_last_pulses(void);
+uint8_t       dose_last_outlet(void);
+const char   *err_of(dose_result_t r);
+const char   *safety_last_err(void);
+void          safety_set_err(const char *tok);
+uint16_t      cfg_pulses_per_l_get(void);
+bool          cfg_pulses_per_l_set(uint16_t v);
+
+#ifdef PB_NATIVE
+/* Host-suite seam, exactly like safety_set_dosing() above: cfg_pulses_per_l_set() refuses
+   an out-of-range value by contract, so this is the ONLY way a host case can put an
+   out-of-range calibration behind DOSE_REFUSED_CAL. The rung exists to catch a value that
+   got in some OTHER way — a corrupted .noinit, a future backend cal=, or a bug — and a
+   test that cannot produce one is not testing it. */
+void safety_force_bad_cal_(void);
+#endif

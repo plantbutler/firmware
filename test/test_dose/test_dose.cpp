@@ -2,14 +2,26 @@
    The dose suite. Today it carries one case: that a native Unity runner links and runs.
    Tasks 3-6 and 15-19 fill it with the pump-pin, watchdog and refusal-ladder cases. */
 #include <unity.h>
+#include <string.h>
 #include "../support/harness.h"
+#include "cart.h"
+#include "cli.h"
 #include "config.h"
 #include "noinit.h"
 #include "safety.h"
 #include "pulses.h"
+#include "sensors.h"
 
 void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
+
+/* Which arms of dose_result_t this BUILD can actually drive dose_run() to, counted rather
+   than guessed. 14 here: DOSE_REFUSED_CONTRA (task 19's latch) and the four DOSE_ABORT_*
+   results that task 18's mid-dose rules produce (NOFLOW, NOISE, FLOAT, POS) do not exist
+   yet -- the breaks that would produce them are not in the loop. 19 - 5 = 14. Each later
+   task raises this as it makes another arm reachable: 18 after task 18 step 9, 19 after
+   task 19 step 8. */
+#define PB_DRIVABLE_RESULTS 14
 
 static void test_the_native_runner_links_and_runs(void) {
   /* PB_CONTROLLER comes from [env:native]'s build_flags, so this also proves the flag
@@ -384,6 +396,217 @@ static void test_g_float_refusals_does_not_leak_between_cases(void) {
   TEST_ASSERT_FALSE(safety_float_flap());
 }
 
+/* Statics of THIS SUITE, not of harness.h: harness.h is a fixture over hal_sim shared by
+   every test file, and this switch is specific to dose_run()'s own enum. Takes `unsigned`,
+   not dose_result_t: the exit-path loop below counts over the enum as `unsigned` (so that
+   DOSE_RESULT_COUNT itself, one past the last named value, is a legal loop bound), and
+   this is called with that raw loop variable. */
+static const char *pb_result_name(unsigned rv) {
+  switch ((dose_result_t)rv) {
+    case DOSE_OK:               return "DOSE_OK";
+    case DOSE_REFUSED_WDT:      return "DOSE_REFUSED_WDT";
+    case DOSE_REFUSED_DRY:      return "DOSE_REFUSED_DRY";
+    case DOSE_REFUSED_CONTRA:   return "DOSE_REFUSED_CONTRA";
+    case DOSE_REFUSED_BOOT:     return "DOSE_REFUSED_BOOT";
+    case DOSE_REFUSED_RANGE:    return "DOSE_REFUSED_RANGE";
+    case DOSE_REFUSED_CAL:      return "DOSE_REFUSED_CAL";
+    case DOSE_REFUSED_FLOAT:    return "DOSE_REFUSED_FLOAT";
+    case DOSE_REFUSED_POS:      return "DOSE_REFUSED_POS";
+    case DOSE_REFUSED_I2C:      return "DOSE_REFUSED_I2C";
+    case DOSE_REFUSED_BUSY:     return "DOSE_REFUSED_BUSY";
+    case DOSE_REFUSED_COOLDOWN: return "DOSE_REFUSED_COOLDOWN";
+    case DOSE_REFUSED_NOISE:    return "DOSE_REFUSED_NOISE";
+    case DOSE_ABORT_CAP:        return "DOSE_ABORT_CAP";
+    case DOSE_ABORT_NOFLOW:     return "DOSE_ABORT_NOFLOW";
+    case DOSE_ABORT_NOISE:      return "DOSE_ABORT_NOISE";
+    case DOSE_ABORT_FLOAT:      return "DOSE_ABORT_FLOAT";
+    case DOSE_ABORT_POS:        return "DOSE_ABORT_POS";
+    case DOSE_ABORT_STOP:       return "DOSE_ABORT_STOP";
+    case DOSE_RESULT_COUNT:     break;
+  }
+  return "?";
+}
+
+/* Sets up the ONE condition each result needs, calls dose_run(), and returns true --
+   or returns false, WITHOUT calling dose_run() at all, for a result this build cannot
+   reach yet. No `default:` arm: -Wall -Wextra then reports a newly added enum value as a
+   missing case rather than letting it fall through to a vacuous pass.
+
+   Every arm that runs a dose that reaches the pump loop (OK, BUSY is the exception --
+   see below, COOLDOWN's first call, NOISE, ABORT_CAP, ABORT_STOP) advances the clock past
+   PB_BOOT_GAP_MS first, for the same reason every standalone case in this file does: the
+   ladder's cooldown rung is g_last_end_ms, a safety.cpp file static this loop's repeated
+   pb_test_setup() calls do NOT reset (pb_test_setup() only resets the fake). Landing every
+   such dose's start just above 10 s and its end therefore above 11 s of THIS iteration's
+   own fresh clock is what keeps every LATER iteration's `hal_millis() - g_last_end_ms`
+   read a huge (wrapped) unsigned difference rather than an accidental small one -- the
+   same arrangement the brief's own standalone cases rely on, extended across the
+   iterations of one loop instead of across separate test functions. */
+static bool pb_drive_dose_to_result(dose_result_t want) {
+  switch (want) {
+    case DOSE_OK: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_set_float(true);
+      sim_set_flow_ml_s(85u);
+      dose_req_t q = {0};
+      q.ml = (uint16_t)PB_DOSE_RIG_MAX_ML;
+      q.cap_ms = PB_DOSE_CAP_MS_MAX;
+      q.long_prime = true;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_REFUSED_WDT: {
+      sim_wdt_stop();                                   /* the counter FREEZES */
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_REFUSED_DRY: {
+      safety_dry_set(true);
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_REFUSED_CONTRA:
+      return false;   /* task 19's latch: pb_latch_contra() does not exist yet */
+    case DOSE_REFUSED_BOOT: {
+      /* the clock is still at 0 -- the ABSENCE of an advance is the arrangement */
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_REFUSED_RANGE: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      dose_req_t q = {0};
+      q.ml = (uint16_t)(PB_DOSE_RIG_MAX_ML + 1u);       /* inside the protocol, outside the rig */
+      q.cap_ms = 10000u;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_REFUSED_CAL: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      safety_force_bad_cal_();
+      dose_req_t q = {0}; q.ml = 100u; q.cap_ms = 10000u;
+      (void)dose_run(&q);
+      (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);  /* put it back for later arms */
+      return true;
+    }
+    case DOSE_REFUSED_FLOAT: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_set_float(false);
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_REFUSED_POS: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      (void)cart_begin();                                /* position UNKNOWN, every build */
+      dose_req_t q = {0};
+      q.outlet = 1u; q.ml = 100u; q.cap_ms = 10000u; q.need_pos = true;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_REFUSED_I2C: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_set_i2c_fail(true);
+      for (uint8_t i = 0; i < PB_I2C_FAIL_LIMIT; ++i) (void)sensors_select(0u);
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+      (void)dose_run(&q);
+      sim_set_i2c_fail(false);
+      (void)sensors_begin();                             /* leave the bus healthy behind us */
+      return true;
+    }
+    case DOSE_REFUSED_BUSY: {
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+      safety_set_dosing(true);       /* never touched by a refusal this early -- reset it below */
+      (void)dose_run(&q);
+      safety_set_dosing(false);
+      return true;
+    }
+    case DOSE_REFUSED_COOLDOWN: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+      (void)dose_run(&q);                                /* ends on its cap, stamps g_last_end_ms */
+      (void)dose_run(&q);                                /* immediately again: cooldown */
+      return true;
+    }
+    case DOSE_REFUSED_NOISE: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_flow_storm(100u);                              /* D2 counting with the pump OFF */
+      pb_advance(500u);
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+      (void)dose_run(&q);
+      sim_flow_storm(0u);                                /* quiet for whatever runs next */
+      return true;
+    }
+    case DOSE_ABORT_CAP: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_set_flow_ml_s(0u);                             /* the pump runs; nothing moves */
+      dose_req_t q = {0}; q.ml = 100u; q.cap_ms = 1000u;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_ABORT_NOFLOW:
+      return false;   /* task 18's prime/stall rules: the break does not exist yet */
+    case DOSE_ABORT_NOISE:
+      return false;   /* task 18's in-dose rate/plausibility rules */
+    case DOSE_ABORT_FLOAT:
+      return false;   /* task 18's mid-dose float check */
+    case DOSE_ABORT_POS:
+      return false;   /* task 18's PB_POS_RECHECK_MS live bus check */
+    case DOSE_ABORT_STOP: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_serial_rx("stop\n");        /* sits in the fake's UART ring; dose_run()'s own
+                                          cli_stop_clear() at entry does not touch that ring */
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 5000u;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_RESULT_COUNT:
+      return false;   /* the sentinel is never a result to drive */
+  }
+  return false;
+}
+
+/* §2.8. Nineteen results, nineteen exits, and D6 must be OFF at every one of them. The
+   loop runs over the enum against DOSE_RESULT_COUNT, so a result added without a way to
+   reach it fails HERE rather than in six months on a bench with 12 V on COM. */
+void test_pump_is_off_on_every_exit_path(void) {
+  char skipped[256] = {0};
+  unsigned driven = 0;
+  for (unsigned r = 0; r < (unsigned)DOSE_RESULT_COUNT; ++r) {
+    pb_test_setup();
+    if (!pb_drive_dose_to_result((dose_result_t)r)) {  /* not reachable in THIS build */
+      if (skipped[0]) strncat(skipped, ", ", sizeof skipped - strlen(skipped) - 1);
+      strncat(skipped, pb_result_name(r), sizeof skipped - strlen(skipped) - 1);
+      continue;                     /* NEVER TEST_IGNORE in this loop -- see below */
+    }
+    ++driven;
+    TEST_ASSERT_EQUAL_MESSAGE((int)r, (int)dose_last_result(), pb_result_name(r));
+    TEST_ASSERT_FALSE_MESSAGE(sim_pump_is_on(),  pb_result_name(r));
+    TEST_ASSERT_FALSE_MESSAGE(safety_dosing(),   pb_result_name(r));
+  }
+  /* Asserted, so a build that quietly stops driving an arm fails HERE. */
+  TEST_ASSERT_EQUAL_UINT_MESSAGE(PB_DRIVABLE_RESULTS, driven, skipped);
+  if (skipped[0]) TEST_MESSAGE(skipped);   /* after the loop, and MESSAGE, not IGNORE */
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -418,5 +641,6 @@ int main(void) {
      pb_test_teardown() resets g_float_refusals between them (task 15 fix round 1). */
   RUN_TEST(test_g_float_refusals_leaks_here_if_teardown_does_not_reset_it);
   RUN_TEST(test_g_float_refusals_does_not_leak_between_cases);
+  RUN_TEST(test_pump_is_off_on_every_exit_path);
   return UNITY_END();
 }
