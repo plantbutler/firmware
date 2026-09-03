@@ -45,6 +45,8 @@ static bool     g_leak;
 static uint16_t g_chan[16];
 static uint16_t g_exp_port = 0xFFFFu;      /* the PCF8575's latch; task 7 gives it meaning */
 static uint8_t  g_mux_sel;
+static bool     g_adc_settled;
+static uint16_t g_adc_prev;
 static uint16_t g_servo_us = 1500u;        /* 1500 == stopped; task 6 drives the screw off it */
 
 /* ---- serial ---- */
@@ -158,8 +160,13 @@ void sim_set_float(bool ok) { g_float_ok = ok; }
 
 /* ---- ADC and I2C. Task 7 gives the expander its mux/home-hall meaning. ---- */
 uint16_t hal_adc_read(void) {
-  uint8_t ch = g_mux_stuck ? PB_CANARY_CHANNEL : g_mux_sel;
-  uint16_t v = g_chan[ch & 0x0Fu];
+  uint8_t ch = g_mux_stuck ? (uint8_t)PB_CANARY_CHANNEL : g_mux_sel;
+  uint16_t settled = g_chan[ch & 0x0Fu];
+  /* the first conversion after a select still carries the previous channel: a 10 k
+     source into the ADC's sample cap does not settle inside one conversion */
+  uint16_t v = g_adc_settled ? settled : g_adc_prev;
+  g_adc_settled = true;
+  g_adc_prev = settled;
   ev_(SIM_EV_ADC, ch, v);
   return v;
 }
@@ -172,6 +179,7 @@ bool hal_i2c_write16(uint8_t addr, uint16_t bits) {
   if (g_i2c_fail) return false;
   g_exp_port = bits;
   g_mux_sel = (uint8_t)(bits & 0x0Fu);
+  g_adc_settled = false;               /* a select un-settles the ADC */
   return true;
 }
 bool hal_i2c_read16(uint8_t addr, uint16_t *bits) {
@@ -289,6 +297,7 @@ void sim_reset(bool warm) {
   g_wdt_frac = 0; g_wdt_delta = 0; g_feeds = 0;
   g_float_ok = true; g_flow_ml_s = 0; g_storm_hz = 0;
   g_i2c_fail = false; g_mux_stuck = false; g_stall = false; g_leak = false;
+  g_adc_settled = false; g_adc_prev = 0;
   memset(g_chan, 0, sizeof g_chan);
   g_rx_len = g_rx_pos = 0; g_tx_len = 0;
   g_ev_n = 0;
