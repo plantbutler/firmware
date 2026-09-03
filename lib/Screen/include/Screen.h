@@ -16,6 +16,17 @@ private:
   LiquidCrystal_I2C lcd;
   bool present_;
 
+  /* Feeds the watchdog, then judges the unit that just returned (it started at
+     unit_start_ms). Every LCD command()/write()/setCursor() (6 Wire transactions) and
+     every OLED drawGlyph() (3 Wire transactions) is ONE such unit -- the finest
+     granularity either library's PUBLIC surface exposes; neither can be split further
+     without reaching into private internals ("forking" them). If the unit ran longer
+     than PB_SCREEN_PAINT_BUDGET_MS, the panel is marked permanently not-present and the
+     caller must stop: the watchdog is a safety device, the screen is a debugging aid,
+     and when a paint and the grant conflict the screen loses (spec §5). config.h has
+     the full transaction-count derivation for both panels. */
+  bool paint_ok_(uint32_t unit_start_ms);
+
 public:
   explicit Screen(ScreenType type);
 

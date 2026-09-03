@@ -125,6 +125,45 @@
 #define PB_I2C_BACKOFF_MS     5000
 #define PB_I2C_RECOVER_CLOCKS    9     /* a FIXED count, never "until SDA releases" */
 
+/* ---- the screens (lib/Screen). safety_tick() can only run BETWEEN calls into
+   LiquidCrystal_I2C/u8x8, never inside them, so the unfed span is bounded by whichever
+   library call is in flight, not by us.
+
+   LCD: LiquidCrystal_I2C::send() is 2x write4bits() x 3x expanderWrite() = 6
+   Wire.endTransmission() calls per command()/write()/setCursor()
+   (LiquidCrystal_I2C.cpp:9-21,247-269), each independently capped at Wire's fixed
+   1000 ms (Wire.cpp:194) -- so ONE such call can block up to 6000 ms with zero feeds,
+   already past PB_WDT_GRANTED_MS on its own, and send/write4bits/expanderWrite are
+   private: this floor cannot be lowered without forking the library.
+
+   OLED: drawGlyph() is the finer public call in place of the opaque drawString()/
+   clearDisplay(). It is NOT one Wire transaction: this OLED is
+   U8X8_SSD1306_128X64_NONAME_HW_I2C, which selects u8x8_cad_ssd13xx_FAST_i2c
+   (U8x8lib.h:806-808), and tracing the DRAW_TILE case through that cad
+   (u8x8_d_ssd1306_128x64_noname.c's SendCmd/SendCmd/SendArg/SendArg/SendData sequence)
+   gives 3 Wire.endTransmission() calls per glyph -- worst case 3000 ms, comfortably
+   under the 5592 ms grant. u8x8_ClearLine()/clearDisplay() are NOT used for the same
+   reason at a larger scale: ClearLine's one DRAW_TILE call asks for 16 tile-columns, and
+   the fast cad's SEND_DATA case opens a fresh transaction on every one of the 16
+   SendData calls regardless of the "fast" merge, for 2 + 16 = 18 transactions (18000 ms)
+   per line, and clearDisplay() runs that 8 times (144 total). lib/Screen therefore
+   clears the OLED by painting blank glyphs through the same bounded per-glyph path
+   row() already uses (Screen.cpp).
+
+   Either way, PB_SCREEN_PAINT_BUDGET_MS is the line: any single unit slower than this
+   is treated as a wedged bus, and the panel goes permanently not-present rather than
+   risk a second one. A healthy unit is low-single-digit ms; 100 ms is one to two orders
+   of magnitude above that and a tiny fraction of the 5592 ms grant, so it separates
+   "healthy" from "anything degraded" fast without false-tripping on bus jitter. This
+   converts the LCD's unavoidable 6000 ms floor from "will recur every paint for the
+   rest of the run" into "at most once, ever, per boot, self-terminating" -- it does not
+   make a single LCD unit's worst case fit under the grant, which is not achievable
+   without forking LiquidCrystal_I2C or changing which code feeds the watchdog, and
+   neither was in scope for this fix. The OLED's per-glyph path, unlike the LCD's, is a
+   real closed bound: 3000 ms is comfortably under 5592 ms even in the single worst
+   case. ---- */
+#define PB_SCREEN_PAINT_BUDGET_MS 100
+
 /* ---- going live. See §4.6. Ships DEFINED; flipping it turns on backend watering. ---- */
 #ifndef PB_REPORT_POS_UNKNOWN
 #  define PB_REPORT_POS_UNKNOWN  1
