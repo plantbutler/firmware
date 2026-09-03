@@ -1,0 +1,63 @@
+/* sim.h — the fake rig's fault injectors and its call-trace log. sim + native only. */
+#pragma once
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+
+/* THE FAKE'S CLOCK CONTRACT, and every later task depends on it:
+     hal_millis()   advances the rig by exactly 1 ms and runs every model (watchdog,
+                    pump-on time, and from task 6 the flow and screw edges), then returns
+                    the millisecond it has just reached. That is what lets a bounded spin loop —
+                    hal_wdt_alive()'s probe, safety_wait_ms(), dose_run()'s loop — make
+                    progress on a host with no real time.
+     hal_micros()   READS the clock. It never advances it, so an ISR's minimum-gap reject
+                    measures the interval the fake scheduled and not the reading of it.
+     hal_delay_us() advances by the microseconds asked for, watchdog and pump time only.
+     sim_advance(n) is n of the same 1 ms step. */
+#define PB_SIM_TICK_US 1000u
+
+/* The whole-word PmnPFS shape of §2.1, mirrored so the host can assert it:
+   IOPORT_CFG_PORT_DIRECTION_OUTPUT = 0x4, IOPORT_CFG_PORT_OUTPUT_HIGH = 0x1
+   (r_ioport_api.h:184-186). */
+#define SIM_PFS_DIR_OUT  0x4u
+#define SIM_PFS_LEVEL_HI 0x1u
+
+void     sim_reset(bool warm);             /* re-enter setup(); warm keeps .noinit (task 4) */
+void     sim_advance(uint32_t ms);
+void     sim_set_float(bool ok);           /* D5; consumed by the debounce, task 15 */
+void     sim_set_flow_ml_s(uint16_t ml_s); /* the pump's delivery rate; task 6 */
+void     sim_flow_storm(uint32_t hz);      /* an edge storm on D2; task 6 */
+void     sim_set_i2c_fail(bool fail);      /* every expander transfer fails; task 7 */
+void     sim_set_mux_stuck(bool stuck);    /* every channel returns the canary's value; task 7 */
+void     sim_set_stall(bool on);           /* the screw stops pulsing while driven; task 14 */
+void     sim_set_leak(bool on);            /* pulses with D6 off; task 6 */
+void     sim_wdt_stop(void);               /* the counter FREEZES */
+void     sim_wdt_rate_hz(uint32_t hz);     /* the counter moves, at this rate */
+void     sim_noinit_clobber(void);         /* scramble the .noinit struct; task 4 */
+void     sim_set_channel(uint8_t ch, uint16_t raw);
+void     sim_serial_rx(const char *s);     /* push bytes at the console */
+size_t   sim_serial_tx(char *buf, size_t cap);   /* drain what the console printed */
+bool     sim_pump_is_on(void);
+uint32_t sim_pump_on_ms(void);             /* cumulative ms with D6 asserted */
+uint32_t sim_feeds(void);
+
+typedef enum {
+  SIM_EV_PIN_CFG,      /* a whole-word direction+level write: hal_boot_pump_off, hal_pin_write */
+  SIM_EV_PIN_MODE,
+  SIM_EV_PUMP_WRITE,   /* arg carries SIM_PFS_DIR_OUT | level, the same word the board writes */
+  SIM_EV_WDT_FEED,
+  SIM_EV_I2C_WRITE,
+  SIM_EV_I2C_READ,
+  SIM_EV_SERVO,
+  SIM_EV_ADC
+} sim_ev_kind_t;
+
+typedef struct {
+  sim_ev_kind_t kind;
+  uint8_t       pin;
+  uint32_t      arg;
+  uint32_t      at_ms;
+} sim_ev_t;
+
+size_t sim_events(const sim_ev_t **out);
+void   sim_events_clear(void);
