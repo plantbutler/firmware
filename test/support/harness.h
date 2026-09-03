@@ -1,6 +1,7 @@
 /* test/support/harness.h — the Unity fixture over hal_sim. A header, not a suite. */
 #pragma once
 #include <unity.h>
+#include "cli.h"
 #include "hal.h"
 #include "sim.h"
 #include "safety.h"
@@ -29,11 +30,20 @@ static inline void pb_test_setup(void) {
    clear. `false` is not a magic reset value here: it is the SAME call dose_end_ml_() (task 17)
    will make on every granted dose, so this line asks the real accessor for "cleared", not a
    parallel reset path. test_dose.cpp carries a g_float_refusals proof pair, the same shape as
-   its existing g_dosing pair, to guard this teardown line the same way. */
+   its existing g_dosing pair, to guard this teardown line the same way.
+
+   cli_stop_clear() belongs here for the same reason again (task 16): g_stop_req, the
+   partial-match prefix and the pushback buffer are process-lifetime statics in cli.cpp,
+   and every test that exercises cli_stop_requested() only clears them as ITS OWN first
+   line, which is no protection at all against a PRIOR case that longjmped out mid-body
+   with bytes still parked in the pushback. Without this line, a case whose earlier
+   assertion fails leaves the next case in the binary reading a stale prefix or a stale
+   stop request instead of the console traffic it just sent. */
 static inline void pb_test_teardown(void) {
   sim_events_clear();
   safety_set_dosing(false);
   safety_float_refusal_count(false);
+  cli_stop_clear();
 }
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }
