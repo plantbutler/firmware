@@ -658,6 +658,335 @@ void test_refusal_reports_zero_millilitres_not_the_previous_dose(void) {
   TEST_ASSERT_EQUAL_UINT16(0u, dose_flow_ml());
 }
 
+/* §2.6 guard 1, and it is the FIRST rung after busy for a reason: a counter that is not
+   moving is a dog that will never bite, and every bound below it is then the only thing
+   between a stuck loop and a running pump. */
+void test_dose_refused_when_the_watchdog_counter_is_not_moving(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_wdt_stop();                                 /* the counter FREEZES (task 3) */
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_WDT, dose_run(&q),
+      "a frozen watchdog counter must refuse with wdt");
+}
+
+/* §2.11. `dry on` is strictly more refusing, and it is the one thing an operator with
+   their hands in the plumbing can rely on. Nothing is latched above it here, so `dry` is
+   the token that has to come back rather than `contra`. */
+void test_dose_refused_when_the_dry_latch_is_set(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  safety_dry_set(true);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_DRY, dose_run(&q),
+      "the dry latch must refuse with dry");
+}
+
+/* DECISIONS #5's minimum gap since boot, and §2.11's cover for the one thing .noinit
+   cannot hold: a power cycle clears the dry latch, and PB_BOOT_GAP_MS is what stands in
+   its place for the first ten seconds. pb_test_setup() leaves the fake's clock at zero and
+   hal_wdt_alive()'s probe advances it by about 41 ms, so no advance is needed here - the
+   ABSENCE of one is the arrangement. */
+void test_dose_refused_inside_the_boot_gap(void) {
+  pb_test_setup();                                /* the clock is at zero: a fresh boot */
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_BOOT, dose_run(&q),
+      "a dose inside PB_BOOT_GAP_MS must be refused with boot");
+}
+
+/* §2.6 guard 7, for EVERY caller - queued console impatience and backend adjacency alike.
+   The first dose is by_time with a 1000 ms cap, deliberately UNDER PB_PRIME_MS_DEFAULT, so
+   it ends on its own cap without arming task 18's prime rule and without satisfying §2.7's
+   `elapsed_ms >= prime_ms`; it latches nothing. The second follows it immediately, and the
+   cooldown is the only thing standing between them. */
+void test_dose_refused_inside_the_minimum_gap_since_the_last_dose(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  (void)dose_run(&q);                             /* ends on its cap and stamps g_last_end_ms */
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_COOLDOWN, dose_run(&q),
+      "a second dose inside PB_DOSE_MIN_GAP_MS must be refused with cooldown");
+}
+
+/* §2.10 and bring-up 5a. D5 reads PB_LOW for OK, so HIGH is a tank at or below the
+   waterline - or a broken wire, which by DECISIONS #12's whole design is the same answer. */
+void test_dose_refused_when_the_float_reads_not_ok(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(false);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_FLOAT, dose_run(&q),
+      "a float reading not-OK must refuse with float");
+}
+
+/* §2.10's asymmetry, seen from the dose rather than from the debounce: PB_FLOAT_OK_SAMPLES
+   consecutive OK readings GRANT, and one bad sample anywhere in that window refuses. The
+   pattern below grants twice and fails on the third - the waterline bounce that a
+   raw-sample implementation would report to the backend as float=1. */
+void test_dose_refused_when_a_single_float_sample_is_bad(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float_pattern("1101111");               /* OK, OK, BAD, then OK forever (task 15) */
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_FLOAT, dose_run(&q),
+      "one bad sample inside the debounce window must refuse with float");
+}
+
+/* §2.6 guard 4, FIRST line. A backend water command carries need_pos, and a cart whose
+   position is unknown means the pump would dead-head against a closed manifold.
+
+   The arrangement matters, because the obvious one tests nothing. cart_begin() leaves
+   g_pos at 0 while q.outlet is 1, so guard 4's SECOND line (need_pos && cart_pos() !=
+   outlet) refuses with the same DOSE_REFUSED_POS whether or not the first line exists:
+   delete the rung this case is named for and it still passes. The calibrated arm below
+   therefore loses the position while LEAVING cart_pos() equal to the outlet, so only the
+   first line can answer. That is the case that matters in the field too: a failed
+   cart_goto(N) clears g_home_seen and g_pos_valid but leaves g_pos where it was, so with
+   only the second line a re-issued dose for that same outlet would run the pump against a
+   cart nobody knows the position of. */
+void test_dose_refused_when_position_is_unknown(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  /* native_cal ONLY: below, the calibrated arm drives the cart to gate 1 (1450 pulses at
+     2 ms/pulse, ~2900 ms) and then into a stall on the way to gate 2 (PB_STALL_WINDOW_MS,
+     2500 ms) before this function ever calls dose_run() -- burning ~5400 ms of fake clock
+     that this file's usual "advance PB_BOOT_GAP_MS + 1 and go" arrangement does not budget
+     for. g_last_end_ms is a safety.cpp file static this suite's pb_test_setup() cannot
+     reach, and by this point in the file it holds a value close to 11000 (the cooldown
+     case's own dose, still fresh at only ~1000-2000 ms past PB_BOOT_GAP_MS).
+
+     Getting this margin right took two tries, and the FIRST one is worth recording because
+     it is the trap this whole file's convention exists to dodge: adding exactly one more
+     PB_DOSE_MIN_GAP_MS here pushed the uncalibrated arm's clock from ~10043 (BELOW the
+     stale g_last_end_ms of ~11082, so the unsigned subtraction WRAPS to a huge number and
+     the cooldown rung passes) to ~20045 -- now ABOVE g_last_end_ms, but by only ~8963 ms,
+     which is a perfectly ordinary, non-wrapped, LESS-THAN-10000 difference: it broke the
+     arm this test was already passing on while fixing the one it was not. There are only
+     two safe zones for "current clock minus a stale g_last_end_ms" -- comfortably below it
+     (wraps huge) or at least PB_DOSE_MIN_GAP_MS above it (an honest pass) -- and a single
+     extra gap landed exactly in the unsafe strip between them. A wide margin, well clear of
+     that strip for BOTH arms (the calibrated one's own ~5400 ms burn included), is what
+     this file's rhythm relies on elsewhere too: found by running native_cal AND native, not
+     by inspection of either alone. */
+  pb_advance(4u * PB_DOSE_MIN_GAP_MS);
+#if PB_PULSES_PER_GATE == 0
+  (void)cart_begin();                    /* §2.15: cart_pos_known() is hard false here, so
+                                            the first line is the only one that can answer */
+  dose_req_t q = {0};
+  q.outlet = 1u; q.ml = 100u; q.cap_ms = 10000u; q.need_pos = true;
+#else
+  (void)cart_begin();
+  sim_set_screw_pulse_ms(2u); sim_set_home_region(0u, 40u); sim_set_cart_at(0u);
+  TEST_ASSERT_TRUE(cart_goto(1u));       /* position known, and equal to 1 */
+  sim_set_stall(true);
+  (void)cart_goto(2u);                   /* fails: pos_valid false, cart_pos() still 1 */
+  sim_set_stall(false);
+  TEST_ASSERT_FALSE(cart_pos_known());
+  TEST_ASSERT_EQUAL_UINT(1u, cart_pos());
+  dose_req_t q = {0};
+  q.outlet = 1u; q.ml = 100u; q.cap_ms = 10000u; q.need_pos = true;   /* outlet == pos */
+#endif
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_POS, dose_run(&q),
+      "a need_pos dose with an unknown cart position must be refused with pos");
+}
+
+/* Guard 4's SECOND line, which is a different fact from the first: the position is known,
+   and it is the wrong one. Only the calibrated arm can reach it - §2.15 compiles
+   cart_pos_known() out to hard false while PB_PULSES_PER_GATE is 0, so under [env:native]
+   the first line answers and this one is unreachable. PB_PULSES_HOME_TO_1 is still 0 in the
+   calibrated arm, so the cart is already at outlet 1 when it is at home: cart_goto(1)
+   lands without turning the screw and the arrangement costs about three milliseconds of
+   fake clock, which is what keeps this case's cooldown read in the same place as every
+   other case's. */
+void test_dose_refused_when_the_cart_is_at_another_outlet(void) {
+#if PB_PULSES_PER_GATE == 0
+  TEST_IGNORE_MESSAGE("uncalibrated arm: cart_pos_known() is compiled out to false (spec 2.15), "
+                      "so the ladder's second position line cannot be reached; native_cal runs it");
+#else
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  (void)cart_begin();
+  sim_set_home_region(0u, 40u);
+  sim_set_cart_at(0u);                            /* already home, so cart_home() lands at once */
+  TEST_ASSERT_TRUE_MESSAGE(cart_goto(1u), "arrange: the cart must be KNOWN at outlet 1");
+  dose_req_t q = {0};
+  q.outlet = 2u; q.ml = 100u; q.cap_ms = 10000u; q.need_pos = true;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_POS, dose_run(&q),
+      "a dose for outlet 2 with the cart standing at outlet 1 must be refused with pos");
+#endif
+}
+
+/* §2.13's reason, stated as a refusal: A4/A5 are the mux select lines AND the home hall -
+   the input that gates the pump - so an unhealthy bus is a rig that cannot say where its
+   cart is. PB_I2C_FAIL_LIMIT consecutive failed transfers is what task 7 calls unhealthy.
+   sensors.cpp's counters are file statics, so this case puts the bus back BEFORE it
+   asserts, and therefore puts it back on the failing path too. */
+void test_dose_refused_when_i2c_is_unhealthy(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  (void)sensors_begin();
+  sim_set_i2c_fail(true);
+  for (uint8_t i = 0; i < PB_I2C_FAIL_LIMIT; ++i) (void)sensors_select(0u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  dose_result_t r = dose_run(&q);
+  sim_set_i2c_fail(false);
+  (void)sensors_begin();                          /* leave the bus healthy for the next case */
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_I2C, r,
+      "an unhealthy I2C bus must refuse with i2c");
+}
+
+/* DECISIONS #7 and §7. The PROTOCOL ceiling is PB_DOSE_MAX_ML (1000, == butler's
+   MAX_DOSE_ML); the RIG ceiling is PB_DOSE_RIG_MAX_ML (250), "a reservoir small enough that
+   a full dump is a mop-up". butler does not know about the smaller one - that is §4.6's
+   going-live precondition - so 251 ml is a command the wire can legally carry and this rung
+   is the only thing in the system that refuses it. */
+void test_dose_refused_when_ml_exceeds_the_rig_ceiling(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  dose_req_t q = {0};
+  q.ml = (uint16_t)(PB_DOSE_RIG_MAX_ML + 1u);     /* 251: inside the protocol, outside the rig */
+  q.cap_ms = 10000u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_RANGE, dose_run(&q),
+      "a millilitre target above PB_DOSE_RIG_MAX_ML must be refused with range");
+}
+
+/* §2.8's second range rung: a cap_ms of zero is a request with no bound at all, and it is
+   refused before the ml/need_pos checks that follow it in the ladder. */
+void test_dose_refused_when_the_cap_is_zero(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 0u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_RANGE, dose_run(&q),
+      "a zero cap_ms must be refused with range");
+}
+
+/* §2.8's third range rung, and the struct comment's own point: outlet is NEVER a sentinel.
+   water=0 is a legal backend command (_int_in(v,"water",0,256), and butler's `outlet is
+   None` guard does not catch 0), so 0 arrives here from the wire and must be refused
+   rather than treated as "no outlet named". */
+void test_dose_refused_when_a_need_pos_dose_names_outlet_zero(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  dose_req_t q = {0};
+  q.outlet = 0u; q.ml = 100u; q.cap_ms = 10000u; q.need_pos = true;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_RANGE, dose_run(&q),
+      "outlet 0 with need_pos must be refused with range, not treated as a sentinel");
+}
+
+/* §2.6 guard 6, the pre-dose half. Pulses arriving with D6 OFF are not water: an unplugged
+   or floating D2 counting garbage would otherwise "reach target" in milliseconds. The storm
+   runs at 100 Hz - an order under PB_FLOW_MAX_HZ (1200) and two orders over
+   PB_FLOW_IDLE_MAX_HZ (2) - so it is unmistakably the IDLE ceiling that answers and not the
+   in-dose one task 18 adds. pulses_begin() rebases the tumbling window on this case's own
+   clock, and the 500 ms of storm after it is what fills the window the ladder then reads. */
+void test_dose_refused_when_the_idle_pulse_rate_is_nonzero(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_flow_storm(100u);                           /* D2 counting with the pump OFF */
+  pb_advance(500u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  dose_result_t r = dose_run(&q);
+  sim_flow_storm(0u);                             /* and the meter is quiet for the next case */
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_NOISE, r,
+      "a non-zero idle pulse rate must refuse with noise, before D6 is ever asserted");
+}
+
+/* A metered dose whose target rounds to zero pulses must be REFUSED, never run to its cap.
+   With target == 0 the loop's `target && got >= target` can never fire, so the only exit
+   left is `el >= cap_ms`: a request for no water that asserts D6 for the whole cap, and
+   DOSE_ABORT_CAP here is exactly that failure.
+   The arithmetic says the `target == 0` guard below the caps is belt-and-braces rather than
+   the rung under test. target = ml * cfg / 1000, and the two rungs above it bound
+   ml >= 1 and cfg >= PB_PULSES_PER_L_MIN (1000), so the smallest legal product is
+   1 * 1000 / 1000 = 1 pulse: it can only be reached through a corrupted cfg that got past
+   the cal rung. The REACHABLE zero target is ml == 0 - which butler can send - and the
+   range rung is what answers it. */
+void test_metered_dose_with_a_zero_target_is_refused_not_run_to_cap(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  dose_req_t q = {0};
+  q.ml = 0u; q.by_time = false;                   /* metered, and asking for nothing */
+  q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_RANGE, dose_run(&q),
+      "a metered dose with a zero target must be refused with range, not run to its cap");
+}
+
+/* TARGET RULE 1: a metered dose stops when the METER says so, not when the clock does.
+   DOSE_OK is reachable through one line and one line only - `target && got >= target` - so
+   the result IS the assertion. The arithmetic, from §7's constants and nothing else:
+
+       target       = ml * cfg / 1000 = 250 * 5880 / 1000 = 1470 pulses   (MULTIPLY FIRST)
+       fake's rate  = 85 ml/s * PB_PULSES_PER_L_DEFAULT / 1000 = 499 pulses/s
+       first pulse  = PB_PRIME_MS_DEFAULT + 1 = 3001 ms into the dose
+       target at    = 3001 + 1469 * 1000/499 = ~5945 ms
+
+   and 5945 ms is inside every cap that applies: PB_PRIME_CAP_MS (20000) under long_prime,
+   and 250 * 1000 / 30 * 2 = 16666 ms under native_measured.
+
+   `long_prime` is not decoration here, and the reason is a property of the FIXTURE rather
+   than of dose_run(): the fake's pump model delivers its first pulse at
+   PB_PRIME_MS_DEFAULT + 1 ms after the ON write, which is one millisecond AFTER task 18's
+   prime rule fires at `el >= prime_ms && got < PB_PRIME_MIN_PULSES`. A metered dose on the
+   default window therefore aborts NOFLOW at exactly 3000 ms with nothing wrong with it.
+   PB_PRIME_LONG_MS is the only printed lever that moves that window, and the
+   PB_PRIME_CAP_MS it brings with it is still three times the time this dose needs. */
+void test_dose_stops_at_the_millilitre_target(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_flow_ml_s(85u);
+  dose_req_t q = {0};
+  q.ml = (uint16_t)PB_DOSE_RIG_MAX_ML;            /* 250 ml at the default calibration */
+  q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  q.long_prime = true;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q),
+      "a metered dose that reaches its pulse target must end DOSE_OK, not on its cap");
+}
+
+/* TARGET RULE 2: when the meter never reaches the target, the CAP ends the dose - and the
+   cap is a bound on time, never a second target. The arithmetic:
+
+       target = ml * cfg / 1000 = 100 * 5880 / 1000 = 588 pulses, and the meter delivers 0
+       cap    = the typed 1000 ms; under native_measured the measured clamp computes
+                100 * 1000 / 30 * 2 = 6666 ms and leaves the typed value alone
+
+   cap_ms is deliberately under PB_PRIME_MS_DEFAULT so that the cap is the only rule that
+   can fire: task 18's prime and stall rules both arm at `el >= prime_ms`, and §2.7's latch
+   needs `elapsed_ms >= prime_ms` too, so this dose ends without latching anything. */
+void test_dose_stops_at_the_cap_when_flow_never_reaches_target(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_flow_ml_s(0u);                          /* the pump runs; nothing moves */
+  dose_req_t q = {0}; q.ml = 100u; q.cap_ms = 1000u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, dose_run(&q),
+      "a metered dose that never reaches its target must end on its cap");
+}
+
+/* The cap bounds how long D6 is ASSERTED, which is the only thing that puts water on the
+   floor - not how long dose_run() takes to return. sim_pump_on_ms() is the fake's
+   cumulative count of milliseconds with the pin high, so it measures D6 and not the
+   function. The twenty milliseconds of slack are the loop's own granularity: the fake
+   advances one millisecond per hal_millis() call, and the unconditional OFF write is the
+   statement after the break. */
+void test_pump_on_time_never_exceeds_the_cap(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_flow_ml_s(0u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 2000u;  /* under PB_PRIME_MS_DEFAULT */
+  (void)dose_run(&q);
+  TEST_ASSERT_TRUE_MESSAGE(sim_pump_on_ms() <= 2000u + 20u,
+      "D6 was asserted for longer than cap_ms");
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -692,6 +1021,23 @@ int main(void) {
      pb_test_teardown() resets g_float_refusals between them (task 15 fix round 1). */
   RUN_TEST(test_g_float_refusals_leaks_here_if_teardown_does_not_reset_it);
   RUN_TEST(test_g_float_refusals_does_not_leak_between_cases);
+  RUN_TEST(test_dose_refused_when_the_watchdog_counter_is_not_moving);
+  RUN_TEST(test_dose_refused_when_the_dry_latch_is_set);
+  RUN_TEST(test_dose_refused_inside_the_boot_gap);
+  RUN_TEST(test_dose_refused_inside_the_minimum_gap_since_the_last_dose);
+  RUN_TEST(test_dose_refused_when_the_float_reads_not_ok);
+  RUN_TEST(test_dose_refused_when_a_single_float_sample_is_bad);
+  RUN_TEST(test_dose_refused_when_position_is_unknown);
+  RUN_TEST(test_dose_refused_when_the_cart_is_at_another_outlet);
+  RUN_TEST(test_dose_refused_when_i2c_is_unhealthy);
+  RUN_TEST(test_dose_refused_when_ml_exceeds_the_rig_ceiling);
+  RUN_TEST(test_dose_refused_when_the_cap_is_zero);
+  RUN_TEST(test_dose_refused_when_a_need_pos_dose_names_outlet_zero);
+  RUN_TEST(test_dose_refused_when_the_idle_pulse_rate_is_nonzero);
+  RUN_TEST(test_metered_dose_with_a_zero_target_is_refused_not_run_to_cap);
+  RUN_TEST(test_dose_stops_at_the_millilitre_target);
+  RUN_TEST(test_dose_stops_at_the_cap_when_flow_never_reaches_target);
+  RUN_TEST(test_pump_on_time_never_exceeds_the_cap);
   RUN_TEST(test_pump_is_off_on_every_exit_path);
   RUN_TEST(test_the_ladder_reports_the_more_specific_reason);
   RUN_TEST(test_refusal_reports_zero_millilitres_not_the_previous_dose);
