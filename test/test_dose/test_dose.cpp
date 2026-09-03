@@ -1410,6 +1410,94 @@ void test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached(voi
   (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
 }
 
+/* The no-flow abort, half 1: a line that never primes. The pump runs the whole default
+   window and nothing at all comes out -- the pitch-28a903 scenario, bring-up 7a's own
+   "run it dry the first time" case. */
+void test_prime_abort_fires_when_nothing_flows_in_the_prime_window(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true); sim_set_flow_ml_s(0);         /* the pump runs; nothing moves */
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  TEST_ASSERT_EQUAL(DOSE_ABORT_NOFLOW, dose_run(&q));
+  TEST_ASSERT_TRUE(sim_pump_on_ms() < PB_PRIME_MS_DEFAULT + 200u);
+}
+
+/* The case that replaces the design's inverted one. `prime` EXTENDS the window; a dose
+   that never flows still aborts, at PB_PRIME_LONG_MS rather than never. */
+void test_prime_flag_still_aborts_when_nothing_ever_flows(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true); sim_set_flow_ml_s(0);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 60000u; q.long_prime = true;
+  TEST_ASSERT_EQUAL(DOSE_ABORT_NOFLOW, dose_run(&q));
+  TEST_ASSERT_TRUE(sim_pump_on_ms() >= PB_PRIME_LONG_MS);        /* the window extended */
+  TEST_ASSERT_TRUE(sim_pump_on_ms() <  PB_PRIME_CAP_MS + 500u);  /* and it still ended */
+}
+
+void test_prime_flag_caps_the_dose_at_the_prime_cap(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true); sim_set_flow_ml_s(30);        /* flowing, so no no-flow abort */
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 60000u; q.long_prime = true;
+  TEST_ASSERT_EQUAL(DOSE_ABORT_CAP, dose_run(&q));
+  TEST_ASSERT_TRUE(sim_pump_on_ms() <= PB_PRIME_CAP_MS + 200u);  /* NOT the typed 60 s */
+}
+
+/* Armed on TIME. A dose that delivered four pulses and then stopped must still abort:
+   arming on `got` is what let zero flow disarm the rule entirely. */
+void test_stall_abort_is_armed_on_time_not_on_pulses(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_burst_pulses(PB_PRIME_MIN_PULSES + 2u);   /* then nothing, forever */
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  TEST_ASSERT_EQUAL(DOSE_ABORT_NOFLOW, dose_run(&q));
+  TEST_ASSERT_TRUE(sim_pump_on_ms() <
+                   PB_PRIME_MS_DEFAULT + PB_STALL_MS_DEFAULT + 500u);
+}
+
+/* The prime rule's boundary, from the other side: exactly one pulse short of the
+   threshold must NOT be read as "flow started". */
+void test_five_spurious_edges_at_start_do_not_disable_the_abort(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_burst_pulses(PB_PRIME_MIN_PULSES - 1u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  TEST_ASSERT_EQUAL(DOSE_ABORT_NOFLOW, dose_run(&q));
+}
+
+/* THE OUTCOME THIS TASK HAS TO SETTLE: a HEALTHY dose, on the untouched DEFAULT prime
+   window (no long_prime), with real continuous flow, reaches its millilitre target and
+   returns DOSE_OK. Before this task's fix to sim_flow_hz_()'s onset (see hal_sim.cpp), the
+   fake stayed silent until elapsed reached PB_PRIME_MS_DEFAULT and then jumped straight to
+   full rate -- the SAME millisecond dose_run()'s prime rule samples `got`, so at most one
+   pulse could ever be on the counter when the rule checked, never PB_PRIME_MIN_PULSES. A
+   healthy dose could not complete on the default window at all; every other case in this
+   file that needed real flow worked around it with `long_prime`. This case takes none of
+   that workaround: 100 ml at 85 ml/s needs on the order of a few hundred milliseconds,
+   comfortably inside the untouched 3 s window, with the window itself still free as margin. */
+void test_a_healthy_metered_dose_completes_on_the_default_prime_window(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(85u);
+  dose_req_t q = {0};
+  q.ml = 100u; q.cap_ms = PB_DOSE_CAP_MS_MAX;   /* NOT long_prime: the default window */
+  dose_result_t r = dose_run(&q);
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, r,
+      "a healthy dose on the default prime window must complete, not abort noflow");
+  TEST_ASSERT_TRUE(dose_last_pulses() >= (uint32_t)PB_PRIME_MIN_PULSES);
+  TEST_ASSERT_TRUE_MESSAGE(dose_last_ms() < PB_PRIME_MS_DEFAULT,
+      "a healthy dose must reach its target well inside the prime window, with room to spare");
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -1463,6 +1551,12 @@ int main(void) {
   RUN_TEST(test_dose_stops_at_the_millilitre_target);
   RUN_TEST(test_dose_stops_at_the_cap_when_flow_never_reaches_target);
   RUN_TEST(test_pump_on_time_never_exceeds_the_cap);
+  RUN_TEST(test_prime_abort_fires_when_nothing_flows_in_the_prime_window);
+  RUN_TEST(test_prime_flag_still_aborts_when_nothing_ever_flows);
+  RUN_TEST(test_prime_flag_caps_the_dose_at_the_prime_cap);
+  RUN_TEST(test_stall_abort_is_armed_on_time_not_on_pulses);
+  RUN_TEST(test_five_spurious_edges_at_start_do_not_disable_the_abort);
+  RUN_TEST(test_a_healthy_metered_dose_completes_on_the_default_prime_window);
   RUN_TEST(test_pump_is_off_on_every_exit_path);
   RUN_TEST(test_the_ladder_reports_the_more_specific_reason);
   RUN_TEST(test_refusal_reports_zero_millilitres_not_the_previous_dose);
