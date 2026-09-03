@@ -607,6 +607,57 @@ void test_pump_is_off_on_every_exit_path(void) {
   if (skipped[0]) TEST_MESSAGE(skipped);   /* after the loop, and MESSAGE, not IGNORE */
 }
 
+/* §2.8's ordering pair, half 1: cal above range. The other half, contra above dry, needs
+   pb_latch_contra(), which does not exist until task 19 step 1 -- task 19 step 5 appends
+   test_the_ladder_reports_contra_above_dry to this same file once that fixture exists. */
+void test_the_ladder_reports_the_more_specific_reason(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true);
+  safety_force_bad_cal_();                          /* see below */
+  dose_req_t r = {0}; r.ml = 9999u; r.cap_ms = 1000u;
+  dose_result_t got = dose_run(&r);
+  /* g_pulses_per_l is a file static of safety.cpp and pb_test_setup() cannot reach it, so
+     the calibration is put back HERE and before the assertion - a suite that left it at
+     zero would refuse every later case with DOSE_REFUSED_CAL, on the failing path too. */
+  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_CAL, got);               /* cal above range */
+}
+
+/* §2.8's second eye-checkable property, seen from a dose that ran rather than from the
+   exit helpers directly: a refusal must never ack the previous dose's millilitres. */
+void test_refusal_reports_zero_millilitres_not_the_previous_dose(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();          /* own tumbling window: the storm case leaves ~99 Hz behind */
+  sim_set_float(true); sim_set_flow_ml_s(30);
+  /* long_prime, and a cap ABOVE the fake's first edge. sim_flow_hz_() emits nothing until
+     el >= PB_PRIME_MS_DEFAULT (3000), so a 2000 ms dose delivers zero pulses and this
+     assertion fails; and once task 18's prime rule lands, any dose on the default window
+     aborts NOFLOW at el == 3000. long_prime moves the window to PB_PRIME_LONG_MS (15000)
+     and PB_PRIME_CAP_MS (20000) leaves a 6000 ms cap alone: ~3000 ms of flow, ~88 ml. */
+  dose_req_t ok = {0}; ok.by_time = true; ok.cap_ms = 6000u; ok.long_prime = true;
+  (void)dose_run(&ok);
+  TEST_ASSERT_TRUE(dose_flow_ml() > 0u);
+  pb_advance(PB_DOSE_MIN_GAP_MS + 1u);
+  /* pulses_flow_rate()'s tumbling window is only ever advanced by a CALL to it, and
+     dose_run()'s ladder calls it exactly once per invocation (the NOISE-idle rung). The
+     first dose above left the window's base at 0 pulses / 0 ms, unmoved (that call landed
+     inside its own first 100 ms and never rearmed it), so a call now -- tens of thousands
+     of fake-ms later, after ~89 ml of REAL flow the first dose delivered -- would divide
+     that whole historical total by the whole elapsed gap and read back a bogus non-zero
+     rate (~30 Hz here), well above PB_FLOW_IDLE_MAX_HZ. That reads as DOSE_REFUSED_NOISE,
+     not DOSE_REFUSED_FLOAT, and proves nothing about the float. Rebasing here is what a
+     board actually gets for free -- main.cpp's loop() calls pulses_flow_rate() every pass,
+     so the window is never this stale in the field; a synchronous host test that calls
+     dose_run() twice with nothing in between has to do by hand what many loop() passes
+     would have done anyway. */
+  pulses_begin();
+  sim_set_float(false);
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_FLOAT, dose_run(&ok));
+  TEST_ASSERT_EQUAL_UINT16(0u, dose_flow_ml());
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -642,5 +693,7 @@ int main(void) {
   RUN_TEST(test_g_float_refusals_leaks_here_if_teardown_does_not_reset_it);
   RUN_TEST(test_g_float_refusals_does_not_leak_between_cases);
   RUN_TEST(test_pump_is_off_on_every_exit_path);
+  RUN_TEST(test_the_ladder_reports_the_more_specific_reason);
+  RUN_TEST(test_refusal_reports_zero_millilitres_not_the_previous_dose);
   return UNITY_END();
 }
