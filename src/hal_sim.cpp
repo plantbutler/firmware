@@ -4,6 +4,7 @@
 #include "sim.h"
 #include "config.h"
 #include "pins.h"
+#include "noinit.h"
 #include <string.h>
 
 #if PB_SIM
@@ -44,7 +45,6 @@ static uint16_t g_chan[16];
 static uint16_t g_exp_port = 0xFFFFu;      /* the PCF8575's latch; task 7 gives it meaning */
 static uint8_t  g_mux_sel;
 static uint16_t g_servo_us = 1500u;        /* 1500 == stopped; task 6 drives the screw off it */
-static uint32_t g_boots;                   /* task 4 replaces this with g_nv.boots */
 
 /* ---- serial ---- */
 static char   g_rx[256]; static size_t g_rx_len, g_rx_pos;
@@ -230,7 +230,7 @@ uint32_t hal_heap_ordblks(void) { return 3u; }
 uint32_t hal_heap_break(void)   { return 0x20001800u; }
 uint32_t hal_stack_limit(void)  { return 0x20007b00u; }
 uint32_t hal_stack_hwm(void)    { return 384u; }
-uint32_t hal_boot_salt(void)    { return g_boots * 2654435761u; }   /* task 4 rewires to g_nv.boots */
+uint32_t hal_boot_salt(void) { return g_nv.boots * PB_BOOT_SALT_STRIDE; }
 
 void hal_begin(void) {
   g_mux_sel = 0;
@@ -238,7 +238,9 @@ void hal_begin(void) {
   g_servo_us = 1500u;
 }
 
-void sim_noinit_clobber(void) { }   /* task 4 gives this the .noinit struct to scramble */
+/* A partial clobber: the magic survives, the checksum does not. That is the shape
+   the bootloader's own .data/.bss would leave behind (§2.3). */
+void sim_noinit_clobber(void) { g_nv.pattern ^= 0xA5A5A5A5u; }
 
 void sim_reset(bool warm) {
   g_us = g_ms = 0;
@@ -250,7 +252,8 @@ void sim_reset(bool warm) {
   memset(g_chan, 0, sizeof g_chan);
   g_rx_len = g_rx_pos = 0; g_tx_len = 0;
   g_ev_n = 0;
-  if (warm) g_boots++; else g_boots = 1;     /* task 4 moves this into the .noinit struct */
+  if (!warm) memset(&g_nv, 0, sizeof g_nv);   /* a power cycle clears SRAM (§2.3) */
+  noinit_begin();                             /* what setup() does, in the same order */
   hal_begin();
 }
 

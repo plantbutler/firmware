@@ -4,6 +4,7 @@
 #include <unity.h>
 #include "../support/harness.h"
 #include "config.h"
+#include "noinit.h"
 
 void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
@@ -118,6 +119,82 @@ static void test_wdt_alive_is_true_on_a_counter_that_moves_at_the_real_2929_hz(v
   TEST_ASSERT_TRUE(hal_wdt_last_delta() <= 130u);
 }
 
+static void test_a_cold_boot_zeroes_the_noinit_struct(void) {
+  g_nv.dry_latched = true; g_nv.contra_latched = true; g_nv.cmd_high_water = 42u;
+  noinit_commit();
+  sim_reset(false);                        /* a power cycle: SRAM is cleared (§2.3) */
+  TEST_ASSERT_TRUE(noinit_was_cold());
+  TEST_ASSERT_FALSE(g_nv.dry_latched);
+  TEST_ASSERT_FALSE(g_nv.contra_latched);
+  TEST_ASSERT_EQUAL_UINT32(0u, g_nv.cmd_high_water);
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)PB_NOINIT_MAGIC, g_nv.magic);
+  TEST_ASSERT_EQUAL_UINT32(1u, g_nv.boots);
+}
+
+/* The checksum is what keeps a PARTIAL clobber from reading as a valid latch — the
+   bootloader's own .data/.bss sit exactly where __noinit_start does (§2.3). */
+static void test_a_bad_checksum_reads_as_a_cold_boot(void) {
+  g_nv.dry_latched = true; g_nv.cmd_high_water = 7u;
+  noinit_commit();
+  sim_noinit_clobber();                    /* magic survives; the sum does not */
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)PB_NOINIT_MAGIC, g_nv.magic);
+  sim_reset(true);                         /* a WARM reset: SRAM kept */
+  TEST_ASSERT_TRUE(noinit_was_cold());
+  TEST_ASSERT_FALSE(g_nv.dry_latched);
+  TEST_ASSERT_EQUAL_UINT32(0u, g_nv.cmd_high_water);
+}
+
+static void test_a_warm_boot_restores_the_latches_and_the_high_water_mark(void) {
+  g_nv.dry_latched = true; g_nv.contra_latched = true;
+  g_nv.cmd_high_water = 65540u;            /* above 2^16: the ack id is a uint32 (§4.3) */
+  g_nv.pattern = 0xDEADBEEFu;              /* bring-up 7c's `noinit pattern` word */
+  noinit_commit();
+  uint32_t before = g_nv.boots;
+  sim_reset(true);
+  TEST_ASSERT_FALSE(noinit_was_cold());
+  TEST_ASSERT_TRUE(g_nv.dry_latched);
+  TEST_ASSERT_TRUE(g_nv.contra_latched);
+  TEST_ASSERT_EQUAL_UINT32(65540u, g_nv.cmd_high_water);
+  TEST_ASSERT_EQUAL_UINT32(0xDEADBEEFu, g_nv.pattern);
+  TEST_ASSERT_EQUAL_UINT32(before + 1u, g_nv.boots);
+}
+
+/* §2.3: a reset with the pump asserted is the single loudest thing this rig can discover
+   about itself. It latches dry, and the flag stays set for setup() to turn into
+   err=resetmid before clearing it. */
+static void test_a_dose_in_flight_across_a_warm_boot_latches_dry(void) {
+  g_nv.dry_latched = false; g_nv.dose_in_flight = true;
+  noinit_commit();
+  sim_reset(true);
+  TEST_ASSERT_FALSE(noinit_was_cold());
+  TEST_ASSERT_TRUE(g_nv.dry_latched);
+  TEST_ASSERT_TRUE(g_nv.dose_in_flight);
+}
+
+/* The same condition, as the fact setup() and safety_last_err() actually consume. Without
+   this accessor `err=resetmid` has no producer anywhere and bring-up 7c's pass criterion
+   (`status` says dry=1 and last=resetmid) is unreachable. */
+static void test_a_dose_in_flight_across_a_warm_boot_raises_resetmid(void) {
+  g_nv.dose_in_flight = true;
+  noinit_commit();
+  sim_reset(true);
+  TEST_ASSERT_TRUE(noinit_reset_mid());
+  /* a COLD boot is not a reset mid-dose, whatever SRAM happened to hold */
+  sim_reset(false);
+  TEST_ASSERT_FALSE(noinit_reset_mid());
+}
+
+/* §15.2: without the salt, a watchdog reset loop reports at t ~= 15000 every boot, and
+   butler silently discards each repeat as a retry of the same (controller, t). */
+static void test_boot_salt_differs_across_two_warm_boots(void) {
+  sim_reset(true); uint32_t a = hal_boot_salt();
+  sim_reset(true); uint32_t b = hal_boot_salt();
+  TEST_ASSERT_TRUE(a != b);
+  TEST_ASSERT_TRUE(a != 0u && b != 0u);
+  /* and it puts t above 2^31 on ordinary boots, which is why §9 greps for %d */
+  TEST_ASSERT_TRUE(a > 0x80000000u || b > 0x80000000u);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -130,5 +207,11 @@ int main(void) {
   RUN_TEST(test_wdt_alive_is_false_only_when_the_counter_is_frozen);
   RUN_TEST(test_wdt_alive_does_not_feed_inside_its_probe_window);
   RUN_TEST(test_wdt_alive_is_true_on_a_counter_that_moves_at_the_real_2929_hz);
+  RUN_TEST(test_a_cold_boot_zeroes_the_noinit_struct);
+  RUN_TEST(test_a_bad_checksum_reads_as_a_cold_boot);
+  RUN_TEST(test_a_warm_boot_restores_the_latches_and_the_high_water_mark);
+  RUN_TEST(test_a_dose_in_flight_across_a_warm_boot_latches_dry);
+  RUN_TEST(test_a_dose_in_flight_across_a_warm_boot_raises_resetmid);
+  RUN_TEST(test_boot_salt_differs_across_two_warm_boots);
   return UNITY_END();
 }
