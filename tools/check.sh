@@ -193,16 +193,16 @@ check 0 'WiFiS3|link\.h|Network\.h' src/safety.cpp lib/Manifold -- \
   "the safety layer never names the network stack (safety.cpp, lib/Manifold)"
 
 # ---- blocking, buffers and formatting: spec §3, §9, §12 ----
-# lib/Manifold/src/Manifold.cpp and lib/Network/src/Network.cpp are the pre-bench-sketch
-# sketch: task 1 already orphaned both (nothing under src/ or lib/ includes either header
-# any more, so the LDF never builds them -- "main.cpp: a bare sketch" says so directly),
-# but neither file is deleted yet. Task 14 deletes Manifold.cpp, and the drop-3 seam-2 task
-# deletes Network.cpp; each should remove its own --exclude below in the same commit, the
-# way task 14 must also remove lib/Manifold/library.json's srcFilter once the file it
-# excludes is gone (see 190b56d). Excluded by FILE NAME, never by directory, so a real file
-# added to either library -- cart.cpp today, link_wifi.cpp later -- is still checked.
+# lib/Network/src/Network.cpp is the pre-bench-sketch sketch: task 1 already orphaned it
+# (nothing under src/ or lib/ includes its header any more, so the LDF never builds it --
+# "main.cpp: a bare sketch" says so directly), but the file is not deleted yet. The
+# drop-3 seam-2 task deletes it and removes the --exclude below in the same commit -- the
+# way task 14 removed lib/Manifold/src/Manifold.cpp's own --exclude here (and its
+# library.json srcFilter, see 190b56d) in the same commit that deleted the file. Excluded
+# by FILE NAME, never by directory, so a real file added to either library -- cart.cpp
+# already, link_wifi.cpp later -- is still checked.
 check 0 '(^|[^[:alnum:]_])delay\(' "${SCAN[@]}" \
-  --exclude=hal_uno.cpp --exclude=Manifold.cpp --exclude=Network.cpp -- \
+  --exclude=hal_uno.cpp --exclude=Network.cpp -- \
   "no unbounded blocking wait outside hal_uno.cpp's power-on settles"
 check 0 '%[0-9.]*[fgeFGE]([^[:alnum:]]|$)' "${SCAN[@]}" --exclude=Network.cpp -- \
   "no float formatting anywhere (newlib float printf is the deepest stack consumer)"
@@ -217,10 +217,10 @@ check 0 'String|std::map|std::string|(^|[^[:alnum:]_])new([^[:alnum:]_]|$)|mallo
   "no dynamic allocation outside lib/Network and lib/Screen"
 # Task 29 widens this ONE exclusion to sim_console.cpp, the device-only console shim the
 # sim binary needs, and records it as a deviation from §9's table in its own commit. It is
-# the only widening this line ever takes. Manifold.cpp is excluded for the same reason as
-# the block above -- it is dead, orphaned, pre-bench-sketch code task 14 deletes -- and the
-# same rule applies: whoever deletes it removes this --exclude too.
-check 0 'Arduino\.h' include src lib/Manifold --exclude=hal_uno.cpp --exclude=Manifold.cpp -- \
+# the only widening this line ever takes. (It used to also exclude Manifold.cpp, for the
+# same dead-orphaned-code reason as the block above; task 14 deleted that file and this
+# exclusion with it, in the same commit.)
+check 0 'Arduino\.h' include src lib/Manifold --exclude=hal_uno.cpp -- \
   "the Arduino header lives only in hal_uno.cpp, lib/Network and lib/Screen"
 check 0 'WiFi\.ping' "${SCAN[@]}" -- \
   "ping is never called (it resets the modem timeout to 10 s)"
