@@ -258,7 +258,11 @@ uint16_t hal_adc_read(void);               /* A0, 14-bit */
 bool     hal_i2c_write16(uint8_t addr, uint16_t bits);  /* false == bus error */
 bool     hal_i2c_read16(uint8_t addr, uint16_t *bits);  /* false == bus error, NOT zero */
 bool     hal_i2c_probe(uint8_t addr);
-bool     hal_i2c_recover(void);            /* EXACTLY nine clocks, fixed count; refuses while dosing */
+bool     hal_i2c_recover(void);            /* EXACTLY nine clocks, fixed count. The
+                                              "not while dosing" guard is NOT here: it sits one
+                                              line above each call in sensors.cpp, because a HAL
+                                              that consults safety_dosing() calls UP through the
+                                              seam and inverts it (§2.13). */
 void     hal_servo_us(uint16_t us);        /* 1500 == stop; 0 == detach */
 
 bool     hal_wdt_start(void);              /* wdt_cfg_t overload; false if the core rejected it */
