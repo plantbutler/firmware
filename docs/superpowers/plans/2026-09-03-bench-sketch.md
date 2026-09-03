@@ -5858,25 +5858,54 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
       loop runs over the enum against DOSE_RESULT_COUNT, so a result added without a way to
       reach it fails HERE rather than in six months on a bench with 12 V on COM. */
    void test_pump_is_off_on_every_exit_path(void) {
+     char skipped[256] = {0};
+     unsigned driven = 0;
      for (unsigned r = 0; r < (unsigned)DOSE_RESULT_COUNT; ++r) {
        pb_test_setup();
-       pb_drive_dose_to_result((dose_result_t)r);
+       if (!pb_drive_dose_to_result((dose_result_t)r)) {  /* not reachable in THIS build */
+         if (skipped[0]) strncat(skipped, ", ", sizeof skipped - strlen(skipped) - 1);
+         strncat(skipped, pb_result_name(r), sizeof skipped - strlen(skipped) - 1);
+         continue;                     /* NEVER TEST_IGNORE in this loop -- see below */
+       }
+       ++driven;
        TEST_ASSERT_EQUAL_MESSAGE((int)r, (int)dose_last_result(), pb_result_name(r));
        TEST_ASSERT_FALSE_MESSAGE(sim_pump_is_on(),  pb_result_name(r));
        TEST_ASSERT_FALSE_MESSAGE(safety_dosing(),   pb_result_name(r));
      }
+     /* Asserted, so a build that quietly stops driving an arm fails HERE. */
+     TEST_ASSERT_EQUAL_UINT_MESSAGE(PB_DRIVABLE_RESULTS, driven, skipped);
+     if (skipped[0]) TEST_MESSAGE(skipped);   /* after the loop, and MESSAGE, not IGNORE */
    }
    ```
 
+   **`pb_drive_dose_to_result()` returns `bool`, and nothing inside this loop may call
+   `TEST_IGNORE_MESSAGE`.** Unity's `TEST_IGNORE_MESSAGE` is `UNITY_IGNORE_AND_BAIL`: it
+   sets the ignored flag and calls `TEST_ABORT()`, which longjmps out of the WHOLE test
+   function, not out of one `switch` arm. An ignore inside this loop ends the case at the
+   first unreachable result, every later result goes undriven, and `pio test` still prints
+   `0 Failures` — a green test over the one invariant this rig has no hardware left to
+   enforce, which is worse than no test at all. So the helper returns `false` for a result
+   this build cannot reach, the loop continues and records the name, and the number of
+   driven arms is ASSERTED against `PB_DRIVABLE_RESULTS`, a `#define` in this file that
+   each later task raises as it makes an arm reachable.
+
    `pb_drive_dose_to_result()` and `pb_result_name()` are statics of **this suite**, not of
    `harness.h`: a `switch` over the enum that sets up the one condition each result needs
-   (`sim_wdt_stop()` for WDT, `safety_dry_set(true)` for DRY, `pb_latch_contra()` for CONTRA
-   once task 19 exists, `sim_set_float(false)` for FLOAT, `sim_set_flow_ml_s(0)` for
-   ABORT_NOFLOW, and so on) and then calls `dose_run()`. Write the `switch` with **no
+   (`sim_wdt_stop()` for WDT, `safety_dry_set(true)` for DRY, `sim_set_float(false)` for
+   FLOAT, and so on), calls `dose_run()`, and returns `true`. Write the `switch` with **no
    `default:` arm**, so `-Wall -Wextra` reports a newly added enum value as a missing case
-   rather than letting it fall through to a vacuous pass. Until task 18 and task 19 land,
-   the four arms they own (`ABORT_NOISE`, `ABORT_POS`, `ABORT_STOP`, `REFUSED_CONTRA`) may
-   `TEST_IGNORE_MESSAGE` — and each of those tasks deletes its own ignore.
+   rather than letting it fall through to a vacuous pass.
+
+   **Which arms are drivable here, counted rather than guessed.** `DOSE_ABORT_STOP` IS
+   reachable at task 17 and gets a real arm now: this task's loop already calls
+   `cli_stop_requested()` (task 16), and bytes pushed with `sim_serial_rx("stop\n")` before
+   `dose_run()` survive its opening `cli_stop_clear()` — which clears the pushback and the
+   request, not the fake's UART ring — so the matcher consumes them inside the loop. Drive
+   it with a `by_time` dose and a cap of a few seconds. Five arms are genuinely not
+   drivable yet, because the breaks that produce them do not exist: `ABORT_NOFLOW`,
+   `ABORT_NOISE`, `ABORT_FLOAT` and `ABORT_POS` are task 18's rules 5, 6 and 7, and
+   `REFUSED_CONTRA` is task 19's latch. Hence `#define PB_DRIVABLE_RESULTS 14` here, 18
+   after task 18 step 9, 19 after task 19 step 8.
 
 2. - [ ] **Run it and watch it fail to link.**
 
@@ -6168,8 +6197,14 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
    void test_refusal_reports_zero_millilitres_not_the_previous_dose(void) {
      pb_test_setup();
      pb_advance(PB_BOOT_GAP_MS + 1u);
+     pulses_begin();          /* own tumbling window: the storm case leaves ~99 Hz behind */
      sim_set_float(true); sim_set_flow_ml_s(30);
-     dose_req_t ok = {0}; ok.by_time = true; ok.cap_ms = 2000u;
+     /* long_prime, and a cap ABOVE the fake's first edge. sim_flow_hz_() emits nothing until
+        el >= PB_PRIME_MS_DEFAULT (3000), so a 2000 ms dose delivers zero pulses and this
+        assertion fails; and once task 18's prime rule lands, any dose on the default window
+        aborts NOFLOW at el == 3000. long_prime moves the window to PB_PRIME_LONG_MS (15000)
+        and PB_PRIME_CAP_MS (20000) leaves a 6000 ms cap alone: ~3000 ms of flow, ~88 ml. */
+     dose_req_t ok = {0}; ok.by_time = true; ok.cap_ms = 6000u; ok.long_prime = true;
      (void)dose_run(&ok);
      TEST_ASSERT_TRUE(dose_flow_ml() > 0u);
      pb_advance(PB_DOSE_MIN_GAP_MS + 1u);
@@ -6275,16 +6310,39 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
          "one bad sample inside the debounce window must refuse with float");
    }
 
-   /* §2.6 guard 4, first line. A backend water command carries need_pos, and a cart whose
+   /* §2.6 guard 4, FIRST line. A backend water command carries need_pos, and a cart whose
       position is unknown means the pump would dead-head against a closed manifold.
-      cart_begin() stops the servo and declares the position UNKNOWN; it moves nothing. */
+
+      The arrangement matters, because the obvious one tests nothing. cart_begin() leaves
+      g_pos at 0 while q.outlet is 1, so guard 4's SECOND line (need_pos && cart_pos() !=
+      outlet) refuses with the same DOSE_REFUSED_POS whether or not the first line exists:
+      delete the rung this case is named for and it still passes. The calibrated arm below
+      therefore loses the position while LEAVING cart_pos() equal to the outlet, so only the
+      first line can answer. That is the case that matters in the field too: a failed
+      cart_goto(N) clears g_home_seen and g_pos_valid but leaves g_pos where it was, so with
+      only the second line a re-issued dose for that same outlet would run the pump against a
+      cart nobody knows the position of. */
    void test_dose_refused_when_position_is_unknown(void) {
      pb_test_setup();
      pb_advance(PB_BOOT_GAP_MS + 1u);
      pulses_begin();
-     (void)cart_begin();                             /* position UNKNOWN until homed */
+   #if PB_PULSES_PER_GATE == 0
+     (void)cart_begin();                    /* §2.15: cart_pos_known() is hard false here, so
+                                               the first line is the only one that can answer */
      dose_req_t q = {0};
      q.outlet = 1u; q.ml = 100u; q.cap_ms = 10000u; q.need_pos = true;
+   #else
+     (void)cart_begin();
+     sim_set_screw_pulse_ms(2u); sim_set_home_region(0u, 40u); sim_set_cart_at(0u);
+     TEST_ASSERT_TRUE(cart_goto(1u));       /* position known, and equal to 1 */
+     sim_set_stall(true);
+     (void)cart_goto(2u);                   /* fails: pos_valid false, cart_pos() still 1 */
+     sim_set_stall(false);
+     TEST_ASSERT_FALSE(cart_pos_known());
+     TEST_ASSERT_EQUAL_UINT(1u, cart_pos());
+     dose_req_t q = {0};
+     q.outlet = 1u; q.ml = 100u; q.cap_ms = 10000u; q.need_pos = true;   /* outlet == pos */
+   #endif
      TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_POS, dose_run(&q),
          "a need_pos dose with an unknown cart position must be refused with pos");
    }
@@ -6460,7 +6518,9 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
    }
    ```
 
-   and the fifteen `RUN_TEST` lines, in `main()`, in the ladder's own order:
+   and the seventeen `RUN_TEST` lines, in `main()` — the fifteen below plus step 7's two,
+   which are declared non-static, so nothing warns if they are never registered and the
+   suite silently reports twenty-two cases instead of twenty-four:
 
    ```cpp
      RUN_TEST(test_dose_refused_when_the_watchdog_counter_is_not_moving);
@@ -6478,22 +6538,34 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
      RUN_TEST(test_dose_stops_at_the_millilitre_target);
      RUN_TEST(test_dose_stops_at_the_cap_when_flow_never_reaches_target);
      RUN_TEST(test_pump_on_time_never_exceeds_the_cap);
+     RUN_TEST(test_the_ladder_reports_the_more_specific_reason);             /* step 7 */
+     RUN_TEST(test_refusal_reports_zero_millilitres_not_the_previous_dose);  /* step 7 */
    ```
 
    Four more cases need a word rather than code:
 
    - `test_target_pulses_match_the_calibration_within_one_pulse` runs at 1000, 1999, 5880 and 20000 and asserts `dose_last_pulses()` is within one pulse of `ml * cfg / 1000`. Write the **divide-first** version of the arithmetic first and watch it fail at 1999 by a factor of two — that failure is the finding.
-   - `test_dose_cap_holds_across_a_millis_rollover` starts the fake's clock at `0xFFFFF000` and asserts the dose still ends at `cap_ms`. Every bound in the function is an unsigned difference and this is what proves it.
+   - `test_dose_cap_holds_across_a_millis_rollover` starts the fake's clock at `0xFFFFF000` with `sim_set_clock_ms()` and asserts the dose still ends at `cap_ms`. **The cap must straddle the wrap or the case is vacuous:** `0xFFFFF000` is 4095 ms below `UINT32_MAX`, so a cap of 1000 or 2000 ms — the pattern every other case here uses to dodge the prime rule — finishes before the wrap and never exercises an unsigned difference. Use `long_prime = true` with `cap_ms = 6000u`, so the clock wraps ~4095 ms in and the dose still ends at `el == 6000`. Every bound in the function is an unsigned difference and this is what proves it.
    - `test_console_pump_does_not_require_a_known_position` builds `need_pos = false` and asserts `DOSE_ABORT_CAP` rather than `DOSE_REFUSED_POS`, with `cart_pos_known()` false throughout. Bring-up 4a, 5a and 5b all run before the cart is calibrated; a `pump` that demanded a position would make them unrunnable.
-   - `test_bytes_buffered_during_a_dose_are_discarded_not_executed` pushes `pump 60000\n` through `sim_serial_rx()` while the loop is spinning, then calls `cli_poll()` and asserts nothing ran and `sim_pump_is_on()` is false. This is §15.3's scenario: three impatient lines typed at a console that looks frozen must not execute as 180 seconds of pumping the instant the first dose ends.
+   - `test_bytes_buffered_during_a_dose_are_discarded_not_executed` — **at task 17 assert the discard through `status`, not through `pump`.** `pump` is not a console command until task 20, so a buffered `pump 60000` reaches `? unknown; type help` and the case would pass whether or not the bytes were discarded. Push `status\n` during the dose and assert `sim_serial_tx()` carries no `granted=` afterwards, which the pushback-and-drain pair really does control today; task 20 owns the `pump 60000` form of this case, where §15.3's three-impatient-lines scenario can actually fail it. Add `#include "cli.h"` to this file — it is not reachable transitively, and `cli_poll()` and asserts nothing ran and `sim_pump_is_on()` is false. This is §15.3's scenario: three impatient lines typed at a console that looks frozen must not execute as 180 seconds of pumping the instant the first dose ends.
 
    **Only one of the two clamp cases is compiled out at `PB_ML_PER_S_MEASURED == 0`**, and
    getting that wrong loses a case rather than a line of prose. `test_cap_is_clamped_to_twice_the_requested_millilitres`
    tests the measured clamp, so it is guarded `#if PB_ML_PER_S_MEASURED > 0` with a
    `TEST_IGNORE_MESSAGE` on the other arm and `native_measured` is its arm.
    `test_dose_cap_is_clamped_to_sixty_seconds` tests `cap_ms > PB_DOSE_CAP_MS_MAX`, which is
-   unconditional in `dose_run()`: no guard, no second environment, and a `by_time` request so
-   that the measured clamp cannot touch it under either. Then run all three environments:
+   unconditional in `dose_run()`: no guard and no second environment. **But it cannot be written
+   at task 17 and must not be attempted here.** A `by_time` dose with no flow ends at ~3001 ms
+   once task 18's prime rule lands, so it never reaches the clamped 60000 ms cap; and once task
+   19's latch lands the same dose satisfies all five of §2.7's conditions and latches `contra`,
+   which is `.noinit`-backed and poisons every later case in the file. Reaching 60 s needs a
+   meter that stays live for the whole dose — task 18 step 1's `sim_set_flow_burst_pulses(n)`
+   with `n > 60000`, one edge per 1 ms step — and that injector does not exist yet. **Task 18
+   owns this case.** The measured clamp case is writable here, but only inside a stated window:
+   `long_prime = true`, metered, `ml` at or below 200, flow 0, typed `cap_ms =
+   PB_DOSE_CAP_MS_MAX`; it asserts the dose ends at `ml * 1000 / PB_ML_PER_S_MEASURED * 2`
+   (13332 ms at ml = 200) rather than at `PB_PRIME_CAP_MS` (20000), which is where the same
+   request ends with the clamp compiled out. Then run all three environments:
 
    ```bash
    cd /Users/jcanton/projects/plant-butler/firmware && pio test -e native -f test_dose && pio test -e native_measured -f test_dose && pio test -e native_cal -f test_dose
@@ -6534,7 +6606,7 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
     ```bash
     cd /Users/jcanton/projects/plant-butler/firmware && pio test -e native && pio test -e native_measured -f test_dose && \
       pio test -e native_cal -f test_dose && \
-      grep -rEc 'WiFiS3|link\.h|Network\.h' src/safety.cpp && \
+      grep -rEc 'WiFiS3|link\.h|Network\.h' src/safety.cpp ; \
       grep -c 'hal_pump_write(true)' src/safety.cpp && \
       grep -c 'hal_pump_write(false)' src/safety.cpp && make check && pio run -e uno_r4_wifi -e uno_r4_wifi_bringup 2>&1 | tail -3
     ```
@@ -6604,7 +6676,7 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
 
 **Tests:** `test_prime_abort_fires_when_nothing_flows_in_the_prime_window`, `test_prime_flag_still_aborts_when_nothing_ever_flows`, `test_prime_flag_caps_the_dose_at_the_prime_cap`, `test_stall_abort_is_armed_on_time_not_on_pulses`, `test_dose_aborts_when_the_pulse_rate_exceeds_the_meter_rating`, `test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached`, `test_the_rate_rules_are_evaluated_above_the_target_rule`, `test_a_dose_that_reaches_target_implausibly_fast_is_noise_not_ok`, `test_five_spurious_edges_at_start_do_not_disable_the_abort`, `test_dose_stops_within_one_iteration_when_the_float_drops`, `test_dose_aborts_when_the_expander_read_fails_mid_dose`, `test_stop_typed_mid_dose_stops_it_within_one_iteration`, `test_dry_on_typed_mid_dose_stops_it`, `test_watchdog_is_fed_on_every_iteration_of_the_dose_loop`.
 
-**Deliverable:** `pio test -e native -f test_dose` passes fourteen further cases, and `pio test -e native_measured -f test_dose` passes the plausibility case that is compiled out at `PB_ML_PER_S_MEASURED == 0`. `test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached` **must start its storm at pump-on, not before it**: the pre-dose `PB_FLOW_IDLE_MAX_HZ` guard only catches a storm that was already running, and the scenario that matters — a floating D2 running beside the 12 V pump leg — is a storm that begins **with** the pump. The two mid-dose console cases drive real bytes through `sim_serial_rx()` while the loop is spinning, never by poking a flag. This task also deletes three of the four `TEST_IGNORE_MESSAGE` arms task 17 left in `pb_drive_dose_to_result()` — `DOSE_ABORT_NOISE`, `DOSE_ABORT_POS` and `DOSE_ABORT_STOP` are all reachable once this loop lands.
+**Deliverable:** `pio test -e native -f test_dose` passes fourteen further cases, and `pio test -e native_measured -f test_dose` passes the plausibility case that is compiled out at `PB_ML_PER_S_MEASURED == 0`. `test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached` **must start its storm at pump-on, not before it**: the pre-dose `PB_FLOW_IDLE_MAX_HZ` guard only catches a storm that was already running, and the scenario that matters — a floating D2 running beside the 12 V pump leg — is a storm that begins **with** the pump. The two mid-dose console cases drive real bytes through `sim_serial_rx()` while the loop is spinning, never by poking a flag. This task also makes four more exit-path arms drivable and raises `PB_DRIVABLE_RESULTS` from 14 to 18 — `DOSE_ABORT_NOFLOW`, `DOSE_ABORT_NOISE`, `DOSE_ABORT_FLOAT` and `DOSE_ABORT_POS` all become reachable once this loop lands, while `DOSE_ABORT_STOP` was already drivable at task 17 and `DOSE_REFUSED_CONTRA` waits for task 19. There are no `TEST_IGNORE_MESSAGE` arms in that fixture to delete: an ignore inside its loop would longjmp out of the whole case (task 17 step 1).
 
 ---
 
@@ -6951,7 +7023,7 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
    }
    ```
 
-9. - [ ] **Delete the three ignores task 17 left in the exit-path fixture.** `DOSE_ABORT_NOISE`, `DOSE_ABORT_POS` and `DOSE_ABORT_STOP` are all reachable now; `pb_drive_dose_to_result()` gets a real arm for each — `sim_flow_storm_at_pump_on(2000)`, `sim_set_i2c_fail(true)` after pump-on, and a scheduled `sim_serial_rx("stop\n")`. Only `DOSE_REFUSED_CONTRA` stays ignored, and task 19 deletes that one.
+9. - [ ] **Make four more exit-path arms drivable, and raise `PB_DRIVABLE_RESULTS` from 14 to 18.** `DOSE_ABORT_NOFLOW`, `DOSE_ABORT_NOISE`, `DOSE_ABORT_FLOAT` and `DOSE_ABORT_POS` all become reachable with this task's rules 5, 6 and 7 (`DOSE_ABORT_STOP` was already drivable at task 17); `pb_drive_dose_to_result()` gets a real arm for each — `sim_flow_storm_at_pump_on(2000)`, `sim_set_i2c_fail(true)` after pump-on, and a scheduled `sim_serial_rx("stop\n")`. Only `DOSE_REFUSED_CONTRA` stays ignored, and task 19 deletes that one.
 
 10. - [ ] **Run everything, run the gates, and commit.**
 
@@ -7402,7 +7474,7 @@ Fourteen of those fifteen are written here. **`test_latch_reports_err_contra_and
      TEST_ASSERT_EQUAL_STRING("*** SIM NO D6 **", rows[0]);   /* and SIM outranks the latch */
    ```
 
-8. - [ ] **Delete the last ignore in task 17's exit-path fixture.** `pb_drive_dose_to_result()`'s `DOSE_REFUSED_CONTRA` arm is now `pb_latch_contra(); pb_advance(PB_DOSE_MIN_GAP_MS + 1u);` followed by an ordinary request. All nineteen results are reachable, and the `switch` has no ignores left.
+8. - [ ] **Make the last exit-path arm drivable, and raise `PB_DRIVABLE_RESULTS` from 18 to 19.** `pb_drive_dose_to_result()`'s `DOSE_REFUSED_CONTRA` arm is now `pb_latch_contra(); pb_advance(PB_DOSE_MIN_GAP_MS + 1u);` followed by an ordinary request. All nineteen results are reachable, and the `switch` has no ignores left.
 
 9. - [ ] **Run the whole gate and commit.**
 
@@ -12689,7 +12761,7 @@ Three notes on how this plan is put together, recorded here rather than left to 
   **(a) Test cases named but not printed — 21 of them, in three tasks.**
 
   - **Task 14 step 9 — nine of `test_cart`'s twelve.** Printed: `test_goto_refuses_when_pulses_per_gate_is_zero`, `test_home_from_outlet_five_actually_reaches_home`, `test_servo_is_stopped_on_every_exit_path`. Given a setup-and-assertion sentence but **no code**: `test_position_is_unknown_after_boot_until_homed`, `test_pos_is_never_ok_before_calibration`, `test_goto_counts_pulses_not_milliseconds`, `test_home_zeroes_the_count_only_when_the_hall_asserts`, `test_home_that_times_out_leaves_position_unknown`, `test_stall_aborts_within_the_stall_window_and_loses_position`, `test_an_i2c_error_on_the_home_hall_is_unknown_not_not_home`, `test_goto_rejects_an_outlet_outside_one_to_five`, `test_move_deadline_holds_across_a_millis_rollover`.
-  - **Task 17 — six of `test_dose`'s twenty-four.** Printed by this task: `test_pump_is_off_on_every_exit_path` (step 1); `test_refusal_reports_zero_millilitres_not_the_previous_dose` and `test_the_ladder_reports_the_more_specific_reason` (step 7); and **the whole refusal ladder and both target rules — all fifteen of them, in full, in step 8**, which is where the safety spine of drop 2 used to be a list of bare names. Still given a prose bullet with its setup and assertion but **no code**: `test_target_pulses_match_the_calibration_within_one_pulse`, `test_dose_cap_holds_across_a_millis_rollover`, `test_console_pump_does_not_require_a_known_position`, `test_bytes_buffered_during_a_dose_are_discarded_not_executed`. Covered only by a one-line compile-guard note: `test_dose_cap_is_clamped_to_sixty_seconds` and `test_cap_is_clamped_to_twice_the_requested_millilitres`. Note while writing those last two that step 8's sentence is right about only one of them — the **measured** clamp is what `#if PB_ML_PER_S_MEASURED > 0` compiles out, and `native_measured` is its arm; the sixty-second clamp against `PB_DOSE_CAP_MS_MAX` is unconditional in `dose_run()` and its case needs no guard and no second environment.
+  - **Task 17 — five of `test_dose`'s twenty-four, and one moved out.** Printed by this task: `test_pump_is_off_on_every_exit_path` (step 1, and rewritten since — its loop asserts the number of arms it drove against `PB_DRIVABLE_RESULTS`, because the first version `TEST_IGNORE`d inside the loop and Unity's ignore longjmps out of the whole case, leaving sixteen of nineteen results undriven under a green `0 Failures`); `test_refusal_reports_zero_millilitres_not_the_previous_dose` and `test_the_ladder_reports_the_more_specific_reason` (step 7, both now registered — they were declared non-static and never had a `RUN_TEST` line, so the suite silently reported twenty-two); and **the whole refusal ladder and both target rules — all fifteen, in full, in step 8**, which is where the safety spine of drop 2 used to be a list of bare names. Still a prose bullet with its setup and assertion but **no code**: `test_target_pulses_match_the_calibration_within_one_pulse`, `test_dose_cap_holds_across_a_millis_rollover` (its fixture is now stated — the cap must straddle the wrap or the case is vacuous), `test_console_pump_does_not_require_a_known_position`, `test_bytes_buffered_during_a_dose_are_discarded_not_executed` (its task-17 form asserts through `status`; task 20 owns the `pump 60000` form, since `pump` is not a command until then), and `test_cap_is_clamped_to_twice_the_requested_millilitres` (fixture stated: `long_prime`, metered, `ml` at or below 200). **`test_dose_cap_is_clamped_to_sixty_seconds` is no longer task 17's** — it cannot be written before task 18's burst injector exists, because a no-flow dose ends at ~3001 ms and then latches `contra`, which is `.noinit`-backed and poisons every later case in the file.
   - **Task 18 step 8 — six of `test_dose`'s fourteen abort cases.** Each has a prose bullet naming its injector, its setup and its assertion; none has code: `test_dose_aborts_when_the_pulse_rate_exceeds_the_meter_rating`, `test_a_dose_that_reaches_target_implausibly_fast_is_noise_not_ok`, `test_dose_stops_within_one_iteration_when_the_float_drops`, `test_dose_aborts_when_the_expander_read_fails_mid_dose`, `test_stop_typed_mid_dose_stops_it_within_one_iteration`, `test_dry_on_typed_mid_dose_stops_it`.
   - **Task 19 step 4's six "does not set" cases are NOT a gap.** An earlier version of this note listed them; they are printed in full, with bodies and assertions, as is every other case task 19 names. The one name in its list that task 19 does not print, `test_latch_reports_err_contra_and_ch207_and_float_zero`, is deliberately deferred to **task 26 step 11**, which does print it.
 
