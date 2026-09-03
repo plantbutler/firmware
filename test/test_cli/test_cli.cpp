@@ -5,7 +5,10 @@
    empty makes task 11's granted=/alive= case unpassable. */
 #include "../support/harness.h"
 #include "cart.h"
+#include "cli.h"
 #include "config.h"
+#include "hal.h"
+#include "sim.h"
 #include "ui.h"
 #include <string.h>
 #include <unity.h>
@@ -121,6 +124,97 @@ static void test_ui_poll_is_a_noop_in_a_pass_where_a_modem_command_ran(void) {
   TEST_ASSERT_TRUE(ui_paints_for_test() > after_first);
 }
 
+static void drain_tx(void) { char b[2048]; sim_serial_tx(b, sizeof b); }
+
+/* cli_poll() reads at most sizeof(buf) == 32 bytes per call (step 4), and the overlong-line
+   case below pushes ~136 bytes at it. ONE cli_poll() would consume 32 of them and never
+   reach the newline, so "line too long" would never be printed and the case would fail for
+   a reason that has nothing to do with the line reader. Loop, with a fixed bound so that a
+   bug here cannot hang the suite. */
+static size_t feed(const char *line, char *out, size_t cap) {
+  drain_tx();
+  sim_serial_rx(line);
+  for (unsigned i = 0; i < 16u; ++i) cli_poll();
+  return sim_serial_tx(out, cap);
+}
+
+/* THE BENCH COMMAND SET of spec §6, and this case must end up carrying ALL of it.
+   Six commands exist today. Four more arrive later and each is added to THIS case by the
+   task that adds the command: `dry on` / `dry off` (task 15), `stop` (task 16),
+   `clear contra` (task 19). Every one of them is present in the BENCH binary as well as
+   the bringup one, so none of them may be wrapped in #if PB_BRINGUP here or there. */
+static void test_parses_every_bench_command(void) {
+  pb_test_setup();
+  TEST_ASSERT_TRUE(cli_dispatch("i2c"));
+  TEST_ASSERT_TRUE(cli_dispatch("mux 3"));
+  TEST_ASSERT_TRUE(cli_dispatch("mux all"));
+  TEST_ASSERT_TRUE(cli_dispatch("hall"));
+  TEST_ASSERT_TRUE(cli_dispatch("flow"));
+  TEST_ASSERT_TRUE(cli_dispatch("status"));
+  TEST_ASSERT_TRUE(cli_dispatch("help"));
+  TEST_ASSERT_FALSE(cli_dispatch("mux 16"));      /* out of range */
+  TEST_ASSERT_FALSE(cli_dispatch("nonsense"));
+}
+
+static void test_an_overlong_line_is_dropped_whole_not_truncated_into_a_command(void) {
+  pb_test_setup();
+  char line[PB_LINE_CAP + 40];
+  memset(line, 'x', sizeof line);
+  memcpy(line, "flow ", 5);                        /* a real command hiding at the front */
+  line[sizeof line - 2] = '\n';
+  line[sizeof line - 1] = '\0';
+  char out[2048];
+  size_t n = feed(line, out, sizeof out);
+  out[n] = '\0';
+  TEST_ASSERT_NOT_NULL(strstr(out, "line too long"));
+  TEST_ASSERT_NULL(strstr(out, "flow hz="));       /* the prefix did NOT become a command */
+}
+
+static void test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_level(void) {
+  pb_test_setup();
+  char out[2048];
+  size_t n = feed("status\n", out, sizeof out);
+  out[n] = '\0';
+  TEST_ASSERT_NOT_NULL(strstr(out, "granted=5592ms"));
+  TEST_ASSERT_NOT_NULL(strstr(out, "alive=yes"));
+  TEST_ASSERT_NOT_NULL(strstr(out, "WDT, not IWDT"));
+  TEST_ASSERT_NOT_NULL(strstr(out, "pump_on_level="));
+  sim_wdt_stop();
+  n = feed("status\n", out, sizeof out);
+  out[n] = '\0';
+  TEST_ASSERT_NOT_NULL(strstr(out, "alive=no"));
+}
+
+static void test_no_float_formatting_appears_in_any_printed_line(void) {
+  /* newlib's float formatting is the deepest stack consumer in the program (spec §12),
+     so the float conversions are banned. A float-formatted number shows as
+     <digit>.<digit>. Two exemptions, and only two: the ip= line's dotted quad, and -
+     from task 20 - the mls= field of the dose summary line, computed in integer tenths.
+
+     THE TWO NEEDLES ARE BUILT CHARACTER BY CHARACTER ON PURPOSE. make check greps this
+     tree for a percent sign followed by a float conversion letter, and it scans string
+     literals in test/ exactly as it scans code; writing the needles out would make this
+     file the one hit that fails the check it exists to defend. */
+  pb_test_setup();
+  char out[4096];
+  size_t n = feed("status\n", out, sizeof out);
+  out[n] = '\0';
+  const char pct = '%';
+  char needle[3] = { pct, 'f', '\0' };
+  TEST_ASSERT_NULL(strstr(out, needle));
+  needle[1] = 'g';
+  TEST_ASSERT_NULL(strstr(out, needle));
+  char *line = strtok(out, "\n");
+  while (line) {
+    if (strncmp(line, "ip=", 3) != 0)
+      for (size_t i = 1; line[i] != '\0' && line[i + 1] != '\0'; ++i)
+        if (line[i] == '.' && line[i - 1] >= '0' && line[i - 1] <= '9' &&
+            line[i + 1] >= '0' && line[i + 1] <= '9')
+          TEST_FAIL_MESSAGE(line);
+    line = strtok(0, "\n");
+  }
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_ui_render_fills_eight_rows_of_sixteen_characters);
@@ -129,5 +223,9 @@ int main(void) {
   RUN_TEST(test_ui_render_lcd_shows_the_last_http_status_on_a_four_hundred);
   RUN_TEST(test_ui_poll_is_a_noop_while_the_pump_is_asserted);
   RUN_TEST(test_ui_poll_is_a_noop_in_a_pass_where_a_modem_command_ran);
+  RUN_TEST(test_parses_every_bench_command);
+  RUN_TEST(test_an_overlong_line_is_dropped_whole_not_truncated_into_a_command);
+  RUN_TEST(test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_level);
+  RUN_TEST(test_no_float_formatting_appears_in_any_printed_line);
   return UNITY_END();
 }
