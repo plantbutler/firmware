@@ -88,8 +88,8 @@ extern "C" void setup(void) {
   }
 
   /* spec §2.5: liveness, not a constant. The counter must DECREASE across a 40 ms UNFED
-     window. A failure here also latches dry. (Task 15 replaces the two lines below with
-     safety_dry_set(true).)
+     window. A failure here also latches dry, through safety_dry_set() (task 15) rather
+     than a second, hand-rolled g_nv.dry_latched write -- one route to the latch, not two.
      hal_wdt_alive() is DESTRUCTIVE, not a getter (hal_uno.cpp:151-160): it feeds the dog,
      spins 40 ms deliberately UNFED, measures the delta, then feeds again. Call it EXACTLY
      ONCE per boot and reuse the result -- a second call is a second, independent 40 ms
@@ -98,8 +98,7 @@ extern "C" void setup(void) {
   const bool wdt_alive = hal_wdt_alive();
   if (!wdt_alive) {
     g_net_disabled = true; g_boot_err = "wdt";
-    g_nv.dry_latched = true;
-    noinit_commit();
+    safety_dry_set(true);
   }
 
   /* spec §7: the hardware ADC width is fixed and analogReadResolution() only stores the
