@@ -19,8 +19,22 @@ static inline void pb_test_setup(void) {
    sim_reset() (called from pb_test_setup(), not here) only resets hal_sim.cpp's own statics —
    a different translation unit. tearDown() is the one place Unity guarantees runs regardless
    of how the case ended, so it is the only place that can actually promise every case starts
-   with g_dosing == false. */
-static inline void pb_test_teardown(void) { sim_events_clear(); safety_set_dosing(false); }
+   with g_dosing == false.
+
+   safety_float_refusal_count(false) belongs here for the identical reason (task 15 fix round
+   1): g_float_refusals is the same shape of process-lifetime static in safety.cpp, and a test
+   that only clears it as its own last line -- as test_the_flap_counter_trips_after_three_
+   consecutive_float_refusals did before this fix -- leaves it dirty for every following case
+   in the binary the moment an assertion earlier in that body fails and longjmps past the
+   clear. `false` is not a magic reset value here: it is the SAME call dose_end_ml_() (task 17)
+   will make on every granted dose, so this line asks the real accessor for "cleared", not a
+   parallel reset path. test_dose.cpp carries a g_float_refusals proof pair, the same shape as
+   its existing g_dosing pair, to guard this teardown line the same way. */
+static inline void pb_test_teardown(void) {
+  sim_events_clear();
+  safety_set_dosing(false);
+  safety_float_refusal_count(false);
+}
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }
 

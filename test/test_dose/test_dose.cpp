@@ -345,7 +345,13 @@ static void test_the_dry_latch_survives_a_warm_reset_and_not_a_cold_one(void) {
 /* §2.10's second consequence. The report's debounce and the dose's debounce are separate
    samples taken minutes apart, so a float flapping at the waterline can grant in the
    report and refuse in the dose. Above the limit the report forces float=0 and err=float
-   regardless of the report-time debounce (task 22), and butler's rules ladder goes dark. */
+   regardless of the report-time debounce (task 22), and butler's rules ladder goes dark.
+
+   The final safety_float_refusal_count(false) below is a real assertion under test --
+   it proves "cleared by any GRANTED dose", not merely a courtesy reset -- so it stays.
+   It is not what keeps the counter clean for the NEXT case, though: pb_test_teardown()
+   is (task 15 fix round 1), for the identical reason g_dosing is reset there rather than
+   inline. See the proof pair immediately below this case. */
 static void test_the_flap_counter_trips_after_three_consecutive_float_refusals(void) {
   pb_test_setup();
   TEST_ASSERT_FALSE(safety_float_flap());
@@ -354,7 +360,27 @@ static void test_the_flap_counter_trips_after_three_consecutive_float_refusals(v
   TEST_ASSERT_FALSE(safety_float_flap());          /* two is not yet a pattern */
   safety_float_refusal_count(true);
   TEST_ASSERT_TRUE(safety_float_flap());           /* the third trips it */
-  safety_float_refusal_count(false);               /* a GRANTED dose clears it */
+  safety_float_refusal_count(false);               /* a GRANTED dose clears it -- asserted, */
+  TEST_ASSERT_FALSE(safety_float_flap());           /* not merely relied on for cleanup */
+}
+
+/* This case and the next are a deliberate pair, run back-to-back in that order (see
+   main()) -- the same shape as the g_dosing pair above, guarding the same class of bug
+   (task 15 fix round 1): g_float_refusals is process-lifetime state in safety.cpp, and
+   this case leaves it dirty (flap tripped) and does NOT reset it inline. If
+   pb_test_teardown() ever stops resetting it, the NEXT case's assertion fails instead of
+   the leak going quiet. */
+static void test_g_float_refusals_leaks_here_if_teardown_does_not_reset_it(void) {
+  safety_float_refusal_count(true);
+  safety_float_refusal_count(true);
+  safety_float_refusal_count(true);        /* trips the flap; left dirty on purpose */
+}
+
+/* The other half of the pair. If pb_test_teardown() correctly cleared g_float_refusals
+   after the previous case, safety_float_flap() reads false here; if the reset
+   regressed, it reads true -- the exact failure mode the finding described, made to
+   fail loudly instead of going quiet. */
+static void test_g_float_refusals_does_not_leak_between_cases(void) {
   TEST_ASSERT_FALSE(safety_float_flap());
 }
 
@@ -388,5 +414,9 @@ int main(void) {
   RUN_TEST(test_the_float_debounce_feeds_the_watchdog_between_samples);
   RUN_TEST(test_the_dry_latch_survives_a_warm_reset_and_not_a_cold_one);
   RUN_TEST(test_the_flap_counter_trips_after_three_consecutive_float_refusals);
+  /* This pair MUST run back-to-back, in this order: the guarantee under test is that
+     pb_test_teardown() resets g_float_refusals between them (task 15 fix round 1). */
+  RUN_TEST(test_g_float_refusals_leaks_here_if_teardown_does_not_reset_it);
+  RUN_TEST(test_g_float_refusals_does_not_leak_between_cases);
   return UNITY_END();
 }
