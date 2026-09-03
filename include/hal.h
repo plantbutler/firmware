@@ -37,8 +37,22 @@ void     hal_servo_us(uint16_t us);        /* 1500 == stop; 0 == detach */
 bool     hal_wdt_start(void);              /* wdt_cfg_t overload; false if the core rejected it */
 uint32_t hal_wdt_granted(void);            /* OUR computed grant, never the timeout getter — §2.5 */
 uint32_t hal_wdt_counter(void);            /* the raw down-counter; the sim makes it settable */
-bool     hal_wdt_alive(void);              /* counter DECREASED across an UNFED window — §2.5 */
-uint32_t hal_wdt_last_delta(void);         /* what the last probe measured; rides out as ch209 */
+bool     hal_wdt_alive(void);              /* counter DECREASED across an UNFED window — §2.5.
+                                              DESTRUCTIVE, not a getter: probes for
+                                              PB_WDT_PROBE_MS with the dog deliberately unfed,
+                                              then re-feeds. NEVER pass this and
+                                              hal_wdt_last_delta() as two arguments of the same
+                                              call — C++ leaves function-argument evaluation
+                                              order unspecified, so the delta could be read
+                                              from a DIFFERENT probe than the one whose verdict
+                                              sits beside it on the same line (found three
+                                              times over: main.cpp's boot banner, then
+                                              cli.cpp's `status`). Call this first, into a
+                                              local, THEN read hal_wdt_last_delta(). */
+uint32_t hal_wdt_last_delta(void);         /* what the LAST hal_wdt_alive() probe measured;
+                                              rides out as ch209. Read it only after that call
+                                              has returned and been stored — see the note
+                                              above. */
 void     hal_wdt_feed(void);               /* ONE caller: safety_tick(). Not called from inside
                                               hal_wdt_alive()'s probe measurement window — the
                                               probe itself brackets that window with a feed on

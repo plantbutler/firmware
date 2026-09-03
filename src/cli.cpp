@@ -186,12 +186,21 @@ void cli_print_status(void) {
      every printed line for (spec §12 item 1, "no %f/%g anywhere in this program") - a
      numeric subsection here would make this line indistinguishable from a stray float
      and fail the very check it exists to satisfy. */
+  /* hal_wdt_alive() and hal_wdt_last_delta() may NOT be passed inline as two arguments
+     of the same call: C++ leaves function-argument evaluation order unspecified, and
+     hal_wdt_alive() is destructive (it probes, then caches the delta hal_wdt_last_delta()
+     reads back) -- on this toolchain gcc evaluates arguments right-to-left on ARM, which
+     would read the delta BEFORE the probe that is supposed to have just produced it, so
+     alive= and delta= would describe two different probes on the same printed line. Call
+     hal_wdt_alive() first, into a local, THEN read the delta it just cached. */
+  const bool     alive = hal_wdt_alive();      /* destructive: probes, then caches the delta */
+  const uint32_t delta = hal_wdt_last_delta();
   snprintf(b, sizeof b,
            "wdt=%s granted=%lums alive=%s delta=%lu "
            "(WDT, not IWDT - DECISIONS #10 says IWDT; see design spec "
            "section \"The watchdog\")\n",
            hal_wdt_granted() ? "on" : "off", (unsigned long)hal_wdt_granted(),
-           hal_wdt_alive() ? "yes" : "no", (unsigned long)hal_wdt_last_delta());
+           alive ? "yes" : "no", (unsigned long)delta);
   hal_serial_write(b);
 
   snprintf(b, sizeof b, "icufilter=%s %s irq_armed=%s %s\n",
