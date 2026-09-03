@@ -15,7 +15,7 @@
 ## Global Constraints
 
 - Repository root for every path in this plan is `/Users/jcanton/projects/plant-butler/firmware` (the umbrella submodule). The retired clone at `~/projects/plant_butler` is not this repo.
-- The spec travels with the plan: `/Users/jcanton/projects/plant-butler/firmware/docs/superpowers/specs/2026-09-03-bench-sketch-design.md`. Every constant, pin number, line-number citation and test name in this plan comes from it. Do not invent a value; if a task says the spec does not give one, say so in the commit message rather than guessing.
+- The spec travels with the plan: `docs/superpowers/specs/2026-09-03-bench-sketch-design.md`. Every constant, pin number, line-number citation and test name in this plan comes from it. Do not invent a value; if a task says the spec does not give one, say so in the commit message rather than guessing.
 - Before a single module is written, prove `pio test -e native --without-testing` links (spec, "Read this first", item 7). Everything else depends on the answer.
 - `platform = renesas-ra@1.6.0`, `framework = arduino` and `board = uno_r4_wifi` belong in `[env:uno_r4_wifi]`, NEVER in the global `[env]`: PlatformIO inherits `[env]` into every environment, and a global `framework = arduino` makes `pio test -e native` abort before compiling anything (spec §10, verified empirically on PlatformIO Core 6.1.19).
 - The global `[env]` carries `build_flags = -Wall -Wextra` and nothing else. Never put `-std=gnu++*` in the global `[env]` or in any renesas-ra environment: that builder already supplies `-std=gnu++17` for C++ and `-std=gnu11` for C (builder/frameworks/arduino.py:100,123), and a `-std=gnu++` in build_flags lands in SCons CCFLAGS and warns once per core .c file on every build (spec §1, §10). `[env:native]` is the exception and needs its own `-std=gnu++17`, because `platform = native` supplies none.
@@ -167,9 +167,9 @@ The spec stages this work into three drops (spec §11). Every task below carries
 **Drop 1.**
 
 **Files:**
-- Create: `/Users/jcanton/projects/plant-butler/firmware/platformio.ini` (rewrite of the existing 17-line file), `/Users/jcanton/projects/plant-butler/firmware/Makefile` (rewrite of the existing 24-line file), `/Users/jcanton/projects/plant-butler/firmware/tools/check.sh`, `/Users/jcanton/projects/plant-butler/firmware/include/secrets.h.example`, `/Users/jcanton/projects/plant-butler/firmware/include/pins.h` (stub: the polarity `#error` only), `/Users/jcanton/projects/plant-butler/firmware/test/support/harness.h`, `/Users/jcanton/projects/plant-butler/firmware/test/test_dose/test_dose.cpp`
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/src/main.cpp` (rewrite the existing 80-line sketch to a bare `setup`/`loop`), `/Users/jcanton/projects/plant-butler/firmware/.gitignore`
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_dose/test_dose.cpp`
+- Create: `platformio.ini` (rewrite of the existing 17-line file), `Makefile` (rewrite of the existing 24-line file), `tools/check.sh`, `include/secrets.h.example`, `include/pins.h` (stub: the polarity `#error` only), `test/support/harness.h`, `test/test_dose/test_dose.cpp`
+- Modify: `src/main.cpp` (rewrite the existing 80-line sketch to a bare `setup`/`loop`), `.gitignore`
+- Test: `test/test_dose/test_dose.cpp`
 
 **Interfaces:**
 - Consumes: nothing. This is the first task.
@@ -3247,7 +3247,7 @@ PB_ADC_BITS and print adc_hw=unverifiable; say which shipped."
 **Drop 1.**
 
 **Files:**
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/lib/Screen/include/Screen.h` (all 21 lines), `/Users/jcanton/projects/plant-butler/firmware/lib/Screen/src/Screen.cpp` (all 33 lines), `/Users/jcanton/projects/plant-butler/firmware/src/main.cpp` (add the two panel objects so the library is actually compiled), `/Users/jcanton/projects/plant-butler/firmware/tools/check.sh` (two greps)
+- Modify: `lib/Screen/include/Screen.h` (all 21 lines), `lib/Screen/src/Screen.cpp` (all 33 lines), `src/main.cpp` (add the two panel objects so the library is actually compiled), `tools/check.sh` (two greps)
 - Test: **none on the host.** `lib/Screen` is in `[env:native]`'s `lib_ignore` and is on spec §9's "NOT tested on the host" list, together with the one-second blocking wait inside `LiquidCrystal_I2C::init_priv()`. What proves this file is `pio run -e uno_r4_wifi`, the two greps, and **bring-up step 1** (spec §13: `i2c` must see 0x20, 0x27 and 0x3C) plus **bring-up step 0** (the banner is legible on both panels).
 
 **Interfaces:**
@@ -3446,9 +3446,9 @@ PB_ADC_BITS and print adc_hw=unverifiable; say which shipped."
 **Drop 1.**
 
 **Files:**
-- Create: `/Users/jcanton/projects/plant-butler/firmware/include/ui.h`, `/Users/jcanton/projects/plant-butler/firmware/src/ui.cpp`
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp` (create it if task 11 has not yet run; the two orders are independent)
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp`
+- Create: `include/ui.h`, `src/ui.cpp`
+- Modify: `test/test_cli/test_cli.cpp` (create it if task 11 has not yet run; the two orders are independent)
+- Test: `test/test_cli/test_cli.cpp`
 
 **Interfaces:**
 - Consumes: `bool cart_busy(void)` from `lib/Manifold/include/cart.h` (task 14 — until then, the declaration is satisfied by a weak stub, see step 3); `Screen::row()` and the two panel objects `g_oled_screen` / `g_lcd_screen` from task 9 (device only).
@@ -3854,9 +3854,9 @@ PB_ADC_BITS and print adc_hw=unverifiable; say which shipped."
 **Drop 1.**
 
 **Files:**
-- Create: `/Users/jcanton/projects/plant-butler/firmware/include/cli.h`, `/Users/jcanton/projects/plant-butler/firmware/src/cli.cpp`
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp` (add four cases and their `RUN_TEST` lines)
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp`
+- Create: `include/cli.h`, `src/cli.cpp`
+- Modify: `test/test_cli/test_cli.cpp` (add four cases and their `RUN_TEST` lines)
+- Test: `test/test_cli/test_cli.cpp`
 
 **Interfaces:**
 - Consumes: `size_t hal_serial_read(char*, size_t)`, `void hal_serial_write(const char*)`, `void hal_serial_drain(void)`, `uint32_t hal_millis(void)`, `int hal_pin_read(uint8_t)`, `bool hal_pump_level_on(void)`, `uint32_t hal_wdt_granted(void)`, `bool hal_wdt_alive(void)`, `uint32_t hal_wdt_last_delta(void)`, `uint8_t hal_adc_bits(void)`, `bool hal_adc_width_ok(void)`, `bool hal_irq_armed(uint8_t)`, `bool hal_irq_filtered(uint8_t)`, `uint32_t hal_heap_arena/ordblks/break(void)`, `uint32_t hal_stack_limit/hwm(void)` (task 3); `pb_noinit_t g_nv`, `noinit_was_cold()`, `noinit_reset_mid()` (task 4); `uint32_t pulses_flow/pulses_flow_rate/pulses_screw/pulses_leak_count(void)` (task 6); `bool sensors_read_raw(uint8_t, uint16_t*)`, `bool sensors_home_hall(bool*)`, `bool sensors_i2c_healthy(void)`, `uint32_t sensors_i2c_errors/sensors_i2c_txn_per_min(void)`, `void sensors_scan(char*, size_t)` (task 7); `PIN_FLOW`, `PIN_HALL_SCREW`, `PIN_HALL_FLOAT` (task 2).
@@ -4314,7 +4314,7 @@ PB_ADC_BITS and print adc_hw=unverifiable; say which shipped."
 **Drop 1.**
 
 **Files:**
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/src/main.cpp` (from task 9's four-line stub to the full setup order and loop)
+- Modify: `src/main.cpp` (from task 9's four-line stub to the full setup order and loop)
 - Test: **none on the host.** `[env:native]` filters `main.cpp` out (it has `setup`/`loop` and no `main()`). What proves this file is `pio run -e uno_r4_wifi`, and **bring-up step 0** (spec §13): flash the bringup binary, open the monitor at 115200, and read the banner *before 12 V goes onto COM*.
 
 **Interfaces:**
@@ -4591,7 +4591,7 @@ PB_ADC_BITS and print adc_hw=unverifiable; say which shipped."
 **Drop 1.**
 
 **Files:**
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/tools/check.sh` (consolidate task 8's and task 9's greps and complete the drop-1 set), `/Users/jcanton/projects/plant-butler/firmware/Makefile` (the `check` target already calls it — confirm)
+- Modify: `tools/check.sh` (consolidate task 8's and task 9's greps and complete the drop-1 set), `Makefile` (the `check` target already calls it — confirm)
 - Test: `make check` is itself the test.
 
 **Interfaces:**
@@ -4764,10 +4764,10 @@ Every invariant in spec 9's table that is decidable on a drop-1 tree is now a gr
 **Drop 2.**
 
 **Files:**
-- Create: `/Users/jcanton/projects/plant-butler/firmware/lib/Manifold/include/cart.h`, `/Users/jcanton/projects/plant-butler/firmware/lib/Manifold/src/cart.cpp`
-- Delete: `/Users/jcanton/projects/plant-butler/firmware/lib/Manifold/include/Manifold.h`, `/Users/jcanton/projects/plant-butler/firmware/lib/Manifold/src/Manifold.cpp`
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/include/sim.h` and `/Users/jcanton/projects/plant-butler/firmware/src/hal_sim.cpp` (the screw and home-region model, `sim_set_stall`), `/Users/jcanton/projects/plant-butler/firmware/include/config.h` (the two servo drive microsecond constants — see the note below), `/Users/jcanton/projects/plant-butler/firmware/src/cli.cpp` (`status` gains the cart lines)
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_cart/test_cart.cpp`
+- Create: `lib/Manifold/include/cart.h`, `lib/Manifold/src/cart.cpp`
+- Delete: `lib/Manifold/include/Manifold.h`, `lib/Manifold/src/Manifold.cpp`
+- Modify: `include/sim.h` and `src/hal_sim.cpp` (the screw and home-region model, `sim_set_stall`), `include/config.h` (the two servo drive microsecond constants — see the note below), `src/cli.cpp` (`status` gains the cart lines)
+- Test: `test/test_cart/test_cart.cpp`
 
 **Interfaces:**
 - Consumes: `void hal_servo_us(uint16_t us)` (1500 == stop, 0 == detach) and `uint32_t hal_millis(void)` from task 3; `uint32_t pulses_screw(void)` from task 6; `bool sensors_home_hall(bool *home)` (false == bus error, never a value) from task 7 — and **not** `sensors_i2c_healthy()`: `cart_bus_check()` and `move_()` both take a live `sensors_home_hall()` read as the bus fact, and the health accessor is the dose ladder's, not the cart's; `void safety_tick(void)` and `void safety_wait_ms(uint32_t)` from task 5; `PB_PULSES_PER_GATE`, `PB_PULSES_HOME_TO_1`, `PB_MOVE_CAP_MS` (45000), `PB_STALL_WINDOW_MS` (2500), `PB_SERVO_CAP_MS` (10000), `PB_OUTLETS` (5) from task 2.
@@ -5215,8 +5215,8 @@ Every invariant in spec 9's table that is decidable on a drop-1 tree is now a gr
 **Drop 2.**
 
 **Files:**
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/include/safety.h`, `/Users/jcanton/projects/plant-butler/firmware/src/safety.cpp`, `/Users/jcanton/projects/plant-butler/firmware/src/cli.cpp` (`dry on|off` in the dispatcher, and `status` gains `dry=`), `/Users/jcanton/projects/plant-butler/firmware/include/sim.h` and `/Users/jcanton/projects/plant-butler/firmware/src/hal_sim.cpp` (`sim_set_float_pattern`), `/Users/jcanton/projects/plant-butler/firmware/test/test_dose/test_dose.cpp`, `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp` (`dry on` / `dry off` join task 11's bench-command case)
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_dose/test_dose.cpp`
+- Modify: `include/safety.h`, `src/safety.cpp`, `src/cli.cpp` (`dry on|off` in the dispatcher, and `status` gains `dry=`), `include/sim.h` and `src/hal_sim.cpp` (`sim_set_float_pattern`), `test/test_dose/test_dose.cpp`, `test/test_cli/test_cli.cpp` (`dry on` / `dry off` join task 11's bench-command case)
+- Test: `test/test_dose/test_dose.cpp`
 
 **Interfaces:**
 - Consumes: `int hal_pin_read(uint8_t)` and `PIN_HALL_FLOAT` from tasks 2-3; `void safety_wait_ms(uint32_t)` from task 5 (it calls `safety_tick()` on every iteration, so the wait is fed); `pb_noinit_t g_nv` and `void noinit_commit(void)` from task 4; `PB_FLOAT_OK_SAMPLES` (3), `PB_FLOAT_SAMPLE_MS` (20), `PB_FLOAT_FLAP_LIMIT` (3) from task 2.
@@ -5501,8 +5501,8 @@ Every invariant in spec 9's table that is decidable on a drop-1 tree is now a gr
 **Drop 2.**
 
 **Files:**
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/include/cli.h`, `/Users/jcanton/projects/plant-butler/firmware/src/cli.cpp` (the matcher, the pushback buffer, `cli_poll()`'s reader, and **the `stop` command in the dispatcher**), `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp`
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp`
+- Modify: `include/cli.h`, `src/cli.cpp` (the matcher, the pushback buffer, `cli_poll()`'s reader, and **the `stop` command in the dispatcher**), `test/test_cli/test_cli.cpp`
+- Test: `test/test_cli/test_cli.cpp`
 
 **Interfaces:**
 - Consumes: `size_t hal_serial_read(char *buf, size_t cap)` and `void hal_serial_write(const char *)` from task 3; `void safety_dry_set(bool)` from task 15; `PB_LINE_CAP` from task 2.
@@ -5788,8 +5788,8 @@ Every invariant in spec 9's table that is decidable on a drop-1 tree is now a gr
 > **Read spec §2.8 in full before the first line. This is the file where a mistake puts water on the floor.**
 
 **Files:**
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/include/safety.h`, `/Users/jcanton/projects/plant-butler/firmware/src/safety.cpp`, `/Users/jcanton/projects/plant-butler/firmware/src/cli.cpp` (`status` gains `pulses_per_l`, the prime and stall windows, the measured cap clamp or `cap=UNCLAMPED`, and the real `last=` line), `/Users/jcanton/projects/plant-butler/firmware/test/test_dose/test_dose.cpp`
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_dose/test_dose.cpp`
+- Modify: `include/safety.h`, `src/safety.cpp`, `src/cli.cpp` (`status` gains `pulses_per_l`, the prime and stall windows, the measured cap clamp or `cap=UNCLAMPED`, and the real `last=` line), `test/test_dose/test_dose.cpp`
+- Test: `test/test_dose/test_dose.cpp`
 
 **Interfaces:**
 - Consumes: `bool hal_wdt_alive(void)`, `void hal_pump_write(bool)`, `uint32_t hal_millis(void)`, `void hal_serial_drain(void)`, `int hal_pin_read(uint8_t)` from task 3; `g_nv` and `noinit_commit()` from task 4; `void safety_tick(void)`, `bool safety_dosing(void)`, `void safety_set_dosing(bool)` from tasks 5 and 7; `uint32_t pulses_flow(void)`, `uint32_t pulses_flow_rate(void)`, `uint32_t pulses_to_ml(uint32_t pulses, uint16_t per_l)`, `void pulses_leak_rearm_at(uint32_t at_ms)` from task 6; `bool sensors_i2c_healthy(void)` from task 7; `bool cart_pos_known(void)`, `uint8_t cart_pos(void)`, `bool cart_bus_check(void)` from task 14; `bool safety_float_ok_debounced(void)`, `bool safety_dry(void)`, `void safety_float_refusal_count(bool)` from task 15; `bool cli_stop_requested(void)`, `void cli_stop_clear(void)` from task 16.
@@ -6651,8 +6651,8 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
 **Drop 2.**
 
 **Files:**
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/src/safety.cpp` (**the `for(;;)` body only** — nothing above the ON write and nothing below the OFF write changes in this task), `/Users/jcanton/projects/plant-butler/firmware/include/sim.h` and `/Users/jcanton/projects/plant-butler/firmware/src/hal_sim.cpp` (the four pump-relative injectors of step 1: `sim_flow_storm_at_pump_on`, `sim_set_flow_burst_pulses`, `sim_set_float_at_ms`, `sim_serial_rx_at_ms`), `/Users/jcanton/projects/plant-butler/firmware/test/test_dose/test_dose.cpp`
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_dose/test_dose.cpp`
+- Modify: `src/safety.cpp` (**the `for(;;)` body only** — nothing above the ON write and nothing below the OFF write changes in this task), `include/sim.h` and `src/hal_sim.cpp` (the four pump-relative injectors of step 1: `sim_flow_storm_at_pump_on`, `sim_set_flow_burst_pulses`, `sim_set_float_at_ms`, `sim_serial_rx_at_ms`), `test/test_dose/test_dose.cpp`
+- Test: `test/test_dose/test_dose.cpp`
 
 **Interfaces:**
 - Consumes: everything task 17 consumes, plus `PB_PRIME_MIN_PULSES` (5), `PB_PRIME_LONG_MS` (15000), `PB_PRIME_CAP_MS` (20000), `PB_FLOW_MAX_HZ` (1200), `PB_PLAUS_NUM` (4), `PB_PLAUS_DEN` (1), `PB_POS_RECHECK_MS` (1000) from task 2; `bool cart_bus_check(void)` from task 14; `int hal_pin_read(uint8_t)` and `PIN_HALL_FLOAT` from tasks 2-3.
@@ -7065,9 +7065,9 @@ There is no `sensors_poll()` and no `sensors_sweep()` in that table: `sensors_sw
 > **Read spec §2.7 in full before the first line.** This is the strongest refusal in the program: two independent sensors contradicting each other, and the answer is to stop the rig until a human looks.
 
 **Files:**
-- Create: `/Users/jcanton/projects/plant-butler/firmware/test/test_contra/test_contra.cpp`
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/include/safety.h`, `/Users/jcanton/projects/plant-butler/firmware/src/safety.cpp` (`dose_end_ml_()` and the refusal ladder), `/Users/jcanton/projects/plant-butler/firmware/src/cli.cpp` (`clear contra`, and `status` gains `contra=` and the banner), `/Users/jcanton/projects/plant-butler/firmware/src/ui.cpp` (the LCD banner rows), `/Users/jcanton/projects/plant-butler/firmware/test/support/harness.h` (`pb_latch_contra()`), `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp`, `/Users/jcanton/projects/plant-butler/firmware/test/test_dose/test_dose.cpp`
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_contra/test_contra.cpp`, `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp`
+- Create: `test/test_contra/test_contra.cpp`
+- Modify: `include/safety.h`, `src/safety.cpp` (`dose_end_ml_()` and the refusal ladder), `src/cli.cpp` (`clear contra`, and `status` gains `contra=` and the banner), `src/ui.cpp` (the LCD banner rows), `test/support/harness.h` (`pb_latch_contra()`), `test/test_cli/test_cli.cpp`, `test/test_dose/test_dose.cpp`
+- Test: `test/test_contra/test_contra.cpp`, `test/test_cli/test_cli.cpp`
 
 **Interfaces:**
 - Consumes: `g_nv` and `void noinit_commit(void)`, `bool noinit_was_cold(void)` from task 4; `int hal_pin_read(uint8_t)` and `PIN_HALL_FLOAT` from tasks 2-3; `dose_end_ml_(r, got_pulses, elapsed_ms, outlet, prime_ms, long_prime)` from task 17; `bool cart_home(void)` from task 14; `void safety_set_err(const char *)` from task 17.
@@ -7531,8 +7531,8 @@ Fourteen of those fifteen are written here. **`test_latch_reports_err_contra_and
 **Drop 2.**
 
 **Files:**
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/src/cli.cpp` (the `#if PB_BRINGUP` block and the summary printer), `/Users/jcanton/projects/plant-butler/firmware/include/cli.h`, `/Users/jcanton/projects/plant-butler/firmware/include/safety.h` and `/Users/jcanton/projects/plant-butler/firmware/src/safety.cpp` (the unconditional `hang` member and its loop hook), `/Users/jcanton/projects/plant-butler/firmware/include/config.h` and `/Users/jcanton/projects/plant-butler/firmware/platformio.ini` (spec §2.15's `#error` on an uncalibrated bench build), `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp`
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp`
+- Modify: `src/cli.cpp` (the `#if PB_BRINGUP` block and the summary printer), `include/cli.h`, `include/safety.h` and `src/safety.cpp` (the unconditional `hang` member and its loop hook), `include/config.h` and `platformio.ini` (spec §2.15's `#error` on an uncalibrated bench build), `test/test_cli/test_cli.cpp`
+- Test: `test/test_cli/test_cli.cpp`
 
 **Interfaces:**
 - Consumes: `dose_result_t dose_run(const dose_req_t *)`, `uint16_t dose_flow_ml(void)`, `dose_result_t dose_last_result(void)`, `uint32_t dose_last_ms(void)`, `uint32_t dose_last_pulses(void)`, `uint8_t dose_last_outlet(void)`, `const char *err_of(dose_result_t)`, `bool cfg_pulses_per_l_set(uint16_t)`, `uint16_t cfg_pulses_per_l_get(void)` from task 17; `bool cart_home(void)`, `bool cart_goto(uint8_t)`, `void cart_jog(int16_t, uint32_t)`, `const char *cart_err(void)` from task 14; `g_nv.pattern` and `noinit_commit()` from task 4; `PB_SERVO_CAP_MS` (10000), `PB_DOSE_CAP_MS_MAX` (60000), `PB_HANG_MS` (3000), `PB_PULSES_PER_L_MIN` (1000), `PB_PULSES_PER_L_MAX` (20000), `PB_OUTLETS` (5) from task 2.
@@ -10981,12 +10981,12 @@ bring-up question. tools/check.sh reports 0 hits for WiFi.ping."
 **Drop 3.**
 
 **Files:**
-- Create: `/Users/jcanton/projects/plant-butler/firmware/include/exec.h`
-- Create: `/Users/jcanton/projects/plant-butler/firmware/src/exec.cpp`
-- Create: `/Users/jcanton/projects/plant-butler/firmware/test/support/bodies.h` (the canned HTTP responses `test_net`, `test_cart` and `test_contra` share — **separate suite directories are separate binaries and separate translation units**, so a `static const char *` in one suite's `.cpp` cannot be named from another's)
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/src/main.cpp` (`loop()` reaches its final shape; `setup()` gains `cart_begin()`, the `net_disable()` forwarding, `net_begin()` and `exec_begin()`; **`ui_fill_()` is rewritten whole — this task owns every remaining field of `ui_state_t`**)
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/src/cli.cpp` (`cli_print_status()` gains the cart's parked state and the `stop=1` help text)
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_net/test_netfsm.cpp`, `/Users/jcanton/projects/plant-butler/firmware/test/test_contra/test_contra.cpp`, `/Users/jcanton/projects/plant-butler/firmware/test/test_cart/test_cart.cpp`
+- Create: `include/exec.h`
+- Create: `src/exec.cpp`
+- Create: `test/support/bodies.h` (the canned HTTP responses `test_net`, `test_cart` and `test_contra` share — **separate suite directories are separate binaries and separate translation units**, so a `static const char *` in one suite's `.cpp` cannot be named from another's)
+- Modify: `src/main.cpp` (`loop()` reaches its final shape; `setup()` gains `cart_begin()`, the `net_disable()` forwarding, `net_begin()` and `exec_begin()`; **`ui_fill_()` is rewritten whole — this task owns every remaining field of `ui_state_t`**)
+- Modify: `src/cli.cpp` (`cli_print_status()` gains the cart's parked state and the `stop=1` help text)
+- Test: `test/test_net/test_netfsm.cpp`, `test/test_contra/test_contra.cpp`, `test/test_cart/test_cart.cpp`
 
 **Interfaces:**
 
@@ -11665,7 +11665,7 @@ deliberately NOT declared: nothing would have called it."
 **Drop 3.**
 
 **Files:**
-- Create: `/Users/jcanton/projects/plant-butler/firmware/lib/Network/src/link_wifi.cpp`
+- Create: `lib/Network/src/link_wifi.cpp`
 - Test: **none on the host.** `lib/Network` is in `[env:native]`'s `lib_ignore` and this file is on spec §9's *"NOT tested on the host"* list. It is verified by `pio run -e uno_r4_wifi`, by `tools/check.sh`, by task 28's two on-device wall-clock tests, and on the bench by §13 step 7e.
 
 **Interfaces:**
@@ -11851,8 +11851,8 @@ hostByName() once at join time with the address cached. Task 28's two device tes
 **Drop 3.**
 
 **Files:**
-- Create: `/Users/jcanton/projects/plant-butler/firmware/test/test_device/test_device.cpp`
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/platformio.ini` (`[env:uno_r4_wifi_test]`'s `build_src_filter`), `/Users/jcanton/projects/plant-butler/firmware/test/support/harness.h` (the device fixture arm)
+- Create: `test/test_device/test_device.cpp`
+- Modify: `platformio.ini` (`[env:uno_r4_wifi_test]`'s `build_src_filter`), `test/support/harness.h` (the device fixture arm)
 - Test: `pio test -e uno_r4_wifi_test`
 
 **Interfaces:**
@@ -12108,9 +12108,9 @@ hostByName() once at join time with the address cached. Task 28's two device tes
 **Drop 3.**
 
 **Files:**
-- Create: `/Users/jcanton/projects/plant-butler/firmware/src/sim_console.h` (the two-line internal seam; **step 4 prints it in full**) and `/Users/jcanton/projects/plant-butler/firmware/src/sim_console.cpp` (the device-only console shim; **step 4 prints it in full**). `sim_console.cpp` is compiled **only** by `[env:uno_r4_wifi_sim]`: add `-<sim_console.cpp>` to `build_src_filter` in `[env:uno_r4_wifi]` (which the bringup and test envs inherit) and in `[env:native]`, so that the one file carrying an Arduino header outside `hal_uno.cpp` reaches exactly the one binary that needs it.
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/src/cli.cpp` (the `sim ...` family under `#if PB_SIM_CLI`, `sim resp` included — it calls task 21's already-written `link_fake_queue_response()`, so **`src/link_fake.cpp` is NOT modified by this task and is not in its `git add`**), `/Users/jcanton/projects/plant-butler/firmware/src/hal_sim.cpp` (`hal_serial_*` reach the shim on the device), `/Users/jcanton/projects/plant-butler/firmware/src/ui.cpp` (confirm the banner rows), `/Users/jcanton/projects/plant-butler/firmware/src/main.cpp` (the LED double-blink and the `SIM ` line prefix), `/Users/jcanton/projects/plant-butler/firmware/platformio.ini` (`-<sim_console.cpp>` in `[env:native]`'s `build_src_filter`), `/Users/jcanton/projects/plant-butler/firmware/Makefile` (`firmware-SIM.bin`), `/Users/jcanton/projects/plant-butler/firmware/tools/check.sh` (the sim env's file-set check)
-- Test: `/Users/jcanton/projects/plant-butler/firmware/test/test_cli/test_cli.cpp`
+- Create: `src/sim_console.h` (the two-line internal seam; **step 4 prints it in full**) and `src/sim_console.cpp` (the device-only console shim; **step 4 prints it in full**). `sim_console.cpp` is compiled **only** by `[env:uno_r4_wifi_sim]`: add `-<sim_console.cpp>` to `build_src_filter` in `[env:uno_r4_wifi]` (which the bringup and test envs inherit) and in `[env:native]`, so that the one file carrying an Arduino header outside `hal_uno.cpp` reaches exactly the one binary that needs it.
+- Modify: `src/cli.cpp` (the `sim ...` family under `#if PB_SIM_CLI`, `sim resp` included — it calls task 21's already-written `link_fake_queue_response()`, so **`src/link_fake.cpp` is NOT modified by this task and is not in its `git add`**), `src/hal_sim.cpp` (`hal_serial_*` reach the shim on the device), `src/ui.cpp` (confirm the banner rows), `src/main.cpp` (the LED double-blink and the `SIM ` line prefix), `platformio.ini` (`-<sim_console.cpp>` in `[env:native]`'s `build_src_filter`), `Makefile` (`firmware-SIM.bin`), `tools/check.sh` (the sim env's file-set check)
+- Test: `test/test_cli/test_cli.cpp`
 
 **Interfaces:**
 - Consumes: the whole `sim.h` injector API (tasks 3, 6, 7, 14) — `sim_reset`, `sim_advance`, `sim_set_float`, `sim_set_flow_ml_s`, `sim_flow_storm`, `sim_set_i2c_fail`, `sim_set_mux_stuck`, `sim_set_stall`, `sim_set_leak`, `sim_wdt_stop`, `sim_wdt_rate_hz`, `sim_noinit_clobber`, `sim_set_channel`; `link_fake_queue_response()` from `include/sim.h` (task 21 appends the `link_fake_*` control surface there — there is no `include/link_fake.h`); `PIN_LED` from `include/pins.h` (task 2 step 5).
@@ -12501,7 +12501,7 @@ hostByName() once at join time with the address cached. Task 28's two device tes
 **Drop 3.**
 
 **Files:**
-- Modify: `/Users/jcanton/projects/plant-butler/firmware/tools/check.sh` (the invariants of spec §9's table that needed drop-2 and drop-3 code), `/Users/jcanton/projects/plant-butler/firmware/Makefile` (confirm `check`), `/Users/jcanton/projects/plant-butler/firmware/AGENTS.md`, `/Users/jcanton/projects/plant-butler/firmware/README.md`
+- Modify: `tools/check.sh` (the invariants of spec §9's table that needed drop-2 and drop-3 code), `Makefile` (confirm `check`), `AGENTS.md`, `README.md`
 - Test: `make check`
 
 **Interfaces:**
