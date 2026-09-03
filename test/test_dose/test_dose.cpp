@@ -1498,6 +1498,160 @@ void test_a_healthy_metered_dose_completes_on_the_default_prime_window(void) {
       "a healthy dose must reach its target well inside the prime window, with room to spare");
 }
 
+/* Rule 1's own ceiling, against the YF-S401's rating rather than against the target rule's
+   order (that is what the two storm cases above already prove). A rate above 1200 Hz is
+   not a fast pump; it is a meter that is not measuring water. The 100 ms estimator window
+   is what makes the verdict arrive inside a second. */
+void test_dose_aborts_when_the_pulse_rate_exceeds_the_meter_rating(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_flow_storm_at_pump_on((uint32_t)PB_FLOW_MAX_HZ + 200u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  TEST_ASSERT_EQUAL(DOSE_ABORT_NOISE, dose_run(&q));
+  TEST_ASSERT_TRUE(sim_pump_on_ms() < 1000u);
+}
+
+/* Rule 2, on the DOSE_OK path itself: at 30 ml/s (native_measured's PB_ML_PER_S_MEASURED) a
+   120 ml dose honestly needs 4000 ms. This one delivers it in well under 900 ms -- fast
+   enough to clear the plausibility floor (el < ml*1000/(PLAUS_NUM*PB_ML_PER_S_MEASURED) =
+   1000 ms here) but its own pulse RATE (~882 Hz) stays comfortably under PB_FLOW_MAX_HZ
+   (1200), so rule 1 cannot be what fires -- only rule 2 can, and that is the point: this is
+   noise a rate ceiling alone would miss, because 882 Hz is a rate a real YF-S401 could
+   produce; it is the ELAPSED time against the DELIVERED volume that is impossible. */
+void test_a_dose_that_reaches_target_implausibly_fast_is_noise_not_ok(void) {
+#if PB_ML_PER_S_MEASURED > 0
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(150u);      /* ~882 pulses/s: under PB_FLOW_MAX_HZ, so rule 1 is silent */
+  dose_req_t q = {0};
+  q.ml = 120u; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  dose_result_t r = dose_run(&q);
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_NOISE, r,
+      "reaching the target in well under a quarter of the honest 4 s must be noise, not ok");
+  TEST_ASSERT_NOT_EQUAL(DOSE_OK, dose_last_result());
+#else
+  TEST_IGNORE_MESSAGE("PB_ML_PER_S_MEASURED == 0: the rule is compiled out");
+#endif
+}
+
+/* Bring-up 5b in software: pulling the float mid-dose must stop it within one loop
+   iteration. 5b's own pass criterion also includes contra=0 afterwards, because the float
+   dropping is the two sensors AGREEING (the meter was genuinely flowing and the tank ran
+   dry), not contradicting -- task 19 owns the latch's setter, but the reader exists now and
+   this is the case that has to keep reading false once that setter lands. */
+void test_dose_stops_within_one_iteration_when_the_float_drops(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(30u);
+  sim_set_float_at_ms(500u, false);      /* drops mid-dose, well inside the prime window */
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  dose_result_t r = dose_run(&q);
+  TEST_ASSERT_EQUAL(DOSE_ABORT_FLOAT, r);
+  TEST_ASSERT_TRUE_MESSAGE(sim_pump_on_ms() < 500u + 10u,
+      "the float drop must stop the dose within about one loop iteration");
+  TEST_ASSERT_FALSE_MESSAGE(safety_contra(),
+      "the float and the meter agreeing (flow, then dry) must never latch the contradiction");
+}
+
+/* §2.13's live half. The bus wedges AFTER the dose has started: sim_set_i2c_fail(true) does
+   not retroactively fail sensors.cpp's cached healthy flag (that needs PB_I2C_FAIL_LIMIT
+   consecutive failed transfers through gate_()), so the pre-dose ladder's !sensors_i2c_
+   healthy() rung reads clean and this dose is granted -- it is the LIVE cart_bus_check()
+   inside the loop, at most once per PB_POS_RECHECK_MS, that discovers the bus is gone.
+   hal_i2c_recover() refuses while g_dosing (§2.13), so the bus stays broken for the rest of
+   the dose, which is the point: A4/A5 carry the mux select lines and the home hall. */
+void test_dose_aborts_when_the_expander_read_fails_mid_dose(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  (void)sensors_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(30u);
+  sim_set_i2c_fail(true);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  dose_result_t r = dose_run(&q);
+  TEST_ASSERT_EQUAL(DOSE_ABORT_POS, r);
+  TEST_ASSERT_TRUE_MESSAGE(sim_pump_on_ms() <= (uint32_t)PB_POS_RECHECK_MS + 10u,
+      "the bus failure must be caught within PB_POS_RECHECK_MS plus one iteration");
+  sim_set_i2c_fail(false);
+  (void)sensors_begin();                  /* leave the bus healthy for whatever runs next */
+}
+
+/* §2.12's last-resort abort, driven by real bytes through sim_serial_rx() WHILE the loop is
+   spinning -- never by poking cli.cpp's flag directly. */
+void test_stop_typed_mid_dose_stops_it_within_one_iteration(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);          /* nothing must arrive: `stop` alone must end this */
+  sim_serial_rx_at_ms(500u, "stop\n");
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  dose_result_t r = dose_run(&q);
+  TEST_ASSERT_EQUAL(DOSE_ABORT_STOP, r);
+  TEST_ASSERT_TRUE_MESSAGE(sim_pump_on_ms() < 500u + 10u,
+      "a typed stop must end the dose within about one loop iteration");
+}
+
+/* `dry on` means the same thing during a dose as before one (cli.cpp's own comment): it
+   both aborts the dose (through the identical DOSE_ABORT_STOP matcher `stop` uses) AND
+   latches the dry flag, in the same byte-wise pass. */
+void test_dry_on_typed_mid_dose_stops_it(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);
+  sim_serial_rx_at_ms(500u, "dry on\n");
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  dose_result_t r = dose_run(&q);
+  TEST_ASSERT_EQUAL(DOSE_ABORT_STOP, r);
+  TEST_ASSERT_TRUE_MESSAGE(safety_dry(), "`dry on` typed mid-dose must latch the dry flag");
+  safety_dry_set(false);            /* leave it clean for whatever runs next */
+}
+
+/* This is what makes a 60 s dose legal under a 5592 ms grant (§3), and it is the first
+   assertion that fails if anyone ever adds a `continue` to the loop body.
+
+   Anchored on the ON write, not on "skip the first N feeds": the refusal ladder's OWN
+   hal_wdt_alive() feeds twice around a deliberate ~PB_WDT_PROBE_MS UNFED window (§2.5)
+   before the loop even starts, and safety_float_ok_debounced() feeds again, closely,
+   while sampling -- both correct, neither the loop. Scanning from the first WDT_FEED
+   after the pump's ON write is what actually isolates "every iteration of the dose loop"
+   rather than assuming a fixed feed count for everything that runs ahead of it. */
+void test_watchdog_is_fed_on_every_iteration_of_the_dose_loop(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  (void)sensors_begin();
+  sim_set_float(true); sim_set_flow_ml_s(30);
+  sim_events_clear();
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 5000u;
+  (void)dose_run(&q);
+  const sim_ev_t *ev; size_t n = sim_events(&ev);
+  size_t loop_start = n;
+  for (size_t i = 0; i < n; ++i)
+    if (ev[i].kind == SIM_EV_PUMP_WRITE && (ev[i].arg & SIM_PFS_LEVEL_HI)) loop_start = i;
+  TEST_ASSERT_TRUE_MESSAGE(loop_start < n, "arrange: the dose must have asserted D6");
+  uint32_t prev = 0, feeds = 0; bool first = true;
+  for (size_t i = loop_start; i < n; ++i) {
+    if (ev[i].kind != SIM_EV_WDT_FEED) continue;
+    /* Rule 1 (pulses_flow_rate()) calls hal_millis() a second time on every pass, so a
+       loop iteration now costs two fake ticks, not one -- verified empirically at exactly
+       2 ms per iteration once anchored on the ON write; 3 ms is that plus one tick of
+       slack, not a re-derivation of task 17's original (single-hal_millis()-call) bound. */
+    if (!first) TEST_ASSERT_TRUE_MESSAGE(ev[i].at_ms - prev <= 3u, "unfed span in the dose loop");
+    prev = ev[i].at_ms; first = false; feeds++;
+  }
+  TEST_ASSERT_TRUE(feeds > 100u);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -1557,6 +1711,13 @@ int main(void) {
   RUN_TEST(test_stall_abort_is_armed_on_time_not_on_pulses);
   RUN_TEST(test_five_spurious_edges_at_start_do_not_disable_the_abort);
   RUN_TEST(test_a_healthy_metered_dose_completes_on_the_default_prime_window);
+  RUN_TEST(test_dose_aborts_when_the_pulse_rate_exceeds_the_meter_rating);
+  RUN_TEST(test_a_dose_that_reaches_target_implausibly_fast_is_noise_not_ok);
+  RUN_TEST(test_dose_stops_within_one_iteration_when_the_float_drops);
+  RUN_TEST(test_dose_aborts_when_the_expander_read_fails_mid_dose);
+  RUN_TEST(test_stop_typed_mid_dose_stops_it_within_one_iteration);
+  RUN_TEST(test_dry_on_typed_mid_dose_stops_it);
+  RUN_TEST(test_watchdog_is_fed_on_every_iteration_of_the_dose_loop);
   RUN_TEST(test_pump_is_off_on_every_exit_path);
   RUN_TEST(test_the_ladder_reports_the_more_specific_reason);
   RUN_TEST(test_refusal_reports_zero_millilitres_not_the_previous_dose);
