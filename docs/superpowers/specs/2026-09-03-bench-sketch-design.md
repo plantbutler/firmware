@@ -2437,7 +2437,38 @@ build_flags = ${env.build_flags} -std=gnu++17 -DPB_NATIVE=1 -DPB_SIM=1 -DPB_BRIN
 test_build_src = yes
 build_src_filter = +<*> -<main.cpp> -<hal_uno.cpp>
 lib_ignore = Network, Screen, Servo, Arduino_Sensorkit, LiquidCrystal_I2C
+
+; --- 2026-09-03 correction. Two flags and four one-flag variants that the block above
+; --- did not print. Six suites in this document are specified to compile TWICE, once
+; --- with a flag and once without; without a named environment for each, none of those
+; --- cases has anywhere to be compiled in, and `pio test -e native` cannot even build,
+; --- because pins.h #errors when no relay polarity is defined. Every variant is one flag
+; --- on top of env:native and nothing else, so there is one place to change the rest.
+[env:native_bench]                                 ; the bench-vs-bringup cases
+extends = env:native
+build_flags = ${env:native.build_flags} -UPB_BRINGUP
+
+[env:native_cal]                                   ; the calibrated arm of the cart #if
+extends = env:native
+build_flags = ${env:native.build_flags} -DPB_PULSES_PER_GATE=1450
+
+[env:native_measured]                              ; the two cap-clamp cases
+extends = env:native
+build_flags = ${env:native.build_flags} -DPB_ML_PER_S_MEASURED=30
+
+[env:native_nosimcli]                              ; `sim ...` is not a command here
+extends = env:native
+build_flags = ${env:native.build_flags} -UPB_SIM_CLI
 ```
+
+**`[env:native]`'s flags, corrected 2026-09-03.** The printed line above is missing two that
+it cannot build without. `-DPB_RELAY_ACTIVE_HIGH` is required because §2.2 gives `pins.h` no
+default polarity and an unconditional `#error`, and `safety.cpp` and `sensors.cpp` both include
+it — the flag is inert on the host, since `PB_PUMP_OWNER` is never defined off the board, so
+`PIN_PUMP_EN` and the PFS macros do not exist there. `-DPB_SIM_CLI=1` is required because the
+console suites drive the fake's serial console. `native_nosimcli` undefines `PB_SIM_CLI` and
+**not** `PB_SIM`: `PB_SIM` also gates every `hal_*` body in `hal_sim.cpp`, so `-UPB_SIM` would
+leave the host suite linking against no HAL at all.
 
 Notes an implementer needs:
 
