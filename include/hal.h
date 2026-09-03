@@ -40,15 +40,22 @@ uint32_t hal_wdt_counter(void);            /* the raw down-counter; the sim make
 bool     hal_wdt_alive(void);              /* counter DECREASED across an UNFED window — §2.5.
                                               DESTRUCTIVE, not a getter: probes for
                                               PB_WDT_PROBE_MS with the dog deliberately unfed,
-                                              then re-feeds. NEVER pass this and
+                                              then re-feeds. Two rules, found broken separately
+                                              at two call sites already: (1) never call this a
+                                              SECOND time expecting the same verdict as the
+                                              first — each call is its own independent probe,
+                                              which is what main.cpp's boot banner got wrong by
+                                              calling it twice for the same boot's assertion and
+                                              its own alive= field; (2) never pass this and
                                               hal_wdt_last_delta() as two arguments of the same
                                               call — C++ leaves function-argument evaluation
-                                              order unspecified, so the delta could be read
-                                              from a DIFFERENT probe than the one whose verdict
-                                              sits beside it on the same line (found three
-                                              times over: main.cpp's boot banner, then
-                                              cli.cpp's `status`). Call this first, into a
-                                              local, THEN read hal_wdt_last_delta(). */
+                                              order unspecified, so the delta could be read from
+                                              a DIFFERENT probe than the one whose verdict sits
+                                              beside it on the same line, which is what
+                                              cli.cpp's `status` got wrong. Call this once, into
+                                              a local, THEN read hal_wdt_last_delta() from that
+                                              local — never call hal_wdt_alive() again to get a
+                                              "fresh" answer for a verdict already in hand. */
 uint32_t hal_wdt_last_delta(void);         /* what the LAST hal_wdt_alive() probe measured;
                                               rides out as ch209. Read it only after that call
                                               has returned and been stored — see the note

@@ -10,6 +10,7 @@
 #include "hal.h"
 #include "sim.h"
 #include "ui.h"
+#include <stdlib.h>
 #include <string.h>
 #include <unity.h>
 
@@ -185,6 +186,42 @@ static void test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_
   TEST_ASSERT_NOT_NULL(strstr(out, "alive=no"));
 }
 
+static uint32_t parse_delta_(const char *out) {
+  const char *p = strstr(out, "delta=");
+  TEST_ASSERT_NOT_NULL(p);
+  return (uint32_t)strtoul(p + 6, 0, 10);
+}
+
+/* No case in this tree pins WHICH probe a printed delta= came from. "present" or "above
+   PB_WDT_PROBE_MIN_COUNTS" would pass against a STALE delta from a prior probe at a
+   similar rate just as well as a fresh one -- exactly the shape of the bug fix round 2
+   found in cli_print_status() (hal_wdt_alive() and hal_wdt_last_delta() passed as two
+   arguments of one unspecified-order snprintf() call). Drive two DISTINCT watchdog
+   rates through two separate `status` calls and assert delta= tracks the rate that was
+   active for THAT call, not the previous one. Brackets, not exact integers, the same
+   way test_dose.cpp:120-121 already brackets a probe delta against the ~41 ms the probe
+   loop's own hal_millis() reads add on top of the nominal 40 ms window. */
+static void test_status_delta_reflects_the_probe_that_produced_it(void) {
+  pb_test_setup();
+  char out[2048];
+
+  sim_wdt_rate_hz(2929);                          /* PCLKB/8192 (§7): ~120 counts/probe */
+  size_t n = feed("status\n", out, sizeof out);
+  out[n] = '\0';
+  uint32_t delta_fast = parse_delta_(out);
+  TEST_ASSERT_TRUE(delta_fast >= 100u && delta_fast <= 140u);
+
+  sim_wdt_rate_hz(1000);                          /* distinctly slower: ~41 counts/probe */
+  n = feed("status\n", out, sizeof out);
+  out[n] = '\0';
+  uint32_t delta_slow = parse_delta_(out);
+  TEST_ASSERT_TRUE(delta_slow >= 30u && delta_slow <= 55u);
+
+  /* The ranges above are already disjoint; this is the assertion that actually pins
+     the ordering bug, spelled out rather than left implicit in the two brackets. */
+  TEST_ASSERT_TRUE(delta_slow < delta_fast);
+}
+
 static void test_no_float_formatting_appears_in_any_printed_line(void) {
   /* newlib's float formatting is the deepest stack consumer in the program (spec §12),
      so the float conversions are banned. A float-formatted number shows as
@@ -226,6 +263,7 @@ int main(void) {
   RUN_TEST(test_parses_every_bench_command);
   RUN_TEST(test_an_overlong_line_is_dropped_whole_not_truncated_into_a_command);
   RUN_TEST(test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_level);
+  RUN_TEST(test_status_delta_reflects_the_probe_that_produced_it);
   RUN_TEST(test_no_float_formatting_appears_in_any_printed_line);
   return UNITY_END();
 }
