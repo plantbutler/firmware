@@ -141,7 +141,32 @@ static void test_idle_safety_tick_rewrites_the_off_level(void) {
   n = sim_events(&ev);
   TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)n);
   TEST_ASSERT_EQUAL_INT(SIM_EV_WDT_FEED, (int)ev[0].kind);
-  safety_set_dosing(false);
+  /* No safety_set_dosing(false) here on purpose: pb_test_teardown() is what has to
+     guarantee g_dosing == false for the next case, not this line. If a TEST_ASSERT_*
+     above this point had failed, Unity's longjmp would have skipped a reset written here —
+     see the pair of cases below, which exists to catch exactly that regression. */
+}
+
+/* This case and the next are a deliberate pair, run back-to-back in that order (see
+   main()): this one leaves g_dosing == true and does NOT reset it. If
+   pb_test_teardown() ever stops resetting it, the NEXT case's assertion fails instead
+   of the leak going quiet — proving the guarantee rather than assuming it. */
+static void test_g_dosing_leaks_here_if_teardown_does_not_reset_it(void) {
+  safety_set_dosing(true);
+}
+
+/* The other half of the pair above. If pb_test_teardown() correctly reset g_dosing to
+   false after the previous case, an idle safety_tick() here still re-asserts the pump
+   OFF write (two events); if the reset regressed, g_dosing is still true here and
+   safety_tick() emits only the feed (one event) — the exact failure mode the finding
+   describes, made to fail loudly instead of going quiet. */
+static void test_g_dosing_does_not_leak_between_cases(void) {
+  sim_events_clear();
+  safety_tick();
+  const sim_ev_t *ev; size_t n = sim_events(&ev);
+  TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)n);
+  TEST_ASSERT_EQUAL_INT(SIM_EV_PUMP_WRITE, (int)ev[0].kind);
+  TEST_ASSERT_EQUAL_INT(SIM_EV_WDT_FEED, (int)ev[1].kind);
 }
 
 static void test_safety_wait_ms_feeds_on_every_iteration(void) {
@@ -252,6 +277,10 @@ int main(void) {
   RUN_TEST(test_wdt_alive_does_not_feed_inside_its_probe_window);
   RUN_TEST(test_wdt_alive_is_true_on_a_counter_that_moves_at_the_real_2929_hz);
   RUN_TEST(test_idle_safety_tick_rewrites_the_off_level);
+  /* This pair MUST run back-to-back, in this order: the guarantee under test is that
+     pb_test_teardown() resets g_dosing between them. */
+  RUN_TEST(test_g_dosing_leaks_here_if_teardown_does_not_reset_it);
+  RUN_TEST(test_g_dosing_does_not_leak_between_cases);
   RUN_TEST(test_safety_wait_ms_feeds_on_every_iteration);
   RUN_TEST(test_a_cold_boot_zeroes_the_noinit_struct);
   RUN_TEST(test_a_bad_checksum_reads_as_a_cold_boot);

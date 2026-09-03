@@ -3,6 +3,7 @@
 #include <unity.h>
 #include "hal.h"
 #include "sim.h"
+#include "safety.h"
 
 static inline void pb_test_setup(void) {
   sim_reset(false);          /* a cold boot: clock at 0, .noinit cleared */
@@ -12,7 +13,14 @@ static inline void pb_test_setup(void) {
   sim_events_clear();
 }
 
-static inline void pb_test_teardown(void) { sim_events_clear(); }
+/* safety_set_dosing(false) belongs HERE, not at the end of whichever test happens to set it
+   true: Unity aborts a failing TEST_ASSERT_* with a longjmp straight into tearDown(), skipping
+   every line after it in the case body. g_dosing is process-lifetime state in safety.cpp, and
+   sim_reset() (called from pb_test_setup(), not here) only resets hal_sim.cpp's own statics —
+   a different translation unit. tearDown() is the one place Unity guarantees runs regardless
+   of how the case ended, so it is the only place that can actually promise every case starts
+   with g_dosing == false. */
+static inline void pb_test_teardown(void) { sim_events_clear(); safety_set_dosing(false); }
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }
 
