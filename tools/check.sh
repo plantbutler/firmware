@@ -89,7 +89,16 @@ check_files 1 'define[[:space:]]+PB_PUMP_OWNER' "${SCAN[@]}" -- \
   "exactly one file defines PB_PUMP_OWNER, so exactly one file gets PIN_PUMP_EN"
 check 0 'pinMode\(PIN_PUMP_EN' "${SCAN[@]}" -- \
   "pinMode never touches D6 (it would latch PODR=0 and drive the pin LOW)"
-check 2 'R_IOPORT_PinCfg.*PIN_PUMP_EN' "${SCAN[@]}" -- \
+# `[^;]*`, never `.*`: a C statement ends at `;`, and the two writes below can never
+# share one, so bounding the wildcard at the statement boundary is enough to stop it
+# matching two calls as one. `.*` is greedy and grep -o returns ONE span per match --
+# fix round 2 found that a second, unverified R_IOPORT_PinCfg(...PIN_PUMP_EN...) call
+# appended to the SAME LINE as an existing one used to merge into the first call's match
+# under `.*`, so three real writes on disk still counted as two. `[^;]*` still matches
+# any argument order or spacing WITHIN one statement -- it only refuses to reach past the
+# semicolon that ends it, so it is not narrowed to the exact `NULL, g_pin_cfg[...]` call
+# form the two real sites happen to share today.
+check 2 'R_IOPORT_PinCfg[^;]*PIN_PUMP_EN' "${SCAN[@]}" -- \
   "exactly two whole-word PFS writes to D6 (hal_boot_pump_off, hal_pump_write)"
 check 0 'R_IOPORT_PinWrite.*PIN_PUMP_EN|digitalWrite.*PIN_PUMP_EN' "${SCAN[@]}" -- \
   "no unverifiable write form on D6"
@@ -110,12 +119,29 @@ check 0 '(pinMode|digitalWrite)\([[:space:]]*6[[:space:]]*[,)]' "${SCAN[@]}" -- 
 # name, used to set f=1 on that same line and hide the violation from pp_fn. A definition-
 # anchored pattern is not fooled by a comment naming the function; it takes the literal
 # `static void hal_arm_pulse_pins_(void) {` line to open the window.
+#
+# pp_fn counts OCCURRENCES (gsub), not matching lines, for the same reason count() does
+# (fix round 1's finding 3) -- fix round 2: pp_all already came from count(), which is
+# occurrence-based, but pp_fn still incremented once per matching LINE. Two entirely
+# legitimate pulse-pin pinMode() calls merged onto one physical line inside
+# hal_arm_pulse_pins_ used to read pp_fn=1 against pp_all=2 and FAIL SAFE (a false
+# positive, never a missed violation) rather than pass. gsub(pat, "&") substitutes each
+# match with itself -- a no-op on the text -- and returns the number of substitutions, so
+# both counters now agree on what "one" means.
+# The pattern is threaded through ENVIRON, not `awk -v`: POSIX -v assignments undergo the
+# SAME backslash-escape processing as a string constant, and this awk (macOS's) silently
+# drops an unrecognized escape -- `-v pat='pinMode\('` arrives inside awk as the STRING
+# pinMode( (no backslash), which is not a balanced regex and is a syntax error, not a
+# quiet miscount. ENVIRON entries are not escape-processed, so the backslash survives.
 D2D3_PAT='pinMode\((PIN_FLOW|PIN_HALL_SCREW)'
 pp_all=$(count "$D2D3_PAT" "${SCAN[@]}")
-pp_fn=$(awk '/^static void hal_arm_pulse_pins_\(void\)[[:space:]]*\{/ {f=1}
-             f && /pinMode\((PIN_FLOW|PIN_HALL_SCREW)/ {c++}
+export PB_CHECK_D2D3_PAT="$D2D3_PAT"
+pp_fn=$(awk 'BEGIN { pat = ENVIRON["PB_CHECK_D2D3_PAT"] }
+             /^static void hal_arm_pulse_pins_\(void\)[[:space:]]*\{/ {f=1}
+             f {c += gsub(pat, "&")}
              f && /^}/ {f=0}
              END {print c+0}' src/hal_uno.cpp 2>/dev/null)
+unset PB_CHECK_D2D3_PAT
 expect "$pp_all" "$pp_fn" \
   "every pinMode on D2/D3 is inside hal_arm_pulse_pins_ (a later one detaches the interrupt)"
 if [ "$pp_all" != "$pp_fn" ]; then
