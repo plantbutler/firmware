@@ -224,12 +224,47 @@ dose_result_t dose_run(const dose_req_t *q) {
     el  = now - t0;                             /* unsigned diff: rollover-safe */
     got = pulses_flow() - flow0;
     if (got != last_got) { last_got = got; last_edge = now; }
-    /* Task 18 inserts the two rate rules and the plausibility test ABOVE this line, */
-    if (target && got >= target)  { r = DOSE_OK;        break; }
-    if (el >= cap_ms)             { r = DOSE_ABORT_CAP; break; }
-    /* and the prime, stall, float and bus rules HERE. */
-    if (cli_stop_requested())     { r = DOSE_ABORT_STOP; break; }
-    (void)last_bus;                             /* task 18's PB_POS_RECHECK_MS timer */
+
+    /* 1. BOTH NOISE RULES COME FIRST, ABOVE THE TARGET RULE. A D2 storming at the ISR's
+          own 2 kHz ceiling reaches a 250 ml target (1250 pulses at cfg = 5000) in ~625 ms;
+          testing `got >= target` first would ack DOSE_OK and flow_ml=250 for water that
+          never moved. The estimator's window is 100 ms, so the storm is visible in ~0.1 s
+          against a >= 0.6 s target. The pre-dose PB_FLOW_IDLE_MAX_HZ guard only catches a
+          storm that was ALREADY running; this catches one that starts with the pump. */
+    if (pulses_flow_rate() > PB_FLOW_MAX_HZ)           { r = DOSE_ABORT_NOISE;  break; }
+#if PB_ML_PER_S_MEASURED > 0
+    /* 2. Delivered-vs-elapsed plausibility on the DOSE_OK path: reaching the target in far
+          less time than the rig can physically deliver it is noise, not a fast pump. Armed
+          only once bring-up 7b commits the rate. */
+    if (target && got >= target &&
+        el * PB_ML_PER_S_MEASURED * PB_PLAUS_NUM < (uint32_t)q->ml * 1000u * PB_PLAUS_DEN)
+                                                       { r = DOSE_ABORT_NOISE;  break; }
+#endif
+    if (target && got >= target)                       { r = DOSE_OK;           break; }
+    if (el >= cap_ms)                                  { r = DOSE_ABORT_CAP;    break; }
+
+    /* 5. PRIME: nothing at all came out in the prime window. `prime` EXTENDS it (task 17
+          sets prime_ms to PB_PRIME_LONG_MS); it never removes it.
+       6. STALL: armed on TIME, not on `got`, so zero flow can never disarm it. Arming it
+          on got >= PB_PRIME_MIN_PULSES -- the design's own form -- meant that a dose with
+          no flow at all never armed it, and `prime` suppressed rule 5, which made
+          `pump 60000 prime` an unconditional sixty-second dry run. */
+    if (el >= prime_ms && got < PB_PRIME_MIN_PULSES)    { r = DOSE_ABORT_NOFLOW; break; }
+    if (el >= prime_ms && (now - last_edge) >= g_stall_ms)
+                                                       { r = DOSE_ABORT_NOFLOW; break; }
+
+    /* 7. the float: ONE bad sample aborts. That direction is dry (§2.10). */
+    if (hal_pin_read(PIN_HALL_FLOAT) != PB_LOW)        { r = DOSE_ABORT_FLOAT;  break; }
+    /* 8. the console's last-resort abort (§2.12). */
+    if (cli_stop_requested())                          { r = DOSE_ABORT_STOP;   break; }
+    /* 9. the README's "I2C hung, home hall unreadable" row: a LIVE expander read, at most
+          once per PB_POS_RECHECK_MS, inside the dose. */
+    if ((now - last_bus) >= PB_POS_RECHECK_MS) {
+      last_bus = now;
+      if (!cart_bus_check())                           { r = DOSE_ABORT_POS;    break; }
+    }
+    /* Task 20 appends the `hang` hook BELOW this line, so every abort rule above it is
+       evaluated before the dog is deliberately starved. */
   }
   hal_pump_write(false);          /* unconditional, ONE exit, before any bookkeeping */
 

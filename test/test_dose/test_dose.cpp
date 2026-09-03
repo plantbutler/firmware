@@ -998,10 +998,32 @@ void test_pump_on_time_never_exceeds_the_cap(void) {
    ceiling) target = 3000 pulses takes ~9012 ms of simulated flow -- inside the 150 ml
    clamp's 10000 ms bound, but NOT inside 250 ml's would-be 16666 ms/2=... the smaller ml
    was chosen so one dose_req_t works in all three native environments without a second,
-   per-environment version of this case. */
+   per-environment version of this case.
+
+   Under native_measured only, task 18's plausibility rule bounds which (cfg, flow_ml_s)
+   pairs can honestly reach DOSE_OK at all, and the bound is NOT loose. The fake's emitted
+   RATE is always flow_ml_s * PB_PULSES_PER_L_DEFAULT / 1000 Hz -- fixed at the sensor's own
+   5880 pulses/L rating, deliberately independent of whatever cfg the firmware is TOLD (a
+   miscalibration is exactly what cfg=1000/1999 model). Reaching `target = ml*cfg/1000`
+   pulses then takes elapsed_ms = ml*cfg*1000/(flow_ml_s*5880); the plausibility rule aborts
+   unless elapsed_ms >= ml*1000*PLAUS_DEN/(PLAUS_NUM*PB_ML_PER_S_MEASURED) = ml*8.33 (at
+   PB_ML_PER_S_MEASURED=30). The `ml` cancels on both sides, leaving cfg >= flow_ml_s*49 as
+   the ONLY thing that decides it -- at flow_ml_s=85 that needs cfg >= 4165, which the floor
+   (1000) and the "ugly" value (1999) both fail. That is the rule doing its job, not a test
+   bug: a calibration this far below the sensor's true rating really would make an honest
+   85 ml/s look like several hundred ml/s once run through it, and that is what the
+   plausibility ceiling exists to catch. Lowering flow_ml_s to clear it at the floor would
+   just as surely blow the ceiling cfg's cap (the two constraints pull in opposite
+   directions across a 20x calibration span -- there is no single flow_ml_s satisfying
+   both). native (PB_ML_PER_S_MEASURED == 0, plausibility compiled out) already proves the
+   MULTIPLY-FIRST arithmetic at all four points; native_measured proves it only where the
+   fixture's own flow rate is physically honest for that calibration. */
 void test_target_pulses_match_the_calibration_within_one_pulse(void) {
   const uint16_t cfgs[] = { 1000u, 1999u, 5880u, 20000u };   /* floor, ugly, nominal, ceiling */
   for (size_t i = 0; i < sizeof cfgs / sizeof cfgs[0]; ++i) {
+#if PB_ML_PER_S_MEASURED > 0
+    if (cfgs[i] < 4200u) continue;   /* see the comment above: not reachable honestly here */
+#endif
     pb_test_setup();
     pb_advance(PB_BOOT_GAP_MS + 1u);
     pulses_begin();
@@ -1028,23 +1050,28 @@ void test_target_pulses_match_the_calibration_within_one_pulse(void) {
    BEFORE the wrap. long_prime with a 6000 ms cap wraps ~4095 ms in and still has to land
    on the far side of it.
 
-   dose_last_ms() reads cap_ms + 1, not cap_ms, and that is dose_run()'s own arithmetic, not
-   a fuzz margin this case invented: the loop's break condition (`el >= cap_ms`) fires with
-   the loop's OWN `el` at exactly cap_ms, but dose_end_ml_() is not handed that value -- it
-   is handed `g_last_end_ms - t0`, and g_last_end_ms comes from a FRESH `hal_millis()` call
-   made after the break, for the end-of-dose bookkeeping. That call advances the fake's
+   dose_last_ms() reads MORE than cap_ms, and that is dose_run()'s own arithmetic, not a
+   fuzz margin this case invented: the loop's break condition (`el >= cap_ms`) fires with
+   the loop's OWN `el` at or just past cap_ms, but dose_end_ml_() is not handed that value --
+   it is handed `g_last_end_ms - t0`, and g_last_end_ms comes from a FRESH `hal_millis()`
+   call made after the break, for the end-of-dose bookkeeping. That call advances the fake's
    clock by its own one more millisecond before it reads it back, exactly like every other
-   hal_millis() call in this file's contract. No earlier case in this file catches it:
-   every other cap-driven case checks dose_result_t or a loose (+20 ms) bound on
-   sim_pump_on_ms(), never dose_last_ms() itself. This is the ONLY case exact enough to
-   surface it, discovered by running it rather than by reading the design doc's prose
-   ("asserts the dose still ends at cap_ms"), which does not mention the extra tick.
+   hal_millis() call in this file's contract. Before task 18 that was the WHOLE story and the
+   offset was an exact, unconditional +1: one hal_millis() call per iteration inside the
+   loop, one more in the epilogue.
 
-   This case is registered LAST in main(), after every other case in this file: the wrap
-   it engineers lands g_last_end_ms at a SMALL absolute value (the whole point), which would
-   otherwise poison the cooldown rung's "g_last_end_ms always stays comfortably below THIS
-   case's own post-boot-gap clock, so the unsigned difference wraps huge" convention every
-   later case in the file relies on -- found by running the suite, not by inspection. */
+   Task 18's rule 1 (`pulses_flow_rate() > PB_FLOW_MAX_HZ`) is now evaluated EVERY iteration,
+   above every other rule, and pulses_flow_rate() itself calls hal_millis() to read its own
+   100 ms tumbling window -- a SECOND clock-advancing call per pass, beyond the loop's own
+   `now = hal_millis()`. The loop's `el` only ever sees the FIRST of the two, so `el` and the
+   fake's global clock drift apart by one tick every iteration; `el` still breaks at or just
+   past cap_ms, but which side of cap_ms it lands on now depends on parity (whether cap_ms's
+   own position lines up with an even or odd count of these paired ticks), which is a fact
+   about the fake's bookkeeping, not about dose_run(). The exact `+1` this case used to check
+   is therefore no longer a safe universal constant -- it is `+3` for THIS cap_ms and clock
+   position, empirically, and a different cap could legally read `+2`. What still has to
+   hold, and is what this case actually cares about, is that the cap ends the dose within a
+   handful of milliseconds of the typed bound, straddling the millis() wrap or not. */
 void test_dose_cap_holds_across_a_millis_rollover(void) {
   pb_test_setup();
   sim_set_clock_ms(0xFFFFF000u);
@@ -1055,7 +1082,8 @@ void test_dose_cap_holds_across_a_millis_rollover(void) {
   q.by_time = true; q.cap_ms = 6000u; q.long_prime = true;
   dose_result_t r = dose_run(&q);
   TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, r, "the cap must still fire across the wrap");
-  TEST_ASSERT_EQUAL_UINT32(6000u + 1u, dose_last_ms());
+  TEST_ASSERT_TRUE_MESSAGE(dose_last_ms() > 6000u && dose_last_ms() <= 6000u + 5u,
+      "dose_last_ms() must land within a few ticks of the cap, on the far side of the wrap");
 }
 
 /* Bring-up 4a, 5a and 5b all run BEFORE the cart is calibrated, so a console `pump` that
@@ -1160,13 +1188,17 @@ void test_cap_is_clamped_to_twice_the_requested_millilitres(void) {
   uint32_t want = (uint32_t)q.ml * 1000u / (uint32_t)PB_ML_PER_S_MEASURED
                   * PB_CAP_SLACK_NUM / PB_CAP_SLACK_DEN;
   TEST_ASSERT_EQUAL_UINT32(13332u, want);            /* derived, then checked against itself */
-  /* +1: dose_last_ms() is g_last_end_ms - t0, and g_last_end_ms is a FRESH hal_millis()
-     call made after the loop breaks, one tick past the loop's own last `el` -- see
-     test_dose_cap_holds_across_a_millis_rollover's comment for the full derivation. This
-     case is what first caught it FOR REAL: PB_ML_PER_S_MEASURED was silently 0 in every
-     native_measured run before include/config.h's own #ifndef fix landed alongside this
-     test (found here), so this exact arithmetic had never actually run before. */
-  TEST_ASSERT_EQUAL_UINT32(want + 1u, dose_last_ms());
+  /* dose_last_ms() lands a few ticks past `want`, never exactly at it: dose_last_ms() is
+     g_last_end_ms - t0, and g_last_end_ms is a FRESH hal_millis() call made after the loop
+     breaks, past the loop's own last `el` -- see test_dose_cap_holds_across_a_millis_
+     rollover's comment for the full derivation of why this is no longer an exact `+1` since
+     task 18's rule 1 added a SECOND hal_millis()-calling site (pulses_flow_rate()) inside
+     the loop. This case is what first caught the underlying arithmetic FOR REAL:
+     PB_ML_PER_S_MEASURED was silently 0 in every native_measured run before include/
+     config.h's own #ifndef fix landed alongside this test (found here), so this exact
+     arithmetic had never actually run before. */
+  TEST_ASSERT_TRUE_MESSAGE(dose_last_ms() > want && dose_last_ms() <= want + 5u,
+      "dose_last_ms() must land within a few ticks of the measured clamp");
 #else
   TEST_IGNORE_MESSAGE("PB_ML_PER_S_MEASURED == 0: the measured cap clamp is compiled out; "
                        "native_measured runs this case");
@@ -1347,6 +1379,37 @@ void test_g_last_end_ms_does_not_leak_between_cases(void) {
       "moments ago and refuse this one with cooldown instead");
 }
 
+/* §2.14. The rate rules are evaluated ABOVE the target rule, always. With the target rule
+   first, a D2 at the ISR's own 2 kHz ceiling reaches a 250 ml target in about 625 ms and
+   dose_run() returns DOSE_OK with flow_ml=250 for water that never moved. */
+void test_the_rate_rules_are_evaluated_above_the_target_rule(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true);
+  TEST_ASSERT_TRUE(cfg_pulses_per_l_set(5000u));
+  sim_flow_storm_at_pump_on(2000u);
+  dose_req_t q = {0}; q.ml = 250u; q.cap_ms = PB_DOSE_CAP_MS_MAX; q.need_pos = false;
+  TEST_ASSERT_EQUAL(DOSE_ABORT_NOISE, dose_run(&q));
+  TEST_ASSERT_NOT_EQUAL(DOSE_OK, dose_last_result());
+  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
+}
+
+/* The same storm, stated as the consequence rather than the mechanism, because this is
+   the sentence that has to stay true: no target is ever reached by noise. */
+void test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true);
+  TEST_ASSERT_TRUE(cfg_pulses_per_l_set(5000u));
+  TEST_ASSERT_EQUAL_UINT32(0u, pulses_flow_rate());   /* NOT storming before the dose: the
+                                                         idle guard must not be what fires */
+  sim_flow_storm_at_pump_on(2000u);
+  dose_req_t q = {0}; q.ml = 250u; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  TEST_ASSERT_EQUAL(DOSE_ABORT_NOISE, dose_run(&q));
+  TEST_ASSERT_EQUAL_UINT16(0u, dose_flow_ml() > 250u ? 1u : 0u);   /* nothing was acked */
+  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -1394,6 +1457,8 @@ int main(void) {
   RUN_TEST(test_dose_refused_when_the_cap_is_zero);
   RUN_TEST(test_dose_refused_when_a_need_pos_dose_names_outlet_zero);
   RUN_TEST(test_dose_refused_when_the_idle_pulse_rate_is_nonzero);
+  RUN_TEST(test_the_rate_rules_are_evaluated_above_the_target_rule);
+  RUN_TEST(test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached);
   RUN_TEST(test_metered_dose_with_a_zero_target_is_refused_not_run_to_cap);
   RUN_TEST(test_dose_stops_at_the_millilitre_target);
   RUN_TEST(test_dose_stops_at_the_cap_when_flow_never_reaches_target);
