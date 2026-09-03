@@ -1,24 +1,38 @@
-# Uncomment lines below if you have problems with $PATH
-#SHELL := /bin/bash
-#PATH := /usr/local/bin:$(PATH)
+PIO ?= pio
+MONITOR_SPEED = 115200
 
 all:
-	pio -f -c vim run
+	$(PIO) run -e uno_r4_wifi
 
 upload:
-	pio -f -c vim run --target upload
+	$(PIO) run -e uno_r4_wifi -t upload
+
+monitor:
+	$(PIO) device monitor -b $(MONITOR_SPEED)
+
+test:
+	$(PIO) test -e native
+
+bringup:
+	@echo "BRING-UP BUILD - pump/cal/servo/home/goto/hang are compiled in. This is NOT the binary left running."
+	$(PIO) run -e uno_r4_wifi_bringup -t upload
+
+sim:
+	@echo "SIM BUILD - the 12 V brick must be unplugged"
+	$(PIO) run -e uno_r4_wifi_sim -t upload
+
+calib:
+	@echo "BRING-UP 7b: upload the bringup binary, then type calib in the monitor"
+	$(PIO) run -e uno_r4_wifi_bringup -t upload
+	$(PIO) device monitor -b $(MONITOR_SPEED)
+
+check:
+	./tools/check.sh
 
 clean:
-	pio -f -c vim run --target clean
-
-program:
-	pio -f -c vim run --target program
-
-uploadfs:
-	pio -f -c vim run --target uploadfs
+	$(PIO) run -t clean
 
 compiledb:
-	pio run -t compiledb
+	$(PIO) run -t compiledb
 
-update:
-	pio -f -c vim update
+.PHONY: all upload monitor test bringup sim calib check clean compiledb
