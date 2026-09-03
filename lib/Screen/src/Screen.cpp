@@ -30,12 +30,60 @@ bool Screen::paint_ok_(uint32_t unit_start_ms) {
   return true;
 }
 
+/* Fix round 2 (Important): begin() is NOT budget-guarded, on either panel, and both
+   chains are already past PB_WDT_GRANTED_MS (5592 ms) on their own:
+
+   LCD -- lcd.init() (-> init_priv() -> begin()) + lcd.backlight(), traced against
+   LiquidCrystal_I2C.cpp:63-129,152-159,233-241: one expanderWrite() (1 tx, the
+   backlight-off reset) + four write4bits() 4-bit-mode-select attempts (4x3 = 12 tx) +
+   five command()-based calls -- FUNCTIONSET, display(), clear(), ENTRYMODESET, home()
+   (5x6 = 30 tx) + backlight()'s own expanderWrite() (1 tx) = 44 Wire transactions,
+   ~44000 ms worst case. This is the mandatory HD44780 4-bit init sequence from the
+   datasheet (LiquidCrystal_I2C.cpp:30-43's own comment cites it) -- nothing in it is
+   optional, so unlike clear()'s old Oled.clearDisplay() below, there is no bounded
+   alternative to swap in here.
+
+   OLED -- Oled.initDisplay(): the SSD1306 init byte sequence
+   (u8x8_d_ssd1306_128x64_noname.c's u8x8_d_ssd1306_128x64_noname_init_seq[]) is 16
+   controller commands; under the fast I2C cad's merge rule (a SendCmd always
+   force-closes whatever transfer is open) each is its own Wire transaction, so this is
+   on the order of 16 Wire transactions and ~16000 ms worst case (traced from the
+   visible byte sequence; the generic dispatch wrapper that sends it was not chased
+   further, so treat this as a lower bound, not a certified count the way the LCD's 44
+   and the old clearDisplay()'s 144 are). Also mandatory: the controller's own required
+   power-up configuration.
+
+   Both together: at least ~60000 ms of unguarded boot-time bus exposure, non-optional,
+   with zero feed anywhere inside either chain. This is safe TODAY only because
+   hal_wdt_start() (task 12, not written yet) is drafted to run AFTER both screens'
+   begin() calls -- the dog is not yet armed while this runs, and WDTimer::refresh()
+   (WDT.cpp:80-84) is a no-op until WDTimer::begin() has set _is_initialized, so even
+   the safety_tick() calls inside clear() below (see the OLED branch) feed nothing
+   real yet. THE MOMENT hal_wdt_start() runs before this function, that ~60 s becomes
+   a live unfed span against a 5592 ms grant. Nothing in this file enforces that
+   ordering -- it is task 12's setup() to get right and this comment to be read before
+   changing it. */
 void Screen::begin() {
   if (!present_) return;
   if (type == ScreenType::Oled) {
-    Oled.begin();
+    Oled.initDisplay();
     Oled.setFlipMode(true);
     Oled.setFont(u8x8_font_chroma48medium8_r);
+    /* Oled.begin() would be initDisplay();clearDisplay();setPowerSave(0)
+       (U8x8lib.h:258-259) -- clearDisplay() is the SAME 144-transaction function
+       clear() below was rewritten specifically to stop calling at runtime. Decision:
+       it is not worth it here either. It buys nothing over the bounded path clear()
+       already provides (a blank screen), at 144 unguarded transactions clear() no
+       longer pays. So this calls clear() instead: bounded to <= 3000 ms per unit, and
+       the panel goes not-present on overrun instead of the boot hanging. Trade-off
+       accepted: the OLED's own GDRAM may still hold stale content from before a warm
+       reset (an MCU reset does not necessarily reset the OLED controller), so that
+       content stays visible for the length of this call rather than a fixed
+       unconditional clear -- cosmetic only, and the first real paint overwrites it
+       regardless. setPowerSave(0) runs last, so the panel is not driven visibly until
+       it is already blank. */
+    clear();
+    Oled.setPowerSave(0);
   } else {
     /* init() opens Wire and blocks for a whole second inside init_priv(), which is why
        spec §5 fixes the order: both panels come up BEFORE sensors_begin(). That second
