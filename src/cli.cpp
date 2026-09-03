@@ -132,6 +132,86 @@ void cli_begin(void) {
   hal_serial_write("type help\n");
 }
 
+/* Bytes cli_stop_requested() read from the UART and did NOT consume. cli_poll() drains
+   this before it touches the UART, so the two readers cannot lose or reorder a byte
+   between them. It is not a queue of commands: the dosing loop clears it at the end of
+   every dose (§2.8, §15.3), so impatience typed during a dose is discarded, not
+   executed. */
+static char     g_push[PB_LINE_CAP];
+static uint16_t g_push_len;
+
+static void push_back_(const char *b, size_t n) {
+  for (size_t i = 0; i < n && g_push_len < sizeof g_push; ++i) g_push[g_push_len++] = b[i];
+}
+
+static size_t read_console_(char *buf, size_t cap) {
+  if (g_push_len > 0u) {                       /* pushback FIRST, in arrival order */
+    size_t n = g_push_len < cap ? g_push_len : cap;
+    for (size_t i = 0; i < n; ++i) buf[i] = g_push[i];
+    for (size_t i = n; i < g_push_len; ++i) g_push[i - n] = g_push[i];
+    g_push_len = (uint16_t)(g_push_len - n);
+    return n;
+  }
+  return hal_serial_read(buf, cap);
+}
+
+/* §2.12. Consumes ONLY an exact `stop\n` or `dry on\n`. Every other byte is pushed back
+   unread, so `status` typed at the console is still `status` when cli_poll() reads it.
+
+   §2.12 calls this "a four-byte state"; `dry on` is six bytes, so the partial buffer is
+   eight. Four would truncate `dry on` into a permanent non-match: the match state has to
+   hold the whole word before it can be recognised, and "stop" plus "dry on" both have to
+   fit without a plan review needing to revisit the size a second time. Do not trim this
+   back to four for tidiness -- it is settled at eight on purpose. */
+#define PB_STOP_MATCH_CAP 8
+
+static char     g_pfx[PB_STOP_MATCH_CAP];
+static uint8_t  g_pfx_len;
+static bool     g_line_dirty;    /* this line already broke the match: push everything back */
+static bool     g_stop_req;
+
+static bool pfx_is_prefix_of_(const char *word) {
+  for (uint8_t i = 0; i < g_pfx_len; ++i) if (word[i] == '\0' || word[i] != g_pfx[i]) return false;
+  return true;
+}
+
+void cli_stop_clear(void) {
+  g_stop_req = false;
+  g_pfx_len = 0u;
+  g_line_dirty = false;
+  g_push_len = 0u;      /* forget every byte the console has seen and not acted on */
+}
+
+bool cli_stop_requested(void) {
+  char b[16];
+  size_t n = hal_serial_read(b, sizeof b);
+  for (size_t i = 0; i < n; ++i) {
+    char c = b[i];
+    if (c == '\r') continue;
+    if (c == '\n') {
+      if (!g_line_dirty && g_pfx_len == 4u && pfx_is_prefix_of_("stop")) {
+        g_stop_req = true;
+      } else if (!g_line_dirty && g_pfx_len == 6u && pfx_is_prefix_of_("dry on")) {
+        safety_dry_set(true);       /* the word means the same during a dose as before one */
+        g_stop_req = true;
+      } else {
+        push_back_(g_pfx, g_pfx_len);
+        push_back_("\n", 1u);       /* the line is handed on WHOLE, newline included */
+      }
+      g_pfx_len = 0u; g_line_dirty = false;
+      continue;
+    }
+    if (g_line_dirty) { push_back_(&c, 1u); continue; }
+    if (g_pfx_len < PB_STOP_MATCH_CAP) g_pfx[g_pfx_len++] = c;
+    if (!pfx_is_prefix_of_("stop") && !pfx_is_prefix_of_("dry on")) {
+      push_back_(g_pfx, g_pfx_len);   /* the whole prefix, in order: `sta` is three bytes */
+      g_pfx_len = 0u;
+      g_line_dirty = true;            /* and the rest of THIS line is not a match either */
+    }
+  }
+  return g_stop_req;
+}
+
 void cli_poll(void) {
   note_memory_();
   if (g_hall_stream && hal_millis() >= g_hall_next_ms) {
@@ -139,7 +219,7 @@ void cli_poll(void) {
     cmd_hall_line_();
   }
   char buf[32];
-  size_t n = hal_serial_read(buf, sizeof buf);
+  size_t n = read_console_(buf, sizeof buf);
   if (n > 0) g_hall_stream = false;               /* any byte stops the stream */
   for (size_t i = 0; i < n; ++i) {
     char c = buf[i];
@@ -171,6 +251,16 @@ bool cli_dispatch(const char *line) {
   if (strcmp(line, "dry off") == 0) {
     safety_dry_set(false);
     hal_serial_write("dry=0\n");
+    return true;
+  }
+  if (strcmp(line, "stop") == 0) {
+    /* A dose in progress never reaches here: the dosing loop blocks and matches this
+       word byte-wise itself (§2.12). This arm is the idle console's answer, and it exists
+       so that `stop` is never `? unknown` -- it is the one command an operator reaches
+       for in an emergency. It also clears a stale request left by a matched-but-
+       unconsumed word, so the NEXT dose is not aborted by a stop typed before it. */
+    cli_stop_clear();
+    hal_serial_write("stop: no dose running\n");
     return true;
   }
   hal_serial_write("? unknown; type help\n");

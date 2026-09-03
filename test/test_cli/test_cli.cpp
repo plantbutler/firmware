@@ -156,6 +156,7 @@ static void test_parses_every_bench_command(void) {
   TEST_ASSERT_TRUE(cli_dispatch("help"));
   TEST_ASSERT_TRUE(cli_dispatch("dry on"));
   TEST_ASSERT_TRUE(cli_dispatch("dry off"));
+  TEST_ASSERT_TRUE(cli_dispatch("stop"));
   TEST_ASSERT_FALSE(cli_dispatch("dry"));          /* no bare form, and no abbreviation */
   TEST_ASSERT_FALSE(cli_dispatch("mux 16"));      /* out of range */
   TEST_ASSERT_FALSE(cli_dispatch("nonsense"));
@@ -256,6 +257,62 @@ static void test_no_float_formatting_appears_in_any_printed_line(void) {
   }
 }
 
+/* §2.12. The console's last-resort abort. dose_run() calls this once per loop iteration,
+   so the word arrives in whatever fragments the UART hands over -- here `st` and `op\n`. */
+static void test_stop_is_matched_byte_by_byte_across_two_reads(void) {
+  pb_test_setup();
+  cli_stop_clear();
+  sim_serial_rx("st");
+  TEST_ASSERT_FALSE(cli_stop_requested());     /* half a word is not a stop */
+  sim_serial_rx("op\n");
+  TEST_ASSERT_TRUE(cli_stop_requested());
+  TEST_ASSERT_TRUE(cli_stop_requested());      /* it LATCHES until cli_stop_clear() */
+  cli_stop_clear();
+  TEST_ASSERT_FALSE(cli_stop_requested());
+}
+
+/* The deliverable's own example. `sta` must leave THREE bytes for the line buffer: a
+   matcher that swallowed `st` would turn `status` into `atus` -- an unknown command that
+   looks like a console fault rather than a matcher bug. */
+static void test_a_non_matching_byte_is_pushed_to_the_line_buffer_unread(void) {
+  pb_test_setup();
+  cli_stop_clear();
+  char out[512];
+  (void)sim_serial_tx(out, sizeof out);
+  sim_serial_rx("status\n");
+  TEST_ASSERT_FALSE(cli_stop_requested());   /* not a stop, and not consumed either */
+  cli_poll();                                /* reads the pushback FIRST */
+  size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "granted="), out);   /* status actually ran */
+}
+
+/* §2.12: `dry on` typed mid-dose sets the latch AND raises the stop request, so the word
+   means the same thing during a dose as before one. */
+static void test_dry_on_mid_dose_raises_the_stop_request_and_sets_the_latch(void) {
+  pb_test_setup();
+  cli_stop_clear();
+  TEST_ASSERT_FALSE(safety_dry());
+  sim_serial_rx("dry ");
+  TEST_ASSERT_FALSE(cli_stop_requested());
+  sim_serial_rx("on\n");
+  TEST_ASSERT_TRUE(cli_stop_requested());
+  TEST_ASSERT_TRUE(safety_dry());
+}
+
+/* Near misses. `sto` is short, `stopp` is long, `xstop` is not the line, and `dry off` is
+   a different command that must NOT abort a dose - it clears a latch, it does not stop
+   water. All four leave the request down and the bytes recoverable. */
+static void test_a_near_miss_token_does_not_raise_the_stop_request(void) {
+  const char *misses[] = { "sto\n", "stopp\n", "xstop\n", "dry off\n" };
+  for (unsigned i = 0; i < 4u; ++i) {
+    pb_test_setup();
+    cli_stop_clear();
+    sim_serial_rx(misses[i]);
+    TEST_ASSERT_FALSE_MESSAGE(cli_stop_requested(), misses[i]);
+    TEST_ASSERT_FALSE_MESSAGE(safety_dry(), misses[i]);
+  }
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_ui_render_fills_eight_rows_of_sixteen_characters);
@@ -269,5 +326,9 @@ int main(void) {
   RUN_TEST(test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_level);
   RUN_TEST(test_status_delta_reflects_the_probe_that_produced_it);
   RUN_TEST(test_no_float_formatting_appears_in_any_printed_line);
+  RUN_TEST(test_stop_is_matched_byte_by_byte_across_two_reads);
+  RUN_TEST(test_a_non_matching_byte_is_pushed_to_the_line_buffer_unread);
+  RUN_TEST(test_dry_on_mid_dose_raises_the_stop_request_and_sets_the_latch);
+  RUN_TEST(test_a_near_miss_token_does_not_raise_the_stop_request);
   return UNITY_END();
 }
