@@ -23,8 +23,24 @@ static void tear_(void) {
     pulses_isr_flow();
   }
 }
+
+/* Same shape as tear_()/pulses_test_tear_next() above, for pulses_screw()'s identical
+   retry loop (task 14: the flow injector was task 6's, and the screw one had no equal
+   anywhere, so its retry branch was proven only by the always-agrees happy path). */
+static uint32_t g_tear_screw_pending;
+void pulses_test_tear_screw_next(uint32_t edges) { g_tear_screw_pending = edges; }
+static void tear_screw_(void) {
+  if (!g_tear_screw_pending) return;
+  uint32_t n = g_tear_screw_pending;
+  g_tear_screw_pending = 0;
+  while (n--) {
+    g_screw_last_us = hal_micros() - (uint32_t)PB_SCREW_MIN_GAP_US - 1u;  /* force acceptance */
+    pulses_isr_screw();
+  }
+}
 #else
 static void tear_(void) { }
+static void tear_screw_(void) { }
 #endif
 
 void pulses_begin(void) {
@@ -59,7 +75,7 @@ uint32_t pulses_flow(void) {
 
 uint32_t pulses_screw(void) {
   uint32_t a, b;
-  do { a = g_screw; b = g_screw; } while (a != b);
+  do { a = g_screw; tear_screw_(); b = g_screw; } while (a != b);
   return a;
 }
 

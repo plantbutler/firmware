@@ -37,4 +37,9 @@ bool     pulses_leak_seen(void);
    host has no preemption, so this is the only way to prove the double-read loop. Never
    compiled into the bench binary. */
 void     pulses_test_tear_next(uint32_t edges);
+
+/* Same shape, for pulses_screw()'s identical retry loop -- added by task 14, which owns
+   the screw model, because the loop had no injector anywhere and was asserted only by
+   the always-agrees-on-the-first-pass happy path. */
+void     pulses_test_tear_screw_next(uint32_t edges);
 #endif

@@ -56,6 +56,22 @@ static void test_a_counter_snapshot_is_never_torn_by_an_edge(void) {
   TEST_ASSERT_EQUAL_UINT32(2u, pulses_flow());   /* and it settled */
 }
 
+/* pulses_screw()'s retry loop (do { a = g_screw; b = g_screw; } while (a != b);) is
+   textually identical to pulses_flow()'s, but until task 14 nothing ever drove it: the
+   happy path always has a == b on the first pass, so the retry branch was asserted only
+   by never being exercised. Same injector shape as the flow case above, mirrored onto
+   the screw counter (task 14, which owns the screw model). */
+static void test_a_screw_counter_snapshot_is_never_torn_by_an_edge(void) {
+  pulses_begin();
+  pb_advance(1);
+  pulses_isr_screw();
+  TEST_ASSERT_EQUAL_UINT32(1u, pulses_screw());
+  pulses_test_tear_screw_next(1u);       /* an edge lands BETWEEN the snapshot's two reads */
+  pb_advance(1);
+  TEST_ASSERT_EQUAL_UINT32(2u, pulses_screw());
+  TEST_ASSERT_EQUAL_UINT32(2u, pulses_screw());  /* and it settled */
+}
+
 /* §7: PB_COAST_MS — impeller spin-down is not a leak. And §1: there is no leak LATCH. */
 static void test_leak_does_not_latch_from_coast_down_pulses_after_a_dose(void) {
   pulses_begin();
@@ -286,6 +302,7 @@ int main(void) {
   RUN_TEST(test_edges_closer_than_the_minimum_gap_are_rejected);
   RUN_TEST(test_the_rate_estimator_reports_over_a_hundred_millisecond_window);
   RUN_TEST(test_a_counter_snapshot_is_never_torn_by_an_edge);
+  RUN_TEST(test_a_screw_counter_snapshot_is_never_torn_by_an_edge);
   RUN_TEST(test_leak_does_not_latch_from_coast_down_pulses_after_a_dose);
   RUN_TEST(test_the_first_flow_edge_lands_at_or_before_the_default_prime_deadline);
   RUN_TEST(test_select_holds_p4_high_so_the_home_hall_stays_readable);
