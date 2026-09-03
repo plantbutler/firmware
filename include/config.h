@@ -94,8 +94,16 @@
 /* ---- the cart. Pulses-per-gate DOES NOT EXIST YET: today's Manifold is purely
    time-based, so there is nothing to port. Bring-up 6 measures it. Until then
    cart_goto() and cart_pos_known() are COMPILED OUT to hard false (§2.15). ---- */
-#define PB_PULSES_PER_GATE       0     /* 6 fills this in; 0 == goto compiles to `return false` */
-#define PB_PULSES_HOME_TO_1      0
+/* Both are -D-overridable, because [env:native_cal] defines PB_PULSES_PER_GATE=1450 on the
+   command line to compile the cart's calibrated arm. Without the guard that is a
+   -Wmacro-redefined on every native_cal run, and a warning nobody can fix is a warning
+   everybody learns to scroll past. */
+#ifndef PB_PULSES_PER_GATE
+#  define PB_PULSES_PER_GATE     0     /* 6 fills this in; 0 == goto compiles to `return false` */
+#endif
+#ifndef PB_PULSES_HOME_TO_1
+#  define PB_PULSES_HOME_TO_1    0
+#endif
 #define PB_MOVE_CAP_MS       45000
 #define PB_STALL_WINDOW_MS    2500
 #define PB_SERVO_CAP_MS      10000
