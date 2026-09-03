@@ -1173,6 +1173,84 @@ void test_cap_is_clamped_to_twice_the_requested_millilitres(void) {
 #endif
 }
 
+/* Fix round 1, Important finding (review of this task): the flap counter's "exactly two
+   call sites" guarantee -- dose_end_() increments ONLY on DOSE_REFUSED_FLOAT, dose_end_ml_()
+   resets UNCONDITIONALLY -- had no test that drove the counter THROUGH dose_run() and its
+   ladder. Every existing case that touches safety_float_flap() (see the task-15 block
+   above) calls safety_float_refusal_count() directly, bypassing dose_end_() entirely, so a
+   guard broadened to also count a non-float reason would pass the whole suite unnoticed.
+   The reviewer proved this by mutating dose_end_()'s guard to `r == DOSE_REFUSED_FLOAT ||
+   r == DOSE_REFUSED_COOLDOWN` and watching test_dose pass unchanged.
+
+   This case reproduces that exact scenario through dose_run() rather than assuming it:
+   a priming dose (ABORT_CAP, no flow) resets the counter via dose_end_ml_() and stamps
+   g_last_end_ms; the very next call, still inside PB_DOSE_MIN_GAP_MS of it, is refused
+   DOSE_REFUSED_COOLDOWN through the REAL ladder rung, not stood in for. Correct code
+   leaves the counter untouched by that refusal. The reviewer's mutation would let it
+   through, and the effect is deliberately made to surface EARLY rather than only at the
+   end: after the interleaved cooldown refusal, only two genuine float refusals are needed
+   to trip the flap instead of three, so the assertion after the SECOND float refusal below
+   -- which this file's other float-flap case (via the setter) already proves must still
+   read false at two -- is what a widened guard actually breaks first. */
+void test_the_flap_counter_is_driven_by_dose_run_not_the_setter(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(0u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+
+  /* Prime: a GRANTED-reaching dose, which resets the counter through dose_end_ml_()'s
+     unconditional call and stamps g_last_end_ms fresh. */
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, dose_run(&q), "arrange: the priming dose");
+  TEST_ASSERT_FALSE(safety_float_flap());
+
+  /* The interleaved NON-float refusal, reached through the real ladder: still inside
+     PB_DOSE_MIN_GAP_MS of the priming dose above, so this is a genuine DOSE_REFUSED_
+     COOLDOWN, not a stand-in for one. Correct code -- dose_end_()'s guard testing only
+     `r == DOSE_REFUSED_FLOAT` -- leaves the counter at 0 here. */
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_COOLDOWN, dose_run(&q),
+      "arrange: a genuine cooldown refusal, still inside the gap");
+  TEST_ASSERT_FALSE(safety_float_flap());
+
+  /* Past the gap now, so what follows really does reach the float rung rather than the
+     cooldown rung above it. */
+  pb_advance(PB_DOSE_MIN_GAP_MS + 1u);
+  sim_set_float(false);
+
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_FLOAT, dose_run(&q));
+  TEST_ASSERT_FALSE_MESSAGE(safety_float_flap(), "one genuine float refusal must not trip it");
+
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_FLOAT, dose_run(&q));
+  TEST_ASSERT_FALSE_MESSAGE(safety_float_flap(),
+      "two genuine float refusals must not trip it EITHER -- if the interleaved cooldown "
+      "above had counted, the total would already be three here");
+
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_FLOAT, dose_run(&q));
+  TEST_ASSERT_TRUE_MESSAGE(safety_float_flap(), "the third GENUINE float refusal must trip it");
+}
+
+/* Fix round 1, Minor finding (review of this task): DRY above BOOT is proven today only
+   ACCIDENTALLY, by test_pump_is_off_on_every_exit_path's DRY fixture, which happens to run
+   at clock zero (inside the boot gap) without meaning to test the order at all. The two
+   DEDICATED single-rung cases (test_dose_refused_when_the_dry_latch_is_set,
+   test_dose_refused_inside_the_boot_gap) both still pass if the two rungs are swapped,
+   because neither one combines the two conditions -- only a case that latches dry AND
+   stays inside the boot gap can tell the orderings apart, and this is that case.
+
+   dry is the more actionable fact for an operator: err=boot within the first ten seconds
+   after a reset says "wait and retry"; err=dry sends them to `dry off` instead, which is
+   what is actually true here and boot's own advice would hide. Added as the one extra
+   adjacent-pair case worth its keep, alongside cal-above-range (already in this file) and
+   contra-above-dry (task 19) -- not a case per rung, which the review did not ask for. */
+void test_the_ladder_reports_dry_above_boot(void) {
+  pb_test_setup();                                /* clock at zero: inside the boot gap */
+  safety_dry_set(true);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_DRY, dose_run(&q),
+      "the dry latch must be reported even while still inside the boot gap");
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -1231,6 +1309,8 @@ int main(void) {
   RUN_TEST(test_console_pump_does_not_require_a_known_position);
   RUN_TEST(test_bytes_buffered_during_a_dose_are_discarded_not_executed);
   RUN_TEST(test_cap_is_clamped_to_twice_the_requested_millilitres);
+  RUN_TEST(test_the_flap_counter_is_driven_by_dose_run_not_the_setter);
+  RUN_TEST(test_the_ladder_reports_dry_above_boot);
   /* LAST: it deliberately leaves g_last_end_ms at a small wrapped value, which would
      otherwise poison every later case's cooldown-avoidance arithmetic (see its own
      comment). */
