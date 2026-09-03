@@ -10,3 +10,4 @@ secrets.h
 
 # subagent-driven-development scratch: ledger, briefs, review packages
 .superpowers/
+firmware-SIM.bin
