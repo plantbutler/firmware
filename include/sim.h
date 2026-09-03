@@ -25,6 +25,11 @@
 void     sim_reset(bool warm);             /* re-enter setup(); warm keeps .noinit (task 4) */
 void     sim_advance(uint32_t ms);
 void     sim_set_float(bool ok);           /* D5; consumed by the debounce, task 15 */
+/* Each character is consumed by ONE hal_pin_read(PIN_HALL_FLOAT): '1' == OK (the pin reads
+   PB_LOW), '0' == not OK. The last character repeats forever, so "100" is a float that
+   grants one sample and fails the next two -- exactly the waterline bounce of §2.10.
+   sim_set_float() clears any pattern. */
+void     sim_set_float_pattern(const char *pattern);
 void     sim_set_flow_ml_s(uint16_t ml_s); /* the pump's delivery rate; task 6 */
 void     sim_flow_storm(uint32_t hz);      /* an edge storm on D2; task 6 */
 void     sim_set_i2c_fail(bool fail);      /* every expander transfer fails; task 7 */

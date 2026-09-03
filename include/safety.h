@@ -21,3 +21,10 @@ bool safety_dosing(void);
    exists so the host suites can reproduce a dose in flight — sensors.cpp's recovery guard
    (§2.13) has to be testable before dose_run() is written. */
 void safety_set_dosing(bool on);
+
+/* §2.10. PB_FLOAT_OK_SAMPLES (3) consecutive OK readings to GRANT; ONE bad sample refuses
+   IMMEDIATELY. The asymmetry is the whole design: refusing on one bad sample is safe,
+   granting on one is not, because D5 runs up to a metre to the reservoir alongside a 12 V
+   pump lead. The wait between samples is safety_wait_ms(), which calls safety_tick() on
+   every iteration, so the dog is fed and the pump idle-re-asserted throughout. */
+bool safety_float_ok_debounced(void);

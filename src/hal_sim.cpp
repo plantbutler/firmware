@@ -51,6 +51,13 @@ static uint32_t g_feeds;
 
 /* ---- injector state; the task that consumes each one is named in sim.h ---- */
 static bool     g_float_ok = true;
+/* task 15's per-sample float. Empty (len 0) means "no pattern, use g_float_ok" -- the
+   pre-task-15 sim_set_float() behaviour, kept so every earlier caller of it still works
+   unchanged. A non-empty pattern advances one character per hal_pin_read(PIN_HALL_FLOAT)
+   and STICKS at the last character rather than wrapping, matching sim.h's contract. */
+static char     g_float_pat[16];
+static size_t   g_float_pat_len;
+static size_t   g_float_pat_idx;
 static uint16_t g_flow_ml_s;
 static uint32_t g_storm_hz;
 static bool     g_i2c_fail;
@@ -238,10 +245,25 @@ void hal_pin_write(uint8_t pin, uint8_t level) {
   ev_(SIM_EV_PIN_CFG, pin, SIM_PFS_DIR_OUT | (level ? SIM_PFS_LEVEL_HI : 0u));
 }
 int  hal_pin_read(uint8_t pin) {
-  if (pin == PIN_HALL_FLOAT) return g_float_ok ? PB_LOW : PB_HIGH;   /* §2.10: LOW == OK */
+  if (pin == PIN_HALL_FLOAT) {
+    if (g_float_pat_len > 0u) {
+      char c = g_float_pat[g_float_pat_idx];
+      if (g_float_pat_idx + 1u < g_float_pat_len) g_float_pat_idx++;  /* sticks at the last */
+      return (c == '1') ? PB_LOW : PB_HIGH;
+    }
+    return g_float_ok ? PB_LOW : PB_HIGH;   /* §2.10: LOW == OK */
+  }
   return PB_HIGH;
 }
-void sim_set_float(bool ok) { g_float_ok = ok; }
+void sim_set_float(bool ok) { g_float_ok = ok; g_float_pat_len = 0u; g_float_pat_idx = 0u; }
+void sim_set_float_pattern(const char *pattern) {
+  size_t n = strlen(pattern);
+  if (n >= sizeof g_float_pat) n = sizeof g_float_pat - 1u;
+  memcpy(g_float_pat, pattern, n);
+  g_float_pat[n] = '\0';
+  g_float_pat_len = n;
+  g_float_pat_idx = 0u;
+}
 
 /* ---- ADC and I2C. Task 7 gives the expander its mux/home-hall meaning. ---- */
 uint16_t hal_adc_read(void) {
@@ -401,7 +423,7 @@ void sim_reset(bool warm) {
   g_pump_on = false; g_pump_on_us = 0; g_pump_on_at_ms = 0;
   g_wdt_running = false; g_wdt_counter = SIM_WDT_RELOAD; g_wdt_rate_hz = 2929;
   g_wdt_frac = 0; g_wdt_delta = 0; g_feeds = 0;
-  g_float_ok = true; g_flow_ml_s = 0; g_storm_hz = 0;
+  g_float_ok = true; g_float_pat_len = 0; g_float_pat_idx = 0; g_flow_ml_s = 0; g_storm_hz = 0;
   g_i2c_fail = false; g_mux_stuck = false; g_stall = false; g_leak = false;
   g_adc_settled = false; g_adc_prev = 0;
   memset(g_chan, 0, sizeof g_chan);

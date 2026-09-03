@@ -280,6 +280,47 @@ static void test_ml_from_pulses_rounds_down_and_does_not_overflow(void) {
   TEST_ASSERT_EQUAL_UINT32(2147483647u, pulses_to_ml(2147483647u, 1000u));
 }
 
+/* §2.10. Three consecutive OK samples to GRANT. The float bouncing at the waterline
+   satisfies one sample and fails three; a raw-sample implementation reports float=1, the
+   backend queues, the board refuses, the acked refusal pages HIGH and sets the pot's
+   cooldown - and repeats every cooldown period, forever. */
+static void test_three_consecutive_ok_samples_are_needed_to_grant(void) {
+  pb_test_setup();
+  sim_set_float_pattern("1101111");        /* one bad sample inside the first window */
+  TEST_ASSERT_FALSE(safety_float_ok_debounced());
+  pb_test_setup();
+  sim_set_float_pattern("111");
+  TEST_ASSERT_TRUE(safety_float_ok_debounced());
+}
+
+/* The asymmetry is deliberate: refusing on one bad sample is safe, GRANTING on one is
+   not, because D5 runs up to a metre to the reservoir beside a 12 V pump lead. */
+static void test_one_bad_sample_refuses_immediately(void) {
+  pb_test_setup();
+  sim_set_float_pattern("0111111");
+  uint32_t t0 = hal_millis();
+  TEST_ASSERT_FALSE(safety_float_ok_debounced());
+  /* it returned on the FIRST sample: no PB_FLOAT_SAMPLE_MS wait was paid */
+  TEST_ASSERT_LESS_THAN_UINT32(PB_FLOAT_SAMPLE_MS, hal_millis() - t0);
+}
+
+/* Every loop that can iterate over a millisecond of wall clock feeds the dog (§3). This
+   one waits 2 x PB_FLOAT_SAMPLE_MS and is called from dose_run()'s refusal ladder. */
+static void test_the_float_debounce_feeds_the_watchdog_between_samples(void) {
+  pb_test_setup();
+  sim_set_float(true);
+  sim_events_clear();
+  TEST_ASSERT_TRUE(safety_float_ok_debounced());
+  const sim_ev_t *ev; size_t n = sim_events(&ev);
+  uint32_t feeds = 0, prev = 0; bool first = true;
+  for (size_t i = 0; i < n; ++i) {
+    if (ev[i].kind != SIM_EV_WDT_FEED) continue;
+    if (!first) TEST_ASSERT_TRUE(ev[i].at_ms - prev <= 3u);
+    prev = ev[i].at_ms; first = false; feeds++;
+  }
+  TEST_ASSERT_TRUE(feeds >= 2u);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -305,5 +346,8 @@ int main(void) {
   RUN_TEST(test_a_dose_in_flight_across_a_warm_boot_raises_resetmid);
   RUN_TEST(test_boot_salt_differs_across_two_warm_boots);
   RUN_TEST(test_ml_from_pulses_rounds_down_and_does_not_overflow);
+  RUN_TEST(test_three_consecutive_ok_samples_are_needed_to_grant);
+  RUN_TEST(test_one_bad_sample_refuses_immediately);
+  RUN_TEST(test_the_float_debounce_feeds_the_watchdog_between_samples);
   return UNITY_END();
 }
