@@ -5,6 +5,7 @@
 #include "config.h"
 #include "pins.h"
 #include "noinit.h"
+#include "pulses.h"
 #include <string.h>
 
 #if PB_SIM
@@ -74,12 +75,51 @@ static void tick_models_(uint32_t us) {
   if (g_pump_on) g_pump_on_us += us;
 }
 
+static uint32_t g_next_flow_us, g_next_screw_us;
+
+/* now_ms is the millisecond THIS step reaches by its end (target/1000), not g_ms, which
+   at the call site below is still last step's value: emit_() runs between tick_models_()
+   and the g_us/g_ms assignment, so a read of the bare global here is one step STALE
+   against what hal_millis() is about to return to the caller. Gating on the stale value
+   pushed the first edge to elapsed 3001 ms against a 3000 ms prime deadline that dose_run()
+   (task 18) checks with `>=` at elapsed 3000 ms — a healthy meter aborted DOSE_ABORT_NOFLOW
+   one millisecond before its own first pulse. Gating on the step's END millisecond instead
+   lands the first edge by elapsed 3000 ms, at or before the deadline. */
+static uint32_t sim_flow_hz_(uint32_t now_ms) {
+  if (g_storm_hz) return g_storm_hz;
+  if (g_pump_on && (now_ms - g_pump_on_at_ms) >= (uint32_t)PB_PRIME_MS_DEFAULT && g_flow_ml_s)
+    return ((uint32_t)g_flow_ml_s * (uint32_t)PB_PULSES_PER_L_DEFAULT) / 1000u;
+  if (!g_pump_on && g_leak) return 1u;      /* a slow weep past a closed gate */
+  return 0u;
+}
+
+static uint32_t sim_screw_hz_(void) {
+  if (g_stall || g_servo_us == 1500u || g_servo_us == 0u) return 0u;
+  return 20u;                               /* task 14 owns the bench's real screw rate */
+}
+
+/* An edge lands at its OWN microsecond inside the step, so the ISR's gap reject measures
+   the interval the fake scheduled and not the reading of it. */
+static void emit_(uint32_t hz, uint32_t *next_us, uint32_t target_us, void (*isr)(void)) {
+  if (hz == 0u) { *next_us = target_us; return; }
+  uint32_t period = 1000000u / hz;
+  if (period == 0u) period = 1u;
+  if (*next_us < g_us) *next_us = g_us;
+  while (*next_us <= target_us) {
+    g_us = *next_us;
+    *next_us += period;
+    isr();
+  }
+}
+
 /* One millisecond of rig time. Task 6 hangs the flow and screw edge emitters here,
    between tick_models_() and the final clock assignment, so an edge can land at its own
    microsecond inside the step. */
 static void advance_1ms_(void) {
   const uint32_t target = g_us + 1000u;
   tick_models_(1000u);
+  emit_(sim_flow_hz_(target / 1000u), &g_next_flow_us,  target, pulses_isr_flow);
+  emit_(sim_screw_hz_(),              &g_next_screw_us, target, pulses_isr_screw);
   g_us = target;
   g_ms = g_us / 1000u;
 }
@@ -252,6 +292,7 @@ void sim_reset(bool warm) {
   memset(g_chan, 0, sizeof g_chan);
   g_rx_len = g_rx_pos = 0; g_tx_len = 0;
   g_ev_n = 0;
+  g_next_flow_us = g_next_screw_us = 0;
   if (!warm) memset(&g_nv, 0, sizeof g_nv);   /* a power cycle clears SRAM (§2.3) */
   noinit_begin();                             /* what setup() does, in the same order */
   hal_begin();

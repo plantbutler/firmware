@@ -6,6 +6,7 @@
 #include "config.h"
 #include "noinit.h"
 #include "safety.h"
+#include "pulses.h"
 
 void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
@@ -264,6 +265,21 @@ static void test_boot_salt_differs_across_two_warm_boots(void) {
   TEST_ASSERT_TRUE(a > 0x80000000u || b > 0x80000000u);
 }
 
+/* §6: target is ml * cfg / 1000 — MULTIPLY FIRST. The reverse order truncates the
+   calibration to whole pulses per millilitre and under-delivers 15% at the nominal 5880.
+   And `cal 0` used to make pulses_to_ml divide by zero: the Cortex-M4's UDIV returns 0
+   without DIV_0_TRP, so the flood happened and the report said nothing came out. */
+static void test_ml_from_pulses_rounds_down_and_does_not_overflow(void) {
+  TEST_ASSERT_EQUAL_UINT32(100u, pulses_to_ml(588u, 5880u));
+  TEST_ASSERT_EQUAL_UINT32(9u,   pulses_to_ml(58u, 5880u));    /* 9.86 ml, rounded DOWN */
+  TEST_ASSERT_EQUAL_UINT32(250u, pulses_to_ml(1470u, 5880u));
+  TEST_ASSERT_EQUAL_UINT32(0u,   pulses_to_ml(0u, 5880u));
+  TEST_ASSERT_EQUAL_UINT32(0u,   pulses_to_ml(1000u, 0u));     /* never a UDIV-returns-0 lie */
+  /* past UINT32_MAX/1000 the multiply-first form would wrap; the split form does not */
+  TEST_ASSERT_EQUAL_UINT32(850340u,     pulses_to_ml(5000000u, 5880u));
+  TEST_ASSERT_EQUAL_UINT32(2147483647u, pulses_to_ml(2147483647u, 1000u));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_the_native_runner_links_and_runs);
@@ -288,5 +304,6 @@ int main(void) {
   RUN_TEST(test_a_dose_in_flight_across_a_warm_boot_latches_dry);
   RUN_TEST(test_a_dose_in_flight_across_a_warm_boot_raises_resetmid);
   RUN_TEST(test_boot_salt_differs_across_two_warm_boots);
+  RUN_TEST(test_ml_from_pulses_rounds_down_and_does_not_overflow);
   return UNITY_END();
 }
