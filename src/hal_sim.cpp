@@ -24,6 +24,17 @@
 
 /* ---- clock ---- */
 static uint32_t g_us, g_ms;
+/* g_ms is tracked as its OWN counter, never derived from g_us by division (task 14 found
+   why: g_us is a real microsecond register and wraps on its own ~71.6 minute period --
+   exactly like a real chip's micros(), which is independent of millis()'s ~49.7 day one --
+   so g_us / 1000u can never exceed roughly 4.295 million regardless of how far g_ms has
+   actually counted. sim_set_clock_ms(0xFFFFF000) landing there and the very next
+   hal_millis() call silently resyncing g_ms down to ~4.29 MILLION is exactly that bug,
+   caught by test before it could poison task 22's identical rollover fixture: see the
+   task 14 report for the reproduction. g_ms_frac_us is the sub-millisecond remainder
+   hal_delay_us() carries between calls so a run of sub-ms waits still folds into g_ms
+   correctly however large g_ms already is. */
+static uint32_t g_ms_frac_us;
 
 /* ---- D6 ---- */
 static bool     g_pump_on;
@@ -93,14 +104,17 @@ static void tick_models_(uint32_t us) {
 
 static uint32_t g_next_flow_us, g_next_screw_us;
 
-/* now_ms is the millisecond THIS step reaches by its end (target/1000), not g_ms, which
+/* now_ms is the millisecond THIS step reaches by its end (g_ms + 1), not g_ms, which
    at the call site below is still last step's value: emit_() runs between tick_models_()
    and the g_us/g_ms assignment, so a read of the bare global here is one step STALE
    against what hal_millis() is about to return to the caller. Gating on the stale value
    pushed the first edge to elapsed 3001 ms against a 3000 ms prime deadline that dose_run()
    (task 18) checks with `>=` at elapsed 3000 ms — a healthy meter aborted DOSE_ABORT_NOFLOW
    one millisecond before its own first pulse. Gating on the step's END millisecond instead
-   lands the first edge by elapsed 3000 ms, at or before the deadline. */
+   lands the first edge by elapsed 3000 ms, at or before the deadline. (Task 14: this used
+   to read target / 1000u, which is g_us's business, not g_ms's -- see the note by g_ms's
+   declaration for why that stopped being safe once a clock jump could put g_ms somewhere
+   g_us's own arithmetic cannot reach.) */
 static uint32_t sim_flow_hz_(uint32_t now_ms) {
   if (g_storm_hz) return g_storm_hz;
   if (g_pump_on && (now_ms - g_pump_on_at_ms) >= (uint32_t)PB_PRIME_MS_DEFAULT && g_flow_ml_s)
@@ -140,8 +154,19 @@ static void emit_(uint32_t hz, uint32_t *next_us, uint32_t target_us, void (*isr
   if (hz == 0u) { *next_us = target_us; return; }
   uint32_t period = 1000000u / hz;
   if (period == 0u) period = 1u;
-  if (*next_us < g_us) *next_us = g_us;
-  while (*next_us <= target_us) {
+  /* Both comparisons were plain unsigned `<`/`<=` until task 14: harmless for every test
+     before this one, since next_us/g_us/target_us always sat close together near 0 -- but
+     g_us itself is a real 32-bit microsecond register with its OWN ~71.6-minute wrap
+     (see the note by g_ms's declaration), and sim_set_clock_ms() is the first thing that
+     ever runs it that close to that wrap inside one test. A stalled next_us left behind
+     by the wrap would then never again satisfy a plain `<= target_us` once target_us
+     itself had wrapped past it, silently starving the screw/flow emitters mid-test --
+     caught by test_move_deadline_holds_across_a_millis_rollover reporting "stall" instead
+     of "timeout" once the wrap arrived a few thousand ms into a 45 s move. Signed-cast
+     unsigned differences, exactly like every ms comparison elsewhere in this file, fix it
+     for a true gap under 2^31 us -- true of every gap this program ever schedules. */
+  if ((int32_t)(g_us - *next_us) > 0) *next_us = g_us;
+  while ((int32_t)(target_us - *next_us) >= 0) {
     g_us = *next_us;
     *next_us += period;
     isr();
@@ -154,25 +179,40 @@ static void emit_(uint32_t hz, uint32_t *next_us, uint32_t target_us, void (*isr
 static void advance_1ms_(void) {
   const uint32_t target = g_us + 1000u;
   tick_models_(1000u);
-  emit_(sim_flow_hz_(target / 1000u), &g_next_flow_us,  target, pulses_isr_flow);
+  emit_(sim_flow_hz_(g_ms + 1u),       &g_next_flow_us,  target, pulses_isr_flow);
   emit_(sim_screw_hz_(),              &g_next_screw_us, target, screw_isr_);
   g_us = target;
-  g_ms = g_us / 1000u;
+  g_ms = g_ms + 1u;   /* its OWN counter -- see the note by its declaration */
 }
 
 void     sim_advance(uint32_t ms) { for (uint32_t i = 0; i < ms; ++i) advance_1ms_(); }
 uint32_t hal_millis(void) { advance_1ms_(); return g_ms; }   /* PB_SIM_TICK_US == 1000 */
 uint32_t hal_micros(void) { return g_us; }                   /* reads; never advances */
-void     hal_delay_us(uint16_t us) { tick_models_(us); g_us += us; g_ms = g_us / 1000u; }
+void     hal_delay_us(uint16_t us) {
+  tick_models_(us);
+  g_us += us;
+  g_ms_frac_us += us;             /* folded into g_ms below, never derived from g_us itself */
+  g_ms += g_ms_frac_us / 1000u;
+  g_ms_frac_us %= 1000u;
+}
 
 /* task 14 step 1's injector: not sim_advance()/hal_millis() by another name -- it jumps
    the clock to an arbitrary value without walking through every millisecond between here
    and there, which is the only way a host test can start near a rollover in bounded time.
-   emit_()'s own `if (*next_us < g_us) *next_us = g_us;` guard is what keeps the next
-   advance_1ms_() from trying to "catch up" the edge schedule across the jump. */
+   emit_()'s own wraparound-safe "next_us is behind g_us" guard is what keeps the next
+   advance_1ms_() from trying to "catch up" the edge schedule across the jump.
+
+   The brief's own draft body was `g_us = ms * 1000u; g_ms = ms;` and nothing else. That
+   is unsafe with g_ms independently tracked (see the note by its declaration): g_us's own
+   32-bit register cannot represent an arbitrary millisecond count as microseconds without
+   wrapping, so g_ms_frac_us's stale remainder from before the jump would otherwise carry
+   forward into the value returned after it. Clearing it here is the one addition beyond
+   the draft; it is still "one bounded tick_models_() call; nothing else" as far as the
+   MODELS go. */
 void sim_set_clock_ms(uint32_t ms) {
   g_us = ms * 1000u;
   g_ms = ms;
+  g_ms_frac_us = 0u;
   tick_models_(0u);
 }
 
@@ -357,7 +397,7 @@ void hal_begin(void) {
 void sim_noinit_clobber(void) { g_nv.pattern ^= 0xA5A5A5A5u; }
 
 void sim_reset(bool warm) {
-  g_us = g_ms = 0;
+  g_us = g_ms = 0; g_ms_frac_us = 0;
   g_pump_on = false; g_pump_on_us = 0; g_pump_on_at_ms = 0;
   g_wdt_running = false; g_wdt_counter = SIM_WDT_RELOAD; g_wdt_rate_hz = 2929;
   g_wdt_frac = 0; g_wdt_delta = 0; g_feeds = 0;

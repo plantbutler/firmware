@@ -5,6 +5,7 @@
    header that defines it. Task 14 adds cart.h, task 15/16 safety.h, task 24 netfsm.h
    and link.h -- each at TOP LEVEL, never inside the #if PB_BRINGUP block, because
    cli_print_status() calls into all of them unconditionally. */
+#include "cart.h"
 #include "cli.h"
 #include "config.h"
 #include "hal.h"
@@ -237,6 +238,11 @@ void cli_print_status(void) {
 #else
   cli_printf_u32("cart pulses_per_gate=%lu\n", (uint32_t)PB_PULSES_PER_GATE);
 #endif
+  snprintf(b, sizeof b, "cart pos=%s%u pulses=%lu parked=%u busy=%u err=%s\n",
+           cart_pos_known() ? "" : "?", (unsigned)cart_pos(),
+           (unsigned long)cart_pulses(), (unsigned)cart_parked(),
+           (unsigned)cart_busy(), cart_err());
+  hal_serial_write(b);
 #if PB_REPORT_POS_UNKNOWN
   hal_serial_write("pos: FORCED unknown (PB_REPORT_POS_UNKNOWN=1)\n");
 #endif
