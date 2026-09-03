@@ -134,6 +134,40 @@ static void test_an_i2c_error_is_reported_as_error_not_as_zero(void) {
   TEST_ASSERT_EQUAL_UINT16(0x5A5Au, v);        /* untouched: never a value on failure */
   bool home = true;
   TEST_ASSERT_FALSE(sensors_home_hall(&home)); /* an error, never "not home" */
+  TEST_ASSERT_TRUE(home);   /* untouched: a bus error must never be mapped onto *home == false */
+}
+
+/* sensors_home_hall() shares gate_() with sensors_select() (backoff, and the refuse-while-
+   dosing guard), but until now only sensors_select() had a case that drove it — same code
+   path, proven here independently rather than inferred. */
+static void test_home_hall_is_gated_by_the_same_backoff_and_dosing_guard_as_select(void) {
+  (void)sensors_begin();
+  sim_set_i2c_fail(true);
+  for (uint8_t i = 0; i < PB_I2C_FAIL_LIMIT; ++i) (void)sensors_select(0);
+  TEST_ASSERT_FALSE(sensors_i2c_healthy());
+
+  sim_events_clear();                       /* while backing off, the bus is not touched */
+  bool home = true;
+  TEST_ASSERT_FALSE(sensors_home_hall(&home));
+  TEST_ASSERT_TRUE(home);
+  TEST_ASSERT_EQUAL_UINT32(0u, pb_count(SIM_EV_I2C_WRITE));
+
+  sim_set_i2c_fail(false);
+  pb_advance((uint32_t)PB_I2C_BACKOFF_MS + 1u);
+
+  safety_set_dosing(true);                  /* §2.13: recovery may not run mid-dose */
+  sim_events_clear();
+  home = true;
+  TEST_ASSERT_FALSE(sensors_home_hall(&home));
+  TEST_ASSERT_TRUE(home);
+  TEST_ASSERT_EQUAL_UINT32(0u, pb_count(SIM_EV_I2C_WRITE));
+  TEST_ASSERT_EQUAL_UINT32(0u, pb_count(SIM_EV_PIN_CFG));
+  TEST_ASSERT_FALSE(sensors_i2c_healthy());
+
+  safety_set_dosing(false);
+  home = false;
+  TEST_ASSERT_TRUE(sensors_home_hall(&home)); /* runs the moment the dose ends */
+  TEST_ASSERT_TRUE(sensors_i2c_healthy());
 }
 
 /* §3: a healthy sweep is ~18 ms and a wedged one is 7 s at the core's fixed 1000 ms
@@ -257,6 +291,7 @@ int main(void) {
   RUN_TEST(test_select_holds_p4_high_so_the_home_hall_stays_readable);
   RUN_TEST(test_read_discards_the_first_conversion_and_keeps_the_second);
   RUN_TEST(test_an_i2c_error_is_reported_as_error_not_as_zero);
+  RUN_TEST(test_home_hall_is_gated_by_the_same_backoff_and_dosing_guard_as_select);
   RUN_TEST(test_sweep_feeds_the_watchdog_between_channels);
   RUN_TEST(test_sweep_reads_the_open_canary_channel_every_time);
   RUN_TEST(test_a_stuck_mux_is_reported_as_an_error_not_as_readings);
