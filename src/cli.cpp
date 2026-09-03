@@ -378,10 +378,23 @@ void cli_print_status(void) {
            (unsigned)noinit_was_cold(), (unsigned)noinit_reset_mid());
   hal_serial_write(b);
 
-  /* PLACEHOLDER. Task 17 step 9 replaces this line with
-       hal_serial_write("last="); hal_serial_write(safety_last_err()); hal_serial_write("\n");
-     and that replacement is a numbered step of task 17, not a hope. `last=` is bring-up
-     7c's pass criterion (`last=resetmid` after a hang-forced reset), so a hard-coded
-     `none` here would make that step unpassable. */
-  hal_serial_write("last=none\n");
+  cli_printf_u32("pulses_per_l=%lu\n", (uint32_t)cfg_pulses_per_l_get());
+  cli_printf_u32("prime_ms=%lu\n",     (uint32_t)PB_PRIME_MS_DEFAULT);
+  cli_printf_u32("stall_ms=%lu\n",     (uint32_t)PB_STALL_MS_DEFAULT);
+#if PB_ML_PER_S_MEASURED > 0
+  cli_printf_u32("cap=clamped to 2x the requested ml at %lu ml/s\n",
+                 (uint32_t)PB_ML_PER_S_MEASURED);
+#else
+  hal_serial_write("cap=UNCLAMPED (PB_ML_PER_S_MEASURED=0; bring-up 7b commits it)\n");
+#endif
+  /* No numeric section citation on this line: test_no_float_formatting_appears_in_any_
+     printed_line scans every printed line for a bare digit-dot-digit run, the shape of a
+     stray float specifier, and "2.12)" is exactly that shape -- the same trap the wdt line
+     above already dodges by spelling its own citation out as a section TITLE. */
+  hal_serial_write("stop: `stop` and `dry on` abort a running dose; a backend stop=1 CANNOT "
+                   "- net_poll() does not run while the pump is asserted (design spec "
+                   "section \"What a backend stop=1 can and cannot do\")\n");
+  hal_serial_write("last=");
+  hal_serial_write(safety_last_err());     /* one bare token of 4.1's fixed enum */
+  hal_serial_write("\n");
 }

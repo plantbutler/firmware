@@ -149,10 +149,11 @@ bool cfg_pulses_per_l_set(uint16_t v) {
   return true;
 }
 
-/* ---- dose_run(). THE ONLY CALLER OF hal_pump_write(true) IN THE PROGRAM.
-   Three properties are meant to be checkable by eye (§2.8):
-     (a) exactly ONE hal_pump_write(true) and exactly ONE hal_pump_write(false) below it,
-         with NO `return` between them -- the loop's only exit is a `break`;
+/* ---- dose_run(). THE ONLY CALLER THAT EVER ASSERTS D6 IN THE PROGRAM.
+   Three properties are meant to be checkable by eye (§2.8) -- and by a plain grep of this
+   file for the two calls themselves, which is why this comment names neither literally:
+     (a) exactly one call that turns the pump ON and exactly one that turns it OFF below
+         it, with NO `return` between them -- the loop's only exit is a `break`;
      (b) every refusal is ABOVE the ON write, so a refused dose never asserts D6;
      (c) the loop body's first statement is safety_tick(), so the dog is fed on every
          iteration and a 60 s dose is legal under a 5592 ms grant (§3). ---- */
