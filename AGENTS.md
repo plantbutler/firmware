@@ -8,16 +8,73 @@ Read the umbrella's [AGENTS.md](https://github.com/plantbutler/plantbutler/blob/
 ## Build, upload, tooling
 
 ```bash
-pio run                     # build; env is uno_r4_wifi (platformio.ini)
-pio run -t upload           # flash over USB
-pio device monitor -b 9600  # serial
-make / make upload / make compiledb   # the same, plus compile_commands.json for clangd
+make                 # build the BENCH binary (env uno_r4_wifi) - this is what runs unattended
+make upload          # flash it
+make bringup         # flash the BRING-UP binary: pump/cal/servo/home/goto/hang compiled in
+make sim             # flash the SIM binary: no pump driver, no network stack
+make test            # host suites: pio test -e native
+make check           # the mechanical invariants of the spec's section 9
+make monitor         # serial at 115200 (NOT 9600 - an 80-char hall line is 83 ms at 9600)
+make compiledb       # compile_commands.json for clangd
 ```
+
+Five environments. `uno_r4_wifi` is the one left running; `uno_r4_wifi_bringup` is for
+bring-up 0-7d and is never left running; `uno_r4_wifi_test` runs the on-device suites;
+`uno_r4_wifi_sim` has no pump driver and no network stack; `native` runs the host suites.
+Four further environments — `native_bench`, `native_cal`, `native_measured`,
+`native_nosimcli` — are `native` plus exactly one flag each, and exist only so that four
+suites can be compiled a second time. Nothing uses `PLATFORMIO_BUILD_FLAGS`.
 
 A fresh clone does not build until you create `include/secrets.h` (gitignored) defining
 `WIFI_SSID`, `WIFI_PASS` (`const char[]`), `HTTP_PORT` (`const int`) and `HOST_NAME`
 (`const char[]`). Never commit it. Library deps come from `platformio.ini` (Servo,
-Arduino_SensorKit, LiquidCrystal_I2C).
+Arduino_SensorKit, LiquidCrystal_I2C, Network).
+
+## The two seams
+
+`include/hal.h` is seam 1: Arduino-free free functions, implemented by `src/hal_uno.cpp`
+on the board and `src/hal_sim.cpp` on the host. `include/link.h` is seam 2: ten network
+primitives, implemented by `lib/Network/src/link_wifi.cpp` and `src/link_fake.cpp`.
+Implementations are selected by `build_src_filter`, never by a runtime flag.
+
+**`src/hal_uno.cpp` is the only file in the tree with an Arduino header, a pin number, an
+ISR or a write to D6.** `lib/Network/src/link_wifi.cpp` is the only one that names WiFiS3;
+`lib/Screen` the only one that names the LCD or u8x8 libraries.
+
+## tools/check.sh
+
+`make check` runs it. Each grep protects one thing prose cannot hold: that D6 is written
+by exactly two functions in the whole-word PFS form; that `pinMode` never touches D6, D2
+or D3 outside `hal_arm_pulse_pins_`; that `safety_tick()` is the only feeder of the
+watchdog; that nothing outside `safety.cpp` spins unbounded; that the network layer
+cannot assert D6 and the safety layer cannot make a network call; that no report field is
+printed with a signed conversion; that the bench binary has no bring-up console; and that
+`safety.o` and `hal_uno.o` are byte-identical between the bench and bringup envs.
+
+**Read `docs/superpowers/specs/2026-09-03-bench-sketch-design.md` before touching
+`src/safety.cpp`.** It is the only file where a mistake puts water on the floor.
+
+## Running the bench
+
+These three sentences are requirements of the spec (§2.7, §2.9, §15.2), not advice, and
+they are written here because there is nowhere else in the delivered tree they can live:
+
+**A power cycle after a latch silently rearms the rig.** The dry latch and the
+contradiction latch live in `.noinit`, which survives a warm reset and does not survive a
+power cycle or a brown-out. Pulling the plug on a latched rig and plugging it back in
+clears the latch and lets the next backend command water. Until the backend keeps the
+durable half of the latch, the only safe way to end a latched session is to leave it
+latched and read `status`.
+
+**A `next` below about 60 s will visibly stutter while doses are live.** `dose_run()`
+blocks for up to 60 s and `net_poll()` cannot run while it does, so a report interval
+shorter than a dose is an interval the board cannot keep. The reports are not lost; they
+are late, and the lateness is proportional to how much watering is happening.
+
+**After any power event, look for gaps in `readings`.** The boot salt covers a watchdog
+reset and the RESET button, not a brown-out or a power-cycle loop — those clear SRAM, so
+the boot counter restarts and two boots can collide on `(controller, t)` inside the 300 s
+dedup window, which shows up as a missing row rather than as an error anywhere.
 
 ## What is here (2026-08-30)
 
@@ -52,13 +109,9 @@ In the plan, under the project "Board that reports and waters":
 4. **Don't flood the flat** — put the hardware gate back between the pump pin, the float and the
    relay's input; refuse when position is unknown; status fields in every report.
 
-The bench wiring is drawn and generated in `cad/wiring` (pin map, what switches the pump, power,
-bring-up order). Two things there bind this code from cycle 2 on. The pump is switched by a relay
-module, so nothing in hardware ANDs "firmware says pump" with "the tank has water": the IWDT, a
-hard maximum run time in the same code path that asserts the pump pin, and a no-flow abort from
-the meter are mandatory, not nice to have. And the bench uses A4/A5 for I2C (the expander that
-carries the mux select lines and the home hall), so cycle 1's "A4 becomes channel 5" holds only
-until the mux is wired; after that the five channels arrive through the mux on A0.
+Cycle 1's line "A4 becomes channel 5" is **dead**. The bench wiring supersedes it: A4/A5
+are I2C, carrying the expander (which carries the mux select lines and the home hall) and
+both screens. The five channels arrive through the mux on A0.
 
 The board reports `(controller, channel)` raw counts and accepts a valve index; it never knows
 what a pot or a plant is. The backend decides when to water; the firmware only enforces the caps.
