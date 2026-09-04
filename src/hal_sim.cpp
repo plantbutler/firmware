@@ -477,10 +477,14 @@ size_t sim_serial_tx(char *buf, size_t cap) {
 }
 
 /* ---- memory. The host has no __StackLimit; report a break comfortably inside the
-   margin so §12's check is exercised without faking a failure nobody asked for. ---- */
+   margin so §12's check is exercised without faking a failure nobody asked for.
+   g_heap_break is a file static so a test (task 22's report_heap_ok() cases) can move it
+   without pretending a real allocator ran; sim_reset() restores it to this same default. ---- */
+static uint32_t g_heap_break = 0x20001800u;
 uint32_t hal_heap_arena(void)   { return 2048u; }
 uint32_t hal_heap_ordblks(void) { return 3u; }
-uint32_t hal_heap_break(void)   { return 0x20001800u; }
+uint32_t hal_heap_break(void)   { return g_heap_break; }
+void     sim_set_heap_break(uint32_t addr) { g_heap_break = addr; }
 uint32_t hal_stack_limit(void)  { return 0x20007b00u; }
 uint32_t hal_stack_hwm(void)    { return 384u; }
 uint32_t hal_boot_salt(void) { return g_nv.boots * PB_BOOT_SALT_STRIDE; }
@@ -512,6 +516,7 @@ void sim_reset(bool warm) {
   g_next_flow_us = g_next_screw_us = 0;
   g_servo_stops = 0;
   g_screw_pulse_ms = 0; g_home_lo = 0; g_home_hi = 40; g_screw_pos = 0;
+  g_heap_break = 0x20001800u;
   if (!warm) memset(&g_nv, 0, sizeof g_nv);   /* a power cycle clears SRAM (§2.3) */
   noinit_begin();                             /* what setup() does, in the same order */
   hal_begin();

@@ -79,6 +79,11 @@ uint32_t sim_servo_stops(void);                    /* count of writes of 1500 */
    adds sim_set_heap_break() ONLY. */
 void     sim_set_clock_ms(uint32_t ms);
 
+/* Move the fake's break, so §12 item 0's per-report check has something to fail against.
+   hal_heap_break() otherwise returns a fixed address comfortably inside the margin (task 3
+   step 6), which exercises the happy path and nothing else. Task 22 step 13. */
+void     sim_set_heap_break(uint32_t addr);
+
 typedef enum {
   SIM_EV_PIN_CFG,      /* a whole-word direction+level write: hal_boot_pump_off, hal_pin_write */
   SIM_EV_PIN_MODE,

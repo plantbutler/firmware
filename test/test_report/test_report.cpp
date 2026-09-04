@@ -182,6 +182,42 @@ static void test_report_ack_id_survives_above_sixty_five_thousand(void) {
   TEST_ASSERT_TRUE(has_tok("flow_ml=1000"));
 }
 
+static void test_report_t_is_unsigned_at_and_above_two_to_the_thirty_one(void) {
+  fresh_sweep();
+  const uint32_t targets[3] = { 0x7FFFFFFFu, 0x80000000u, 0xFFFFFFFFu };
+  for (int i = 0; i < 3; ++i) {
+    /* JUMP the clock; do NOT sim_advance() 2^31 times. sim_set_clock_ms() is step 13's
+       injector and it deliberately does not run the edge emitters.
+       -1: hal_millis() ALWAYS advances the fake by one step before it reads (sim.h's clock
+       contract), and report_stamp()'s one call is what report_t_ms()/report_t_wire() are
+       built from — so arming the clock at exactly the target leaves the stamped value one
+       past it. Confirmed by running this case unadjusted: it failed EQUAL_UINT32 by
+       exactly +1 at every one of the three targets, never by more, which is what a
+       one-off-by-the-single-hal_millis()-call bug looks like and what a genuine
+       hal_boot_salt() defect would not. */
+    sim_set_clock_ms((uint32_t)(targets[i] - hal_boot_salt() - 1u));
+    TEST_ASSERT_TRUE(build() > 0);
+    TEST_ASSERT_EQUAL_UINT32(targets[i], report_t_wire());
+    char t[32];
+    snprintf(t, sizeof t, "t=%lu", (unsigned long)targets[i]);
+    TEST_ASSERT_TRUE(has_tok(t));
+    TEST_ASSERT_NULL(strstr(g_buf, "t=-"));   /* a single %d here 400s EVERY report, forever */
+  }
+}
+
+static void test_report_t_differs_across_two_boots_fifteen_seconds_apart(void) {
+  sim_reset(true);                    /* warm: the .noinit boot counter advances */
+  sensors_begin(); fresh_sweep();
+  sim_advance(15000);
+  TEST_ASSERT_TRUE(build() > 0);
+  const uint32_t first = report_t_wire();
+  sim_reset(true);
+  sensors_begin(); fresh_sweep();
+  sim_advance(15000);
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_NOT_EQUAL(first, report_t_wire());   /* else butler swallows the 2nd as a retry */
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_report_carries_c_t_and_the_valid_channels);
@@ -199,5 +235,7 @@ int main(void) {
   RUN_TEST(test_report_never_emits_ack_without_flow_ml);
   RUN_TEST(test_report_never_emits_ack_zero);
   RUN_TEST(test_report_ack_id_survives_above_sixty_five_thousand);
+  RUN_TEST(test_report_t_is_unsigned_at_and_above_two_to_the_thirty_one);
+  RUN_TEST(test_report_t_differs_across_two_boots_fifteen_seconds_apart);
   return UNITY_END();
 }
