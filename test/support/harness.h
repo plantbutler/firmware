@@ -4,6 +4,8 @@
 #include "cli.h"
 #include "config.h"
 #include "hal.h"
+#include "pulses.h"
+#include "report.h"
 #include "sensors.h"
 #include "sim.h"
 #include "safety.h"
@@ -64,7 +66,25 @@ static inline void pb_test_setup(void) {
    same longjmp as every static above the moment an earlier assertion in that body fails —
    leaving the bus reading unhealthy for every later test in the binary that never happens to
    call sensors_begin() itself. Seen directly: one mutation's real diagnostic buried under two
-   unrelated downstream DOSE_REFUSED_I2C failures. */
+   unrelated downstream DOSE_REFUSED_I2C failures.
+
+   pulses_test_reset_leak_() belongs here for the identical reason a fifth time (task 22 fix
+   round 2): g_leak_count is a process-lifetime static in pulses.cpp with no reset of its own,
+   and a case that storms the meter and never calls pulses_begin() itself — pulses_begin() would
+   also zero g_flow/g_screw and the rate window, which is not this cleanup's business — leaves
+   every later case in the binary reading a nonzero leak count for a reason that has nothing to
+   do with what it tests. Proved vacuous, not just latent: a review reproduced
+   test_ch205_counts_leak_pulses_and_err_leak_reaches_the_wire (test_report.cpp) still passing
+   with its OWN storm-and-poll stimulus removed entirely, asserting purely on the previous
+   case's residue.
+
+   report_clear_ack() belongs here for the same reason a sixth time: g_ack/g_ack_set are
+   process-lifetime statics in report.cpp, and every current case happens to set or clear the
+   ack slot itself before asserting on it — but a failing assertion mid-case longjmps past that
+   self-cleanup exactly like every static above, leaving the slot dirty for whatever runs next.
+   Unlike the others this one needs no dedicated test-only wrapper: report_clear_ack() is
+   already the production entry point exec_pending() will call, and it already does exactly
+   what teardown needs. */
 static inline void pb_test_teardown(void) {
   sim_events_clear();
   safety_set_dosing(false);
@@ -72,6 +92,8 @@ static inline void pb_test_teardown(void) {
   cli_stop_clear();
   safety_reset_dose_cooldown_();
   sensors_test_reset_health_();
+  pulses_test_reset_leak_();
+  report_clear_ack();
 }
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }

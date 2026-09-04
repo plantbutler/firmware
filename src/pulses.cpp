@@ -127,3 +127,16 @@ void pulses_leak_poll(bool pump_on) {
 
 uint32_t pulses_leak_count(void) { return g_leak_count; }
 bool     pulses_leak_seen(void)  { return g_leak_count > 0u; }
+
+#if PB_SIM
+/* The leak-watch subset of what pulses_begin() resets, and nothing else: g_flow/g_screw and
+   the rate window are deliberately left untouched, because other suites (test_dose.cpp) manage
+   those themselves per case and a teardown that zeroed them too would be a second, competing
+   reset path for state this function has no business touching. */
+void pulses_test_reset_leak_(void) {
+  g_leak_rearm_ms = 0u;
+  g_leak_base = 0u;
+  g_leak_count = 0u;
+  g_leak_armed = false;
+}
+#endif

@@ -42,4 +42,15 @@ void     pulses_test_tear_next(uint32_t edges);
    the screw model, because the loop had no injector anywhere and was asserted only by
    the always-agrees-on-the-first-pass happy path. */
 void     pulses_test_tear_screw_next(uint32_t edges);
+
+/* Host-suite seam, same shape as safety.cpp's g_dosing/g_float_refusals/g_last_end_ms trio and
+   sensors.cpp's g_healthy/g_fails/g_backoff_until trio: g_leak_count (and the armed/base/rearm
+   state around it) is a process-lifetime static in pulses.cpp with no reset path of its own --
+   pulses_begin() resets it, but pulses_begin() ALSO zeroes g_flow/g_screw and the rate window,
+   which no test wants as a side effect of a leak-count-only cleanup. A case that storms the
+   meter and never calls pulses_begin() itself (found leaving `err=leak` reachable purely by
+   residue from an earlier test, task 22 fix round 2) leaves every later case in the binary
+   reading a nonzero count for a reason that has nothing to do with what it tests.
+   pb_test_teardown() is the only caller. */
+void     pulses_test_reset_leak_(void);
 #endif

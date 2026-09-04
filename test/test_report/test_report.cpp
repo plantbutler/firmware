@@ -294,12 +294,8 @@ static void test_report_never_repeats_a_key(void) {
    ten-second bursts, polling as loop() would, until the count is past the clamp. */
 static void test_a_saturated_diagnostic_counter_stays_inside_max_raw(void) {
   fresh_sweep();
-  pulses_begin();                        /* a clean counter: g_leak_count is process-lifetime
-                                             state in pulses.cpp with no reset path of its own
-                                             (harness.h's pb_test_setup() resets hal_sim.cpp's
-                                             OWN statics only, a different translation unit),
-                                             and this test must not depend on running first
-                                             in the binary to start from zero */
+  /* pb_test_teardown() (harness.h) resets g_leak_count via pulses_test_reset_leak_() at the
+     end of EVERY case, so this one starts clean without depending on running first. */
   pulses_leak_poll(false);               /* arm the watch (the rearm window is long past) */
   sim_flow_storm(2000);
   for (int i = 0; i < 100 && pulses_leak_count() <= (uint32_t)PB_DIAG_CLAMP; ++i) {
@@ -354,15 +350,9 @@ static void test_report_err_token_never_contains_whitespace(void) {
   for (unsigned i = 0; i < sizeof every_producer / sizeof every_producer[0]; ++i)
     TEST_ASSERT_NULL(strpbrk(every_producer[i], " \t\r\n"));
   fresh_sweep();
-  /* Without this, a leak storm from an EARLIER test in this binary (g_leak_count is
-     process-lifetime state in pulses.cpp with no reset of its own) leaves
-     pulses_leak_seen() true here, and err='s precedence puts "leak" above
-     safety_last_err() — so this case would assert err=resetmid while the wire actually
-     said err=leak, for a reason that has nothing to do with what this case is testing.
-     Caught by running the full suite: this case passes alone under
-     `pio test -f test_report -F test_report_err_token_never_contains_whitespace` and fails
-     in the full run, which is exactly the test-order dependency this line closes. */
-  pulses_begin();
+  /* pb_test_teardown() resets g_leak_count between every case (see harness.h), so a leak
+     storm from an EARLIER test in this binary cannot make pulses_leak_seen() true here and
+     mask err=resetmid behind err=leak via err='s precedence. */
   safety_set_err("resetmid");
   report_clear_ack();
   TEST_ASSERT_TRUE(build() > 0);
@@ -389,9 +379,8 @@ static void test_report_refuses_to_send_on_truncation_and_says_txcap(void) {
    exactly when the network stack, the largest allocator in the program, is active. */
 static void test_a_break_inside_the_stack_margin_latches_err_heap(void) {
   fresh_sweep();
-  pulses_begin();       /* same leftover-leak hazard as test_report_err_token_never_
-                            contains_whitespace above: without this, a prior test's leak
-                            storm masks err=heap behind err=leak on the wire. */
+  /* pb_test_teardown() resets g_leak_count between every case (see harness.h): without that,
+     a prior test's leak storm would mask err=heap behind err=leak on the wire here. */
   TEST_ASSERT_TRUE(report_heap_ok());                  /* the fake starts well clear */
   sim_set_heap_break(hal_stack_limit() - (uint32_t)PB_STACK_MARGIN + 4u);
   TEST_ASSERT_FALSE(report_heap_ok());
