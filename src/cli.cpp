@@ -532,6 +532,11 @@ void cli_print_status(void) {
   cli_printf_u32("report: cap=%lu bytes\n", (uint32_t)PB_BODY_CAP);
   cli_printf_u32("report: DROPPED on truncation (err=txcap) x%lu\n", report_txcap_drops());
 
+  /* A rebuilt or restored backend database restarts commands.id at 1, and the board then
+     refuses EVERY command as a replay until a COLD boot (power cycle, not RESET). Without this
+     line that is silent and unexplainable. Spec §4.3, §16.5.9. */
+  cli_printf_u32("cmd_high_water=%lu (recovery: cold boot)\n", g_nv.cmd_high_water);
+
   snprintf(b, sizeof b,
            "arena=%lu (min %lu max %lu) ordblks=%lu break=0x%lx stack_hwm=%lu (max %lu) "
            "headroom=%lu\n",
