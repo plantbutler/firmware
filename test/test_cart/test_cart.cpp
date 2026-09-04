@@ -1,10 +1,15 @@
 #include <unity.h>
 #include <string.h>
+#include "../support/bodies.h"
 #include "../support/harness.h"
 #include "cart.h"
 #include "config.h"
+#include "exec.h"
+#include "netfsm.h"
+#include "report.h"
 #include "sensors.h"
-#include "sim.h"
+#include "sim.h"        /* the link_fake_* control surface lives HERE (task 21). There is no
+                           include/link_fake.h anywhere in this tree. */
 
 void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
@@ -236,6 +241,31 @@ void test_servo_is_stopped_on_every_exit_path(void) {
   }
 }
 
+static void test_the_cart_is_parked_off_every_outlet_after_every_command_including_a_failed_goto(void) {
+  pb_test_setup();
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);   /* water=3; goto will fail */
+  net_begin(); exec_begin();
+  pb_net_passes(14, 100);
+  exec_pending();
+  TEST_ASSERT_TRUE(cart_parked());
+}
+
+static void test_the_cart_is_parked_after_a_stop_command_and_after_an_out_of_range_outlet(void) {
+  const char *bodies[2]; size_t lens[2];
+  bodies[0] = k_stop_200;         lens[0] = sizeof k_stop_200 - 1u;
+  bodies[1] = k_out_of_range_200; lens[1] = sizeof k_out_of_range_200 - 1u;
+  for (unsigned i = 0; i < 2; ++i) {
+    pb_test_setup();
+    link_fake_reset(); link_fake_set_state(LINK_UP);
+    link_fake_queue_response(bodies[i], lens[i]);
+    net_begin(); exec_begin();
+    pb_net_passes(14, 100);
+    exec_pending();
+    TEST_ASSERT_TRUE(cart_parked());
+  }
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_goto_refuses_when_pulses_per_gate_is_zero);
@@ -250,5 +280,7 @@ int main(void) {
   RUN_TEST(test_stall_aborts_within_the_stall_window_and_loses_position);
   RUN_TEST(test_goto_rejects_an_outlet_outside_one_to_five);
   RUN_TEST(test_servo_is_stopped_on_every_exit_path);
+  RUN_TEST(test_the_cart_is_parked_off_every_outlet_after_every_command_including_a_failed_goto);
+  RUN_TEST(test_the_cart_is_parked_after_a_stop_command_and_after_an_out_of_range_outlet);
   return UNITY_END();
 }

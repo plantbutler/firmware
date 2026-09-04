@@ -13,12 +13,17 @@
    prevent. */
 #include <unity.h>
 #include <string.h>
+#include "../support/bodies.h"
 #include "../support/harness.h"
 #include "cart.h"
 #include "cli.h"
 #include "config.h"
+#include "exec.h"
+#include "netfsm.h"
+#include "report.h"
 #include "safety.h"
-#include "sim.h"
+#include "sim.h"        /* the link_fake_* control surface lives HERE (task 21). There is no
+                           include/link_fake.h anywhere in this tree. */
 
 void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
@@ -203,6 +208,51 @@ void test_latch_does_not_set_when_the_float_drops_at_the_prime_boundary(void) {
   TEST_ASSERT_FALSE(safety_contra());
 }
 
+static void test_boot_self_home_runs_under_both_latches(void) {
+  /* cart.cpp's own g_home_seen/g_pos/g_pos_valid are process-lifetime statics with no
+     teardown reset (unlike sim_reset()'s own screw model, which pb_test_setup() DOES put
+     back to its documented default of g_screw_pos == 0 inside the default [0,40] home
+     region). Without this, an EARLIER case in this binary that called cart_home() for real
+     (test_latch_does_not_refuse_homing, above) leaves cart_parked() reading true before
+     exec_pending() ever runs here — found directly: the assertion below still passed with
+     exec_pending()'s own boot-home gate forced permanently false. cart_begin() is the only
+     reset (§2.15's "servo stopped, position UNKNOWN, no movement"), so the case that follows
+     proves the REAL path, not another case's leftover state. */
+  cart_begin();
+  /* pb_latch_contra() drives a REAL dose through dose_run(), whose ladder refuses
+     DOSE_REFUSED_DRY several rungs above the point where a granted dose can ever reach
+     dose_end_ml_() -- the only setter of the contra latch (safety.cpp). Setting dry FIRST
+     would make pb_latch_contra()'s own dose refuse for "dry" and never latch contra at all
+     (its own TEST_ASSERT_TRUE_MESSAGE catches this directly). Same order as this file's
+     existing test_latch_does_not_refuse_homing, a few cases above: latch contra first,
+     while dry is still false, then set dry — "both latches, at once" only after. */
+  pb_latch_contra();
+  safety_dry_set(true);
+  TEST_ASSERT_TRUE(safety_contra());
+  exec_begin();
+  pb_advance(PB_BOOT_HOME_MS + 1);
+  exec_pending();
+  TEST_ASSERT_TRUE(cart_parked());        /* parking is MORE wanted after a latch, not less */
+  TEST_ASSERT_TRUE(safety_contra());      /* and homing clears nothing */
+}
+
+/* §9's fourteenth contra case, owed by task 19 and written HERE because it asserts the latch's
+   three WIRE surfaces and report_build() does not exist until task 22. status and the LCD
+   reach a human standing at the bench; err=contra, ch207=1 and float=0 are the only channel
+   by which the backend and the phone ever learn about the latch at all. */
+static void test_latch_reports_err_contra_and_ch207_and_float_zero(void) {
+  sensors_begin();
+  sim_set_float(true);                    /* the tank SAMPLES fine; the latch outranks it */
+  pb_latch_contra();
+  report_clear_ack();                     /* no ack, so err= falls through to the latch */
+  report_stamp();
+  char b[PB_BODY_CAP];
+  TEST_ASSERT_TRUE(report_build(b, sizeof b) > 0);
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, " err=contra"), b);
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, " ch207=1"),    b);
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, " float=0"),    b);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_latch_sets_when_the_float_said_ok_and_no_pulse_ever_arrived);
@@ -220,5 +270,7 @@ int main(void) {
   RUN_TEST(test_latch_clears_only_on_the_literal_two_token_command);
   RUN_TEST(test_latch_is_not_cleared_by_dry_off_or_by_a_successful_home);
   RUN_TEST(test_latch_does_not_set_when_the_float_drops_at_the_prime_boundary);
+  RUN_TEST(test_boot_self_home_runs_under_both_latches);
+  RUN_TEST(test_latch_reports_err_contra_and_ch207_and_float_zero);
   return UNITY_END();
 }
