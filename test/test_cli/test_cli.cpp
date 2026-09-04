@@ -202,6 +202,33 @@ static void test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_
   TEST_ASSERT_NOT_NULL(strstr(out, "alive=no"));
 }
 
+/* Fix round 1 (review finding 2). Mutation testing found `status`'s contra=1/contra=0
+   branches had no coverage at all: swapping them left the whole 133-case gate green,
+   because nothing asserted the printed text, only that `status` runs. An operator reading
+   a swapped banner would be told the rig is fine when it has refused to water since
+   yesterday -- exactly the surface §2.7 names as required. Both exact lines, both states.
+   The needle for the latched case is deliberately the WHOLE sentence, not just "contra=1":
+   the raw `.noinit` dump line further down status also contains the bare substring
+   "contra=1" (as part of "dry=%u contra=%u inflight=%u"), so a needle that stopped at
+   "contra=1" alone could pass against either line and would not actually pin down which
+   branch printed. */
+static void test_status_prints_the_correct_contra_banner_for_each_state(void) {
+  pb_test_setup();
+  char out[4096];
+  size_t n = feed("status\n", out, sizeof out);
+  out[n] = '\0';
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "contra=0\n"), out);
+  TEST_ASSERT_NULL_MESSAGE(strstr(out, "contra=1 ***"), out);
+
+  pb_latch_contra();
+  n = feed("status\n", out, sizeof out);
+  out[n] = '\0';
+  TEST_ASSERT_NOT_NULL_MESSAGE(
+      strstr(out, "contra=1 *** CONTRADICTION LATCHED - float said OK, meter saw "
+                  "nothing. `clear contra` to release.\n"), out);
+  TEST_ASSERT_NULL_MESSAGE(strstr(out, "contra=0\n"), out);
+}
+
 static uint32_t parse_delta_(const char *out) {
   const char *p = strstr(out, "delta=");
   TEST_ASSERT_NOT_NULL(p);
@@ -346,6 +373,7 @@ int main(void) {
   RUN_TEST(test_parses_every_bench_command);
   RUN_TEST(test_an_overlong_line_is_dropped_whole_not_truncated_into_a_command);
   RUN_TEST(test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_level);
+  RUN_TEST(test_status_prints_the_correct_contra_banner_for_each_state);
   RUN_TEST(test_status_delta_reflects_the_probe_that_produced_it);
   RUN_TEST(test_no_float_formatting_appears_in_any_printed_line);
   RUN_TEST(test_stop_is_matched_byte_by_byte_across_two_reads);

@@ -34,6 +34,21 @@ void test_latch_sets_when_the_float_said_ok_and_no_pulse_ever_arrived(void) {
   TEST_ASSERT_TRUE(safety_contra());
 }
 
+/* Fix round 1 (review finding 1). The setter's own comment says `safety_set_err("contra")`
+   runs AFTER `g_last_err = err_of(r)` "because the latch is the louder fact": the dose that
+   SETS the latch aborts for an ordinary reason first (here DOSE_ABORT_NOFLOW, "noflow"),
+   and the override is what replaces that with "contra" before dose_run() ever returns.
+   Every other "contra" assertion in this suite (test_dose_refused_when_the_contradiction_
+   latch_is_set, test_the_ladder_reports_contra_above_dry) reads safety_last_err() after a
+   SECOND, already-refused dose, where DOSE_REFUSED_CONTRA maps to "contra" through the
+   ordinary err_of() switch regardless of whether this override line exists at all -- they
+   would keep passing even with the override deleted outright. This is the only case that
+   reads safety_last_err() on the dose that actually sets the latch. */
+void test_latch_overrides_err_to_contra_on_the_dose_that_sets_it(void) {
+  pb_latch_contra();
+  TEST_ASSERT_EQUAL_STRING("contra", safety_last_err());
+}
+
 /* The float dropped: the two sensors AGREE that the tank ran out. Ordinary abort. */
 void test_latch_does_not_set_when_the_float_dropped_mid_dose(void) {
   pb_advance(PB_BOOT_GAP_MS + 1u);
@@ -191,6 +206,7 @@ void test_latch_does_not_set_when_the_float_drops_at_the_prime_boundary(void) {
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_latch_sets_when_the_float_said_ok_and_no_pulse_ever_arrived);
+  RUN_TEST(test_latch_overrides_err_to_contra_on_the_dose_that_sets_it);
   RUN_TEST(test_latch_does_not_set_when_the_float_dropped_mid_dose);
   RUN_TEST(test_latch_does_not_set_when_flow_started_and_then_stalled);
   RUN_TEST(test_latch_does_not_set_when_the_dose_was_stopped_before_the_prime_window);
