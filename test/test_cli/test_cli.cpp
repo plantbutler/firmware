@@ -419,6 +419,52 @@ static void test_pump_hang_requires_the_literal_third_token(void) {
 #endif
 }
 
+static void test_cal_rejects_zero_and_absurd_values(void) {
+#if PB_BRINGUP
+  pb_test_setup();
+  uint16_t before = cfg_pulses_per_l_get();
+  char out[256];
+  const char *bad[] = { "cal 0", "cal 999", "cal 20001", "cal 4294967295", "cal -5", "cal x" };
+  for (unsigned i = 0; i < 6u; ++i) {
+    (void)sim_serial_tx(out, sizeof out);
+    TEST_ASSERT_TRUE(cli_dispatch(bad[i]));
+    size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "1000..20000"), bad[i]);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(before, cfg_pulses_per_l_get(), bad[i]);
+  }
+  TEST_ASSERT_TRUE(cli_dispatch("cal 5880"));
+  TEST_ASSERT_EQUAL_UINT16(5880u, cfg_pulses_per_l_get());
+#else
+  TEST_IGNORE_MESSAGE("bench build");
+#endif
+}
+
+static void test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls(void) {
+#if PB_BRINGUP
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true); sim_set_flow_ml_s(30);
+  TEST_ASSERT_TRUE(cli_dispatch("cal 5880"));
+  char out[512];
+  (void)sim_serial_tx(out, sizeof out);
+  TEST_ASSERT_TRUE(cli_dispatch("pump 4000"));
+  size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "dose outlet="), out);
+  TEST_ASSERT_NOT_NULL(strstr(out, " ms="));
+  TEST_ASSERT_NOT_NULL(strstr(out, " pulses="));
+  TEST_ASSERT_NOT_NULL(strstr(out, " ml="));
+  TEST_ASSERT_NOT_NULL(strstr(out, " mls="));
+  TEST_ASSERT_NOT_NULL(strstr(out, " r="));
+  /* mls is computed in integer TENTHS and printed as two unsigned longs around a literal
+     dot: newlib's float formatting is the deepest stack consumer in the program, and the
+     float conversions are banned and grepped for (§12 item 1). */
+  const char *mls = strstr(out, " mls=");
+  TEST_ASSERT_NOT_NULL(strchr(mls, '.'));
+#else
+  TEST_IGNORE_MESSAGE("bench build");
+#endif
+}
+
 /* §6. `pump 60000 prime hang` was a single typed line that removed all three of DECISIONS
    #10's mandatory measures at once: it asserted D6, suppressed the no-flow abort and
    starved the watchdog. Over an unauthenticated USB CDC line a serial-monitor reconnect,
@@ -476,6 +522,8 @@ int main(void) {
   RUN_TEST(test_pump_without_an_argument_is_refused);
   RUN_TEST(test_pump_ms_is_clamped_to_the_hard_cap);
   RUN_TEST(test_pump_hang_requires_the_literal_third_token);
+  RUN_TEST(test_cal_rejects_zero_and_absurd_values);
+  RUN_TEST(test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls);
   RUN_TEST(test_bringup_commands_are_absent_from_the_bench_build);
   return UNITY_END();
 }

@@ -333,7 +333,29 @@ static bool cli_dispatch_bringup_(const char *line) {
     return true;
   }
   if (strcmp(line, "calib") == 0) { cli_run_dose_(10000u, true, false); return true; }  /* 7b */
-  return false;                                       /* step 10 adds cal and noinit pattern */
+  if (strncmp(line, "cal ", 4) == 0) {
+    /* `cal 0` - one token on the serial line, or a stray byte parsed as one - used to make
+       target = 0 for EVERY subsequent command, so each dose ignored its millilitre target
+       and ran the full cap_ms; pulses_to_ml then divided by zero, and the Cortex-M4's UDIV
+       returns 0 without DIV_0_TRP - so the flood happened and the report said nothing came
+       out. The dosing entry point re-checks the same range as DOSE_REFUSED_CAL (§6). */
+    uint32_t v = 0u;
+    if (!parse_u32_(line + 4, &v) || v < PB_PULSES_PER_L_MIN || v > PB_PULSES_PER_L_MAX ||
+        !cfg_pulses_per_l_set((uint16_t)v)) {
+      hal_serial_write("cal: pulses_per_l must be 1000..20000\n");
+      return true;
+    }
+    cli_printf_u32("pulses_per_l=%lu\n", (uint32_t)cfg_pulses_per_l_get());
+    return true;
+  }
+  if (strcmp(line, "noinit pattern") == 0) {        /* bring-up 7c' */
+    g_nv.pattern = 0xC0FFEE01u;
+    noinit_commit();
+    hal_serial_write("noinit pattern written. Now: `pump 3000 hang`, wait for the reset, "
+                     "then `status` - the pattern AND the checksum must both survive.\n");
+    return true;
+  }
+  return false;
 }
 #endif /* PB_BRINGUP */
 
@@ -471,6 +493,9 @@ void cli_print_status(void) {
   hal_serial_write("cart=UNCALIBRATED (PB_PULSES_PER_GATE=0) - goto refuses, pos never ok\n");
 #else
   cli_printf_u32("cart pulses_per_gate=%lu\n", (uint32_t)PB_PULSES_PER_GATE);
+#endif
+#ifdef PB_ALLOW_UNCALIBRATED
+  hal_serial_write("cart=UNCALIBRATED BUILD (PB_ALLOW_UNCALIBRATED set; bring-up 6 removes it)\n");
 #endif
   snprintf(b, sizeof b, "cart pos=%s%u pulses=%lu parked=%u busy=%u err=%s\n",
            cart_pos_known() ? "" : "?", (unsigned)cart_pos(),

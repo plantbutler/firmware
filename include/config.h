@@ -113,6 +113,19 @@
 #ifndef PB_PULSES_HOME_TO_1
 #  define PB_PULSES_HOME_TO_1    0
 #endif
+/* §2.15. The binary that runs unattended may not ship with an uncalibrated gate pitch.
+   PB_ALLOW_UNCALIBRATED is set in [env:uno_r4_wifi]'s build_flags TODAY and is deleted by
+   bring-up 6, in the same commit that writes the measured PB_PULSES_PER_GATE. It exists
+   because this #error would otherwise block `pio run -e uno_r4_wifi`, which is this
+   plan's per-commit gate for every remaining task -- an escape hatch that has to be
+   deleted by hand, and that `status` prints, is the honest way to have both. */
+#if !defined(PB_BRINGUP) && !defined(PB_SIM) && !defined(PB_NATIVE) && \
+    !defined(PB_ALLOW_UNCALIBRATED)
+#  if PB_PULSES_PER_GATE == 0
+#    error "PB_PULSES_PER_GATE is 0: bring-up 6 has not committed the gate pitch. Run it, \
+commit the number, and delete -DPB_ALLOW_UNCALIBRATED from [env:uno_r4_wifi]."
+#  endif
+#endif
 #define PB_MOVE_CAP_MS       45000
 #define PB_STALL_WINDOW_MS    2500
 #define PB_SERVO_CAP_MS      10000
