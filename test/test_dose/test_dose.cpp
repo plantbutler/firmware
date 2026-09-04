@@ -16,11 +16,11 @@ void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
 
 /* Which arms of dose_result_t this BUILD can actually drive dose_run() to, counted rather
-   than guessed. 18 here, after task 18: DOSE_ABORT_NOFLOW, DOSE_ABORT_NOISE, DOSE_ABORT_
-   FLOAT and DOSE_ABORT_POS are all reachable now that the loop carries the prime/stall,
-   rate/plausibility, mid-dose float and PB_POS_RECHECK_MS bus rules. Only DOSE_REFUSED_
-   CONTRA (task 19's latch) is still unreachable. 19 - 1 = 18. Task 19 raises this to 19. */
-#define PB_DRIVABLE_RESULTS 18
+   than guessed. 19 here, after task 19: DOSE_REFUSED_CONTRA is now reachable through
+   pb_latch_contra() (harness.h) -- the only way any test may earn the latch -- followed
+   by an ordinary request. All nineteen results are driven; the switch has no ignored
+   arm left. */
+#define PB_DRIVABLE_RESULTS 19
 
 static void test_the_native_runner_links_and_runs(void) {
   /* PB_CONTROLLER comes from [env:native]'s build_flags, so this also proves the flag
@@ -468,8 +468,13 @@ static bool pb_drive_dose_to_result(dose_result_t want) {
       (void)dose_run(&q);
       return true;
     }
-    case DOSE_REFUSED_CONTRA:
-      return false;   /* task 19's latch: pb_latch_contra() does not exist yet */
+    case DOSE_REFUSED_CONTRA: {
+      pb_latch_contra();
+      pb_advance(PB_DOSE_MIN_GAP_MS + 1u);
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+      (void)dose_run(&q);
+      return true;
+    }
     case DOSE_REFUSED_BOOT: {
       /* the clock is still at 0 -- the ABSENCE of an advance is the arrangement */
       dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
@@ -644,9 +649,7 @@ void test_pump_is_off_on_every_exit_path(void) {
   if (skipped[0]) TEST_MESSAGE(skipped);   /* after the loop, and MESSAGE, not IGNORE */
 }
 
-/* §2.8's ordering pair, half 1: cal above range. The other half, contra above dry, needs
-   pb_latch_contra(), which does not exist until task 19 step 1 -- task 19 step 5 appends
-   test_the_ladder_reports_contra_above_dry to this same file once that fixture exists. */
+/* §2.8's ordering pair, half 1: cal above range. */
 void test_the_ladder_reports_the_more_specific_reason(void) {
   pb_test_setup();
   pb_advance(PB_BOOT_GAP_MS + 1u);
@@ -659,6 +662,21 @@ void test_the_ladder_reports_the_more_specific_reason(void) {
      zero would refuse every later case with DOSE_REFUSED_CAL, on the failing path too. */
   (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);
   TEST_ASSERT_EQUAL(DOSE_REFUSED_CAL, got);               /* cal above range */
+}
+
+/* The second half of task 17 step 7's ordering pair. It could not be written there: the
+   only way to earn the latch is pb_latch_contra(), which this task's step 1 creates.
+   An operator reading `err=dry` when the real reason was the contradiction latch pulls
+   the tank apart looking for water that is already there. */
+void test_the_ladder_reports_contra_above_dry(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pb_latch_contra();
+  safety_dry_set(true);                             /* BOTH latches stand */
+  pb_advance(PB_DOSE_MIN_GAP_MS + 1u);
+  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_CONTRA, dose_run(&q));   /* contra above dry */
+  TEST_ASSERT_EQUAL_STRING("contra", safety_last_err());
 }
 
 /* §2.8's second eye-checkable property, seen from a dose that ran rather than from the
@@ -1799,6 +1817,7 @@ int main(void) {
   RUN_TEST(test_watchdog_is_fed_on_every_iteration_of_the_dose_loop);
   RUN_TEST(test_pump_is_off_on_every_exit_path);
   RUN_TEST(test_the_ladder_reports_the_more_specific_reason);
+  RUN_TEST(test_the_ladder_reports_contra_above_dry);
   RUN_TEST(test_refusal_reports_zero_millilitres_not_the_previous_dose);
   RUN_TEST(test_target_pulses_match_the_calibration_within_one_pulse);
   RUN_TEST(test_console_pump_does_not_require_a_known_position);

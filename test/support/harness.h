@@ -2,6 +2,7 @@
 #pragma once
 #include <unity.h>
 #include "cli.h"
+#include "config.h"
 #include "hal.h"
 #include "sensors.h"
 #include "sim.h"
@@ -88,4 +89,19 @@ static inline void pb_expect_no_feed_between(uint32_t from_ms, uint32_t to_ms) {
   for (size_t i = 0; i < n; ++i)
     if (ev[i].kind == SIM_EV_WDT_FEED && ev[i].at_ms > from_ms && ev[i].at_ms < to_ms) hits++;
   TEST_ASSERT_EQUAL_UINT32(0u, hits);
+}
+
+/* Drive a REAL latching dose: the float says OK, nothing ever flows, the dose runs past
+   its own prime window, and it is not a console prime. That is §2.7's five conditions,
+   and it is the ONLY way the latch can be set -- there is no setter, on purpose. */
+static inline void pb_latch_contra(void) {
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true);
+  sim_set_flow_ml_s(0);                  /* float OK, no flow: the contradiction */
+  dose_req_t q = {0};
+  q.by_time    = true;
+  q.cap_ms     = PB_PRIME_MS_DEFAULT + PB_STALL_MS_DEFAULT + 1000u;
+  q.long_prime = false;                  /* a console prime is EXEMPT (§2.7) */
+  (void)dose_run(&q);
+  TEST_ASSERT_TRUE_MESSAGE(safety_contra(), "pb_latch_contra did not latch");
 }

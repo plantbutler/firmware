@@ -54,6 +54,16 @@ static void test_ui_render_lcd_shows_the_contradiction_banner(void) {
   ui_render_lcd(&s, rows);
   TEST_ASSERT_EQUAL_STRING("CONTRA LATCH    ", rows[0]);
   TEST_ASSERT_EQUAL_STRING("float ok,no flow", rows[1]);
+
+  /* The banner OVERRIDES whatever the caller selected, and outranks an HTTP status too --
+     the latch is the louder fact of the two (§2.7). */
+  s.contra = true; s.lcd_state = "IDLE"; s.lcd_detail = "next 35s"; s.http_status = 400;
+  ui_render_lcd(&s, rows);
+  TEST_ASSERT_EQUAL_STRING("CONTRA LATCH    ", rows[0]);
+  TEST_ASSERT_EQUAL_STRING("float ok,no flow", rows[1]);   /* the latch outranks HTTP 400 */
+  s.sim = true;
+  ui_render_lcd(&s, rows);
+  TEST_ASSERT_EQUAL_STRING("*** SIM NO D6 **", rows[0]);   /* and SIM outranks the latch */
 }
 
 static void test_ui_render_lcd_prose_is_never_the_wire_error_token(void) {
@@ -157,6 +167,7 @@ static void test_parses_every_bench_command(void) {
   TEST_ASSERT_TRUE(cli_dispatch("dry on"));
   TEST_ASSERT_TRUE(cli_dispatch("dry off"));
   TEST_ASSERT_TRUE(cli_dispatch("stop"));
+  TEST_ASSERT_TRUE(cli_dispatch("clear contra"));
   TEST_ASSERT_FALSE(cli_dispatch("dry"));          /* no bare form, and no abbreviation */
   TEST_ASSERT_FALSE(cli_dispatch("mux 16"));      /* out of range */
   TEST_ASSERT_FALSE(cli_dispatch("nonsense"));
@@ -313,6 +324,17 @@ static void test_a_near_miss_token_does_not_raise_the_stop_request(void) {
   }
 }
 
+/* §2.7's release valve, exercised through the console's line matcher rather than the
+   latch itself -- test_contra.cpp owns the latch's own behaviour under `clear contra`;
+   this is the shape task 19's Tests list separates out because it is cli_dispatch()'s
+   line matching under test, not safety_contra(). Two literal tokens, no abbreviation. */
+static void test_clear_requires_both_literal_tokens(void) {
+  const char *misses[] = { "clear", "contra", "clearcontra", "clear  contra", "CLEAR CONTRA" };
+  for (unsigned i = 0; i < 5u; ++i)
+    TEST_ASSERT_FALSE_MESSAGE(cli_dispatch(misses[i]), misses[i]);
+  TEST_ASSERT_TRUE(cli_dispatch("clear contra"));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_ui_render_fills_eight_rows_of_sixteen_characters);
@@ -330,5 +352,6 @@ int main(void) {
   RUN_TEST(test_a_non_matching_byte_is_pushed_to_the_line_buffer_unread);
   RUN_TEST(test_dry_on_mid_dose_raises_the_stop_request_and_sets_the_latch);
   RUN_TEST(test_a_near_miss_token_does_not_raise_the_stop_request);
+  RUN_TEST(test_clear_requires_both_literal_tokens);
   return UNITY_END();
 }

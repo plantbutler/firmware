@@ -253,6 +253,14 @@ bool cli_dispatch(const char *line) {
     hal_serial_write("dry=0\n");
     return true;
   }
+  if (strcmp(line, "clear contra") == 0) {     /* two literal tokens, no abbreviation */
+    if (safety_contra_clear())
+      hal_serial_write("contra cleared - the last dose said float OK and the meter saw "
+                       "nothing. If you have not found out why, you have not fixed it.\n");
+    else
+      hal_serial_write("contra=0 already\n");
+    return true;
+  }
   if (strcmp(line, "stop") == 0) {
     /* A dose in progress never reaches here: the dosing loop blocks and matches this
        word byte-wise itself (§2.12). This arm is the idle console's answer, and it exists
@@ -363,6 +371,14 @@ void cli_print_status(void) {
      operator and bring-up 6/7c actually read, so it goes through the same accessor
      dose_run() (task 17) will. */
   cli_printf_u32("dry=%lu\n", (uint32_t)(safety_dry() ? 1u : 0u));
+
+  /* §2.7. The loudest fact this board can report about itself: two independent sensors
+     disagree and the rig has refused to water since. `clear contra` is the only way back. */
+  if (safety_contra())
+    hal_serial_write("contra=1 *** CONTRADICTION LATCHED - float said OK, meter saw "
+                     "nothing. `clear contra` to release.\n");
+  else
+    hal_serial_write("contra=0\n");
 
   /* The raw .noinit struct: bring-up 7c' reads exactly this line after a forced reset.
      cold= and resetmid= are noinit.cpp's two accessors (task 4) and this is their only

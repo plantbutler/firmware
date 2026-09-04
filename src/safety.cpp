@@ -57,9 +57,17 @@ void safety_float_refusal_count(bool refused_for_float) {
 }
 bool safety_float_flap(void) { return g_float_refusals >= PB_FLOAT_FLAP_LIMIT; }
 
-/* §2.7. The setter, the clear and the tests are task 19's; this is the READER dose_run()'s
-   ladder checks, above the dry latch, so the more specific reason is the one reported. */
+/* §2.7. The reader dose_run()'s ladder checks, above the dry latch, so the more specific
+   reason is the one reported. The setter lives in dose_end_ml_() below, and nowhere else. */
 bool safety_contra(void) { return g_nv.contra_latched; }
+
+/* THE ONLY CLEAR. No timer, no successful anything, no backend command, no `dry off`. */
+bool safety_contra_clear(void) {
+  bool was = g_nv.contra_latched;
+  g_nv.contra_latched = false;
+  noinit_commit();
+  return was;
+}
 
 /* ---- the two exits. Both ALWAYS set every field, so a refusal can never ack the
    previous dose's millilitres (§2.8's second eye-checkable property). ---- */
@@ -88,7 +96,6 @@ static dose_result_t dose_end_(dose_result_t r, const dose_req_t *q) {
 
 static dose_result_t dose_end_ml_(dose_result_t r, uint32_t got_pulses, uint32_t elapsed_ms,
                                   uint8_t outlet, uint32_t prime_ms, bool long_prime) {
-  (void)prime_ms; (void)long_prime;      /* task 19 consumes both, and nothing else does */
   g_last_result  = r;
   g_last_pulses  = got_pulses;
   g_last_flow_ml = (uint16_t)pulses_to_ml(got_pulses, g_pulses_per_l);
@@ -96,6 +103,28 @@ static dose_result_t dose_end_ml_(dose_result_t r, uint32_t got_pulses, uint32_t
   g_last_outlet  = outlet;
   g_last_err     = err_of(r);
   safety_float_refusal_count(false);     /* only a GRANTED dose reaches here (§2.10) */
+
+  /* §2.7. THE ONE PLACE THE LATCH IS SET. Five conditions, each doing one job:
+       g_float_granted      this was a PERMITTED dose -- a refusal proves nothing about flow;
+       !long_prime          a console `pump <ms> prime` of a dry line is where "float OK, no
+                            flow" is the EXPECTED result: priming a dry line IS running the
+                            pump into air on purpose, and without this exemption bring-up 7a
+                            would latch on its very first attempt and §13's "run it again"
+                            would be wrong, because the second run would return
+                            DOSE_REFUSED_CONTRA;
+       float still OK       if it dropped, the two sensors AGREE (the tank ran out) and this
+                            is an ordinary DOSE_ABORT_FLOAT;
+       got_pulses == 0      NOTHING at all, ever -- a dose that flowed and then stalled has
+                            got > 0, and that is an ordinary DOSE_ABORT_NOFLOW;
+       elapsed >= prime_ms  THIS dose's effective prime window, not the configured default:
+                            a `stop` typed 200 ms in is not evidence of anything. */
+  if (g_float_granted && !long_prime &&
+      hal_pin_read(PIN_HALL_FLOAT) == PB_LOW &&
+      got_pulses == 0u && elapsed_ms >= prime_ms) {
+    g_nv.contra_latched = true;
+    noinit_commit();
+    safety_set_err("contra");      /* AFTER err_of(r): the latch is the louder fact */
+  }
   return r;
 }
 

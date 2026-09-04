@@ -54,12 +54,20 @@ bool safety_float_flap(void);
    cart must not quietly forget that the float has been flapping for an hour. */
 void safety_float_refusal_count(bool refused_for_float);
 
-/* §2.7. g_nv.contra_latched, read-only from here — task 19 owns the setter and the
-   `clear contra` release. Declared now, ahead of its own setter, because dose_run()'s
-   ladder (below) checks it above the dry latch and task 19 step 4's own code assumes the
-   declaration already exists: writing the ladder without this arm and inserting it later
-   is how an ordering gets lost. */
+/* §2.7. g_nv.contra_latched. SET in exactly one place -- dose_end_ml_(), under five
+   conditions each doing one job (safety.cpp). There is deliberately no
+   safety_contra_set_(): a test hook that set the latch directly would be a second
+   setter, which is the very thing this design exists to prevent. dose_run()'s ladder
+   checks this above the dry latch, so the more specific reason is the one reported. */
 bool safety_contra(void);
+
+/* THE ONLY CLEAR. The console command `clear contra` -- two literal tokens, no
+   abbreviation, present in BOTH the bench and bringup binaries because the unattended one
+   can latch and a rig releasable only by a reflash is worse. Returns true if it WAS
+   latched, so the console can tell "cleared" from "contra=0 already" without a second
+   read of safety_contra(). Nothing else in the tree may call this: no timer, no
+   successful anything, no backend command, no `dry off`. */
+bool safety_contra_clear(void);
 
 /* THIS TASK DECLARES dose_result_t, and it is the first declaration in the tree: task 5's
    cut of safety.h carried only safety_tick/safety_wait_ms/safety_dosing/safety_set_dosing,

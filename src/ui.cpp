@@ -47,16 +47,28 @@ void ui_render(const ui_state_t *s, char rows[8][17]) {
 }
 
 void ui_render_lcd(const ui_state_t *s, char rows[2][17]) {
-  row_(rows[0], s->lcd_state  ? s->lcd_state  : "IDLE");
-  /* spec §4.2: the last HTTP status is on the LCD, not only in `status` — a 400/401 loop is
-     otherwise invisible to anyone not on the serial port. The RENDERER decides it, not the
-     caller: ui_fill_() (task 26) picks lcd_detail for a dozen other reasons and a rule that
-     relied on it choosing this one would not be a rule. 0 means "no exchange yet". */
-  if (s->http_status != 0u && s->http_status != 200u)
-    rowf_(rows[1], "HTTP %u", (unsigned)s->http_status);
-  else
-    row_(rows[1], s->lcd_detail ? s->lcd_detail : "");
-  if (s->sim) row_(rows[0], "*** SIM NO D6 **");  /* the SAME 16 chars as the OLED's */
+  if (s->contra) {                    /* §5's rows, and they OVERRIDE the caller's choice:
+                                         a latch may not be hidden behind whatever state
+                                         the fill function happened to select this pass -
+                                         nor behind an HTTP status, which is the lesser
+                                         fact of the two. */
+    row_(rows[0], "CONTRA LATCH");
+    row_(rows[1], "float ok,no flow");   /* 16 columns; §5's 17-char text will not fit */
+  } else {
+    row_(rows[0], s->lcd_state ? s->lcd_state : "IDLE");
+    /* spec §4.2: the last HTTP status is on the LCD, not only in `status` — a 400/401 loop
+       is otherwise invisible to anyone not on the serial port. The RENDERER decides it,
+       not the caller: ui_fill_() (task 26) picks lcd_detail for a dozen other reasons and
+       a rule that relied on it choosing this one would not be a rule. 0 means "no
+       exchange yet". */
+    if (s->http_status != 0u && s->http_status != 200u)
+      rowf_(rows[1], "HTTP %u", (unsigned)s->http_status);
+    else
+      row_(rows[1], s->lcd_detail ? s->lcd_detail : "");
+  }
+  /* LAST, and outside the branch: SIM outranks CONTRA on row 0. Task 29 asserts these
+     sixteen characters exactly, in both renderers. */
+  if (s->sim) row_(rows[0], "*** SIM NO D6 **");
 }
 
 /* --- the painter. Both panels freeze for the length of a dose; that is the visible price
