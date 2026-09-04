@@ -420,6 +420,8 @@ static void test_a_backoff_wait_still_waits_across_the_clock_rollover(void) {
   TEST_ASSERT_EQUAL(NET_DOWN, net_state());
 
   pb_advance(2500);                            /* now the 2 s backoff really has elapsed */
+  net_poll(false);                             /* the deferred tear-down spends this pass */
+  TEST_ASSERT_EQUAL(NET_DOWN, net_state());
   net_poll(false);
   TEST_ASSERT_EQUAL(NET_JOIN_ISSUE, net_state());
 }
@@ -562,8 +564,16 @@ static void test_a_modem_timeout_poisons_the_link_and_counts_a_desync(void) {
       const uint16_t desyncs_before = link_desyncs();
       const uint16_t resets_before = link_fake_reset_count();
       net_poll(false);
+      /* The tear-down is DEFERRED to its own pass: this pass has already spent two modem
+         round trips and a third would put it over the watchdog grant. So nothing yet... */
+      TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
+      TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
+      /* ...and it lands on the pass after the backoff, before any rejoin is attempted. */
+      pb_advance(2500);   /* past the first backoff rung */
+      net_poll(false);
       TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());   /* rides out as ch206 */
       TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
+      TEST_ASSERT_EQUAL(NET_DOWN, net_state());       /* still down: the rejoin is the NEXT pass */
       TEST_ASSERT_EQUAL(NET_DOWN, net_state());        /* the NEXT command is NOT issued */
       /* and the next pass issues nothing at all while the backoff runs */
       link_fake_pass_begin();
@@ -596,6 +606,12 @@ static void test_a_modem_timeout_in_join_wait_poisons_the_link(void) {
   const uint16_t desyncs_before = link_desyncs();
   const uint16_t resets_before = link_fake_reset_count();
   net_poll(false);
+  /* Deferred to its own pass: this one has already spent its modem round trips, and the
+     tear-down costs another that would put it over the watchdog grant. */
+  TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
+  TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
+  pb_advance(2500);                              /* past the first backoff rung */
+  net_poll(false);
   TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
   TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
   TEST_ASSERT_EQUAL(NET_DOWN, net_state());      /* not left sitting in JOIN_WAIT for the
@@ -621,9 +637,16 @@ static void test_a_modem_timeout_in_sock_close_poisons_the_link(void) {
       const uint16_t desyncs_before = link_desyncs();
       const uint16_t resets_before = link_fake_reset_count();
       net_poll(false);
+      /* Deferred: the poisoning pass has already spent its modem round trips, and the
+         tear-down costs another that would put it over the watchdog grant. */
+      TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
+      TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
+      TEST_ASSERT_EQUAL(NET_DOWN, net_state());
+      pb_advance(2500);                            /* past the first backoff rung */
+      net_poll(false);
       TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
       TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
-      TEST_ASSERT_EQUAL(NET_DOWN, net_state());
+      TEST_ASSERT_EQUAL(NET_DOWN, net_state());  /* still down: the rejoin is the NEXT pass */
       return;
     }
     net_poll(false);
@@ -642,6 +665,12 @@ static void test_a_modem_timeout_in_send_poisons_the_link(void) {
       link_fake_timeout_next();
       const uint16_t desyncs_before = link_desyncs();
       const uint16_t resets_before = link_fake_reset_count();
+      net_poll(false);
+      /* Deferred: the poisoning pass has already spent its modem round trips, and the
+         tear-down costs another that would put it over the watchdog grant. */
+      TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
+      TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
+      pb_advance(2500);                            /* past the first backoff rung */
       net_poll(false);
       TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
       TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
@@ -665,6 +694,12 @@ static void test_a_modem_timeout_in_recv_poisons_the_link(void) {
       link_fake_timeout_next();     /* sock_read()'s own AT times out: r < 0, not r == 0 */
       const uint16_t desyncs_before = link_desyncs();
       const uint16_t resets_before = link_fake_reset_count();
+      net_poll(false);
+      /* Deferred: the poisoning pass has already spent its modem round trips, and the
+         tear-down costs another that would put it over the watchdog grant. */
+      TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
+      TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
+      pb_advance(2500);                            /* past the first backoff rung */
       net_poll(false);
       TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
       TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());

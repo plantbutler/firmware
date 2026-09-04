@@ -74,6 +74,7 @@ static uint8_t  g_link;
 static int8_t   g_rssi;
 static char     g_ip[16] = "0.0.0.0";
 static bool     g_need_rssi, g_need_ip;      /* set on the JOIN_WAIT -> IDLE transition */
+static bool     g_need_reset;                /* a poisoned session, torn down in its own pass */
 
 net_state_t net_state(void)           { return g_state; }
 uint16_t    net_last_status(void)     { return g_status; }
@@ -115,6 +116,7 @@ void net_begin(void) {
   g_disabled = NULL;    /* a latch left standing here would make net_poll() a silent no-op */
   g_link = 0; g_rssi = 0; snprintf(g_ip, sizeof g_ip, "0.0.0.0");
   g_need_rssi = false; g_need_ip = false;
+  g_need_reset = false;
 }
 
 /* PB_RETRY_DEADLINE_MS = 30000, well inside butler's RETRY_WINDOW_S = 300 (butler.py:86).
@@ -219,8 +221,15 @@ static bool rx_complete(const char **body, uint16_t *blen) {
    is treated as link poisoned: do not issue the next command. link_reset() is end();
    beginned = false; begin(); ++desyncs — and the middle line is the one the 48-hour run depends
    on. Never the ping helper: it resets modem.timeout() to 10000 ms (WiFi.cpp:585-593). */
+/* The tear-down is DEFERRED to its own pass, not done here. poison() is reached from passes
+   that have already spent two modem round trips, and the tear-down costs a third (its second
+   half re-issues a command, and the fake charges it nothing, which is why the host suite
+   cannot see this): 3 x PB_NET_STEP_MS = 3600 ms, and 3600 + PB_NET_SLACK_MS = 5600 > 5592.
+   That is the same arithmetic this file already uses to forbid combining the two refresh
+   passes, and it bites hardest here, on the path taken when the modem is ALREADY misbehaving.
+   The link is down either way, so nothing talks to the modem while the tear-down waits. */
 static void poison(void) {
-  link_reset();
+  g_need_reset = true;
   link_down();     /* same backoff arithmetic a JOIN_WAIT deadline expiry uses; one spelling */
 }
 
@@ -245,6 +254,12 @@ void net_poll(bool dosing) {
   switch (g_state) {
     case NET_DOWN:
       if ((int32_t)(hal_millis() - g_wait_until) < 0) return;
+      if (g_need_reset) {        /* its own pass, for the reason above poison() */
+        modem_ran_();
+        link_reset();
+        g_need_reset = false;
+        return;
+      }
       g_state = NET_JOIN_ISSUE;
       return;
 
