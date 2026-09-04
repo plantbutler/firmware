@@ -169,11 +169,13 @@ static void test_socket_is_closed_on_success_error_timeout_and_a_failed_open(voi
      advance the fake clock by a couple of ms (sim.h's "hal_millis() advances the rig by
      exactly 1 ms" contract), so reaching the 5 s PB_NET_DEADLINE_MS needs real elapsed time
      between passes, not just more of them -- pb_net_passes()'s second argument, which
-     pump_passes() (this file's alias for it with ms hardwired to 0) cannot supply. 20 passes
-     x 500 ms comfortably crosses the deadline with passes to spare for the SOCK_CLOSE/IDLE
-     cleanup that follows it. */
+     pump_passes() (this file's alias for it with ms hardwired to 0) cannot supply. Task 25:
+     zero response bytes is retry-eligible, so this scenario now runs the SEND/RECV leg twice
+     (the original, then the one retry) before the report is finally abandoned -- two 5 s
+     PB_NET_DEADLINE_MS waits, not one. 40 passes x 500 ms (20 s) comfortably crosses both with
+     passes to spare for the SOCK_CLOSE/IDLE cleanup that follows. */
   net_begin();
-  pb_net_passes(20, 500u);
+  pb_net_passes(40, 500u);
   TEST_ASSERT_TRUE(sock_open());
   sock_close();
 }
@@ -341,9 +343,18 @@ static void test_a_join_deadline_is_not_expired_early_by_the_clock_rollover(void
   TEST_ASSERT_EQUAL(NET_JOIN_WAIT, net_state());
 
   /* An unsigned `hal_millis() >= g_deadline` compares a pre-wrap clock against a post-wrap
-     deadline and calls it expired on the first pass -- abandoning a join that had 5 s to run. */
-  link_fake_timeout_next();
-  pb_advance(100);
+     deadline and calls it expired on the first pass -- abandoning a join that had 5 s to run.
+
+     link_join() just set g_join_pending true; task 25 makes EVERY timed-out AT call poison the
+     link (spec's "any modem timeout"), so the old trick of forcing a timeout on link_state()'s
+     own AT to advance the clock without flipping to LINK_UP no longer works here -- it would
+     poison straight back to NET_DOWN and never reach the deadline check this test exists to
+     pin. link_fake_drop_link() clears g_join_pending again with ZERO ATs, so the next
+     link_state() call is a normal, FAST, non-timeout round trip that genuinely reports
+     LINK_DOWN -- exactly how a real board sees a join still in flight -- while pb_advance()
+     supplies the same elapsed time the old (1200 + 100) ms combination did. */
+  link_fake_drop_link();
+  pb_advance(1300);
   net_poll(false);
   TEST_ASSERT_EQUAL(NET_JOIN_WAIT, net_state());
 }
@@ -398,6 +409,195 @@ static void test_a_backoff_wait_still_waits_across_the_clock_rollover(void) {
   TEST_ASSERT_EQUAL(NET_JOIN_ISSUE, net_state());
 }
 
+/* Passes with wall clock, because the RECV deadline and the retry deadline are both in ms.
+   This is pb_net_passes(1, ms_each) with a send counter wrapped round it — one pass at a
+   time, so that the counter can see the state the pass STARTED in. Do not re-derive the pass
+   itself here: harness.h's helper is the one spelling (task 24 step 1). */
+static int run_passes(int n, uint32_t ms_each) {
+  int sends = 0;
+  for (int i = 0; i < n; ++i) {
+    const net_state_t before = net_state();
+    pb_net_passes(1u, ms_each);
+    if (before == NET_SEND) ++sends;
+  }
+  return sends;
+}
+
+static void test_an_exchange_that_produced_no_bytes_is_retried_exactly_once(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response("", 0);        /* the server says nothing at all */
+  const int sends = run_passes(120, 200); /* 24 s: two RECV deadlines, inside the 30 s window */
+  TEST_ASSERT_EQUAL_INT(2, sends);        /* the original and ONE retry */
+  TEST_ASSERT_EQUAL_UINT32(0, net_reports_ok());
+}
+
+static void test_a_retry_is_abandoned_rather_than_sent_outside_the_dedup_window(void) {
+  sim_reset(true);                        /* WARM: the boot counter advances, so the salt is
+                                             non-zero and t= is above 2^31 (spec §15.2) */
+  sensors_begin();
+  TEST_ASSERT_NOT_EQUAL(0, hal_boot_salt());
+  net_begin();
+  link_fake_queue_response("", 0);
+  /* inside the window: the retry IS sent */
+  TEST_ASSERT_EQUAL_INT(2, run_passes(120, 200));
+  /* a fresh report, then let the retry deadline expire before the FSM can resend. Walk until
+     the ORIGINAL send has gone out, RECV has timed out and the retry is ARMED but not yet
+     re-transmitted (net_state() == NET_SOCK_CLOSE, the one pass between "finish() decided to
+     retry" and "CONNECT dials again") -- a fixed pass count here would be guessing the exact
+     boundary between "timeout just detected" and "already walked into CONNECT for the retry",
+     and NET_SOCK_CLOSE's own re-check of the window (the point of this case) only has
+     something to prove if the clock is pushed past the deadline BEFORE that walk, not after. */
+  net_begin();
+  link_fake_queue_response("", 0);
+  int sends = 0;
+  net_state_t st = NET_DOWN;
+  for (int i = 0; i < 60; ++i) {
+    const net_state_t before = net_state();
+    pb_net_passes(1u, 200u);
+    if (before == NET_SEND) ++sends;
+    st = net_state();
+    if (sends == 1 && st == NET_SOCK_CLOSE) break;
+  }
+  TEST_ASSERT_EQUAL_INT(1, sends);
+  TEST_ASSERT_EQUAL(NET_SOCK_CLOSE, st);  /* the retry is armed, sitting right before CONNECT */
+  sim_advance(PB_RETRY_DEADLINE_MS + 1000);
+  sends += run_passes(40, 200);
+  TEST_ASSERT_EQUAL_INT(1, sends);        /* ABANDONED: never sent outside the dedup window */
+}
+
+static void test_a_response_that_produced_any_bytes_is_never_retried(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response("HTTP/1.1 2", 10);      /* bytes arrived; the answer never completed */
+  TEST_ASSERT_EQUAL_INT(1, run_passes(120, 200));
+}
+
+static void test_a_truncated_reply_is_never_retried(void) {
+  sensors_begin();
+  net_begin();
+  const char *cut = "HTTP/1.1 200 OK\r\nContent-Length: 38\r\n\r\nnext=60\ncmd=5 wat";
+  link_fake_queue_response(cut, strlen(cut));
+  TEST_ASSERT_EQUAL_INT(1, run_passes(120, 200));  /* a truncation is bytes that ARRIVED */
+  cmd_t c;
+  TEST_ASSERT_FALSE(net_take_command(&c));         /* and a half-read reply never waters */
+}
+
+static void test_a_four_hundred_is_never_retried(void) {
+  sensors_begin();
+  net_begin();
+  const char *b = "HTTP/1.1 400 Bad Request\r\nContent-Length: 5\r\n\r\nnope\n";
+  link_fake_queue_response(b, strlen(b));
+  TEST_ASSERT_EQUAL_INT(1, run_passes(60, 200));
+  TEST_ASSERT_EQUAL_UINT16(400, net_last_status());
+}
+
+static void test_a_five_hundred_is_not_retried(void) {
+  sensors_begin();
+  net_begin();
+  const char *b = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\n\r\noops\n";
+  link_fake_queue_response(b, strlen(b));
+  TEST_ASSERT_EQUAL_INT(1, run_passes(60, 200));   /* no rollback guarantee: not a 503 */
+  TEST_ASSERT_EQUAL_UINT16(500, net_last_status());
+}
+
+static void test_a_five_oh_three_is_retried_once(void) {
+  sensors_begin();
+  net_begin();
+  const char *b = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\nbusy\n";
+  link_fake_queue_response(b, strlen(b));
+  TEST_ASSERT_EQUAL_INT(2, run_passes(60, 200));   /* sqlite3.OperationalError rolls it all back */
+  TEST_ASSERT_EQUAL_UINT16(503, net_last_status());
+}
+
+static void test_report_body_is_byte_identical_on_the_retry(void) {
+  sensors_begin();
+  net_begin();
+  const char *b = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\nbusy\n";
+  link_fake_queue_response(b, strlen(b));
+  static uint8_t first[PB_TX_CAP];
+  uint16_t first_len = 0, len = 0;
+  int sends = 0;
+  for (int i = 0; i < 60; ++i) {
+    link_fake_pass_begin();
+    const net_state_t before = net_state();
+    net_poll(false);
+    if (before == NET_SEND) {
+      const uint8_t *tx = link_fake_sent(&len);
+      if (++sends == 1) { memcpy(first, tx, len); first_len = len; }
+      else { TEST_ASSERT_EQUAL_UINT16(first_len, len);
+             TEST_ASSERT_EQUAL_MEMORY(first, tx, len); }
+      link_fake_queue_response(b, strlen(b));      /* the same 503 again */
+    }
+    sim_advance(200);
+  }
+  TEST_ASSERT_EQUAL_INT(2, sends);
+}
+
+static void test_a_modem_timeout_poisons_the_link_and_counts_a_desync(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  /* walk to the first state that issues an AT, then time it out */
+  for (int i = 0; i < 40; ++i) {
+    link_fake_pass_begin();
+    const net_state_t before = net_state();
+    if (before == NET_CONNECT) {
+      link_fake_timeout_next();
+      const uint16_t desyncs_before = link_desyncs();
+      const uint16_t resets_before = link_fake_reset_count();
+      net_poll(false);
+      TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());   /* rides out as ch206 */
+      TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
+      TEST_ASSERT_EQUAL(NET_DOWN, net_state());        /* the NEXT command is NOT issued */
+      /* and the next pass issues nothing at all while the backoff runs */
+      link_fake_pass_begin();
+      net_poll(false);
+      TEST_ASSERT_EQUAL_UINT16(0, link_fake_at_count());
+      return;
+    }
+    net_poll(false);
+    sim_advance(50);
+  }
+  TEST_FAIL_MESSAGE("the FSM never reached NET_CONNECT");
+}
+
+static void test_link_drop_returns_to_joining_with_exponential_backoff(void) {
+  static const uint32_t ladder[] = PB_NET_BACKOFF_MS;
+  sensors_begin();
+  net_begin();
+  /* join, then pull the AP out from under it */
+  for (int i = 0; i < 8 && net_state() != NET_IDLE; ++i) { link_fake_pass_begin(); net_poll(false); }
+  TEST_ASSERT_EQUAL(NET_IDLE, net_state());
+  link_fake_drop_link();
+  uint32_t seen[3] = {0, 0, 0};
+  for (int rung = 0; rung < 3; ++rung) {
+    /* drive until the FSM parks in NET_DOWN, then measure how long it waits */
+    for (int i = 0; i < 60 && net_state() != NET_DOWN; ++i) {
+      link_fake_pass_begin(); net_poll(false); sim_advance(50);
+    }
+    TEST_ASSERT_EQUAL(NET_DOWN, net_state());
+    uint32_t waited = 0;
+    while (net_state() == NET_DOWN && waited < 60000) {
+      link_fake_pass_begin(); net_poll(false); sim_advance(100); waited += 100;
+    }
+    seen[rung] = waited;
+    /* still down: the join fails again. link_fake_drop_link() alone cannot express that here --
+       link_join() succeeds UNCONDITIONALLY in the fake (it never consults g_state), so a drop
+       applied before JOIN_ISSUE runs is silently undone the moment link_join()'s own two ATs
+       set g_join_pending, and the very next link_state() call flips straight to LINK_UP,
+       resetting g_backoff_i and erasing the exponential progression this test exists to pin.
+       A timed-out AT is the fake's only real "the join itself failed" primitive, and task 25
+       makes that poison() -> link_reset() + the SAME link_down() ladder -- exactly the
+       repeated-failure shape a real dropped AP produces, and the only one that keeps
+       g_backoff_i climbing instead of being reset by an accidental reassociation. */
+    link_fake_timeout_next();
+  }
+  TEST_ASSERT_TRUE(seen[0] <= ladder[0] + 200);
+  TEST_ASSERT_TRUE(seen[1] > seen[0]);
+  TEST_ASSERT_TRUE(seen[2] > seen[1]);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -419,5 +619,15 @@ int main(void) {
   RUN_TEST(test_a_join_deadline_is_not_expired_early_by_the_clock_rollover);
   RUN_TEST(test_a_backoff_wait_still_waits_across_the_clock_rollover);
   RUN_TEST(test_a_recv_deadline_is_not_expired_early_by_the_clock_rollover);
+  RUN_TEST(test_an_exchange_that_produced_no_bytes_is_retried_exactly_once);
+  RUN_TEST(test_a_retry_is_abandoned_rather_than_sent_outside_the_dedup_window);
+  RUN_TEST(test_a_response_that_produced_any_bytes_is_never_retried);
+  RUN_TEST(test_a_truncated_reply_is_never_retried);
+  RUN_TEST(test_a_four_hundred_is_never_retried);
+  RUN_TEST(test_a_five_hundred_is_not_retried);
+  RUN_TEST(test_a_five_oh_three_is_retried_once);
+  RUN_TEST(test_report_body_is_byte_identical_on_the_retry);
+  RUN_TEST(test_a_modem_timeout_poisons_the_link_and_counts_a_desync);
+  RUN_TEST(test_link_drop_returns_to_joining_with_exponential_backoff);
   return UNITY_END();
 }

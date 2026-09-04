@@ -41,6 +41,18 @@ static bool     g_modem_ran;
 static uint8_t  g_backoff_i;
 static uint32_t g_wait_until, g_deadline, g_last_report_ms;
 static bool     g_first_report_due;
+static bool     g_retried;                  /* each report gets its own single retry */
+/* Set only inside NET_CONNECT's failure branch, and only once the retry is already exhausted
+   (g_retried was already true): TWO consecutive attempts that cannot even OPEN a socket,
+   neither of them a modem timeout, is the fake's own model of a link that silently dropped
+   between reports (link_fake_drop_link()) -- sock_open() answers instantly and cleanly with
+   "not associated", so there is no desync for poison()/link_reset() to fix, but nothing else
+   in this FSM ever re-polls link_state() once IDLE is first reached. Left unhandled, the board
+   would retry-then-abandon every report forever without ever rejoining -- exactly the 48-hour
+   "survives a WiFi drop" bar this file exists to meet. NET_SOCK_CLOSE is the one place that
+   acts on it, via the SAME link_down() a JOIN_WAIT deadline expiry uses; a RECV-side failure
+   (the server present but silent) never sets this and is not treated as a link problem. */
+static bool     g_connect_starved;
 
 static char     g_body[PB_BODY_CAP];
 static uint16_t g_body_len;                 /* != 0 == a report is pending on the wire */
@@ -84,17 +96,40 @@ void net_begin(void) {
                                     would read as "not yet" for a clock past 2^31. */
   g_last_report_ms = hal_millis(); g_first_report_due = true;
   g_body_len = 0; g_tx_len = 0; g_rx_len = 0; g_have_cmd = false;
+  g_retried = false; g_connect_starved = false;
   g_disabled = NULL;    /* a latch left standing here would make net_poll() a silent no-op */
+}
+
+/* PB_RETRY_DEADLINE_MS = 30000, well inside butler's RETRY_WINDOW_S = 300 (butler.py:86).
+   g_t_ms is the UNSALTED hal_millis() stamped alongside g_t_wire (§4.1). Measuring against the
+   wire value gives `elapsed - salt` mod 2^32. Two variables, one purpose each (§4.4). */
+static bool retry_window_open(void) {
+  return (int32_t)(hal_millis() - report_t_ms()) < (int32_t)PB_RETRY_DEADLINE_MS;
 }
 
 /* Every error exit routes THROUGH NET_SOCK_CLOSE via this one function, and it does NOT call
    sock_close() itself: a failed CONNECT that closed inline would be _BEGINCLIENT +
    _CLIENTCONNECT + _CLIENTCLOSE = 3 ATs = 3600 ms, and 3600 + PB_NET_SLACK_MS = 5600 > 5592.
-   Load-bearing arithmetic, not tidiness (spec §3 change 2). */
-static void finish(uint16_t status, bool ok) {
+   Load-bearing arithmetic, not tidiness (spec §3 change 2).
+
+   The retry-eligible set is exactly two cases and nothing else (spec §4.4):
+   (a) zero response bytes arrived, and (b) a COMPLETE 503, which is raised only on
+   sqlite3.OperationalError (butler.py:1638-1639) and rolls the whole BEGIN IMMEDIATE back.
+   Everything else is discarded: a 4xx (the backend answered; the same body cannot get better),
+   a truncated reply, a parse failure, a 500, any other non-200.
+
+   If ANY response bytes arrived, do not retry. When the request lands and the RESPONSE is lost,
+   the backend has already moved a command queued -> sent (:870-873); the retry then hits the
+   unconditional expire (:837-841) and kills a command the board never saw — a HIGH "never
+   acknowledged" page for a dose that never existed, and the pot charged the full ml because
+   flow_ml is NULL. Retrying is what destroys it, which is why a TRUNCATION is on the
+   never-retry side: a truncation is bytes that arrived. */
+static void finish(uint16_t status, bool ok, bool retry_eligible) {
   if (status) g_status = status;
   if (ok) ++g_ok; else ++g_failed;
-  g_body_len = 0;                 /* task 25 keeps it when a retry is armed */
+  const bool retry = retry_eligible && !g_retried && g_body_len != 0 && retry_window_open();
+  if (retry) g_retried = true;      /* g_body_len KEPT: SOCK_CLOSE routes back to CONNECT */
+  else       g_body_len = 0;        /* past the deadline the report is ABANDONED, never sent */
   g_state = NET_SOCK_CLOSE;
 }
 
@@ -155,6 +190,23 @@ static bool rx_complete(const char **body, uint16_t *blen) {
   return true;
 }
 
+/* buf_read breaks out on Timeout (Modem.cpp:185-187) and leaves the late answer sitting in
+   Serial2's RX FIFO; write() clears its result string (:100) but does not drain the UART, and
+   the FSM's restart logic (:241,:267) resyncs some shapes and not others. So ANY modem timeout
+   is treated as link poisoned: do not issue the next command. link_reset() is end();
+   beginned = false; begin(); ++desyncs — and the middle line is the one the 48-hour run depends
+   on. Never the ping helper: it resets modem.timeout() to 10000 ms (WiFi.cpp:585-593). */
+static void poison(void) {
+  link_reset();
+  link_down();     /* same backoff arithmetic a JOIN_WAIT deadline expiry uses; one spelling */
+}
+
+/* A timeout always costs a full step and always yields the failure value; a SUCCESSFUL two-AT
+   pass never does. So the test lives inside the failure branch, never around the whole pass. */
+static bool was_timeout(uint32_t t0) {
+  return (int32_t)(hal_millis() - t0) >= (int32_t)PB_NET_STEP_MS;
+}
+
 void net_poll(bool dosing) {
   g_modem_ran = false;
   if (g_disabled) return;              /* the boot assertion's consumer (§3) */
@@ -168,17 +220,22 @@ void net_poll(bool dosing) {
       g_state = NET_JOIN_ISSUE;
       return;
 
-    case NET_JOIN_ISSUE:
+    case NET_JOIN_ISSUE: {
       modem_ran_();
+      const uint32_t t0 = hal_millis();
       link_join();                              /* 2 ATs (WiFi.cpp:43-67) */
+      if (was_timeout(t0)) { poison(); return; }
       g_deadline = hal_millis() + PB_NET_DEADLINE_MS;
       g_state = NET_JOIN_WAIT;
       return;
+    }
 
     case NET_JOIN_WAIT: {
       modem_ran_();
+      const uint32_t t0 = hal_millis();
       link_state_t s = link_state();            /* 1 AT */
       if (s == LINK_UP) { g_backoff_i = 0; g_state = NET_IDLE; return; }
+      if (was_timeout(t0)) { poison(); return; }
       if ((int32_t)(hal_millis() - g_deadline) >= 0) link_down();
       return;
     }
@@ -203,42 +260,78 @@ void net_poll(bool dosing) {
       g_last_report_ms = hal_millis();
       g_first_report_due = false;
       if (g_body_len == 0) { ++g_failed; return; }   /* err=txcap: DROPPED, never sent (§4.2) */
+      g_retried = false;              /* each report gets its own single retry */
+      g_connect_starved = false;
       g_state = NET_SOCK_CLOSE;
       return;
     }
 
-    case NET_SOCK_CLOSE:
+    case NET_SOCK_CLOSE: {
       modem_ran_();
       memset(g_rx, 0, sizeof g_rx);
       g_rx_len = 0;                     /* no byte of an earlier round trip survives into this one */
+      const uint32_t t0 = hal_millis();
       sock_close();                     /* 1 AT, or 0 when _sock == -1 */
-      g_state = g_body_len ? NET_CONNECT : NET_IDLE;
+      if (was_timeout(t0)) { poison(); return; }
+      /* An armed retry (g_retried already true, body kept) is re-checked against the window
+         HERE, not only once back in finish(): the retry can sit ARMED across a backoff/rejoin
+         before this pass ever runs again, and a window that was open at failure time can have
+         since closed. Abandoning it here, rather than letting SOCK_CLOSE blindly walk it into
+         CONNECT, is what makes "abandoned rather than sent outside the dedup window" true for
+         every path back to this state, not just the one finish() takes on the failure itself. */
+      if (g_retried && g_body_len != 0 && !retry_window_open()) g_body_len = 0;
+      if (g_body_len) { g_state = NET_CONNECT; return; }
+      /* Two straight non-timeout CONNECT failures (see g_connect_starved's own comment):
+         re-join instead of parking in IDLE forever with no way back to JOIN_ISSUE. Plain
+         link_down() -- the SAME backoff a JOIN_WAIT deadline expiry uses -- not poison(): the
+         modem answered cleanly both times, so there is no UART desync to fix with a reset. */
+      if (g_connect_starved) { g_connect_starved = false; link_down(); return; }
+      g_state = NET_IDLE;
       return;
+    }
 
-    case NET_CONNECT:
+    case NET_CONNECT: {
       modem_ran_();
-      if (!sock_open()) { finish(0, false); return; }   /* 2 ATs; a failed open leaves _sock >= 0 */
+      const uint32_t t0 = hal_millis();
+      if (!sock_open()) {               /* 2 ATs; a failed open leaves _sock >= 0 */
+        if (was_timeout(t0)) { poison(); return; }
+        if (g_retried) g_connect_starved = true;   /* this is the retry -- and it ALSO failed */
+        finish(0, false, true);
+        return;
+      }
       g_state = NET_SEND;
       return;
+    }
 
-    case NET_SEND:
+    case NET_SEND: {
       modem_ran_();
-      if (!assemble()) { finish(0, false); return; }
-      if (sock_write((const uint8_t *)g_tx, g_tx_len) != (int)g_tx_len) { finish(0, false); return; }
+      if (!assemble()) { finish(0, false, false); return; }
+      const uint32_t t0 = hal_millis();
+      if (sock_write((const uint8_t *)g_tx, g_tx_len) != (int)g_tx_len) {
+        if (was_timeout(t0)) { poison(); return; }
+        finish(0, false, true);
+        return;
+      }
       g_deadline = hal_millis() + PB_NET_DEADLINE_MS;
       g_state = NET_RECV;
       return;
+    }
 
     case NET_RECV: {
       modem_ran_();
       /* client.read(buf, cap) and NOTHING else: available() would add an _AVAILABLE, and
          connected() costs TWO more. The PB_NET_DEADLINE_MS deadline is the closed-socket
          detector instead, for zero AT commands (spec §3 change 3). */
+      const uint32_t t0 = hal_millis();
       int r = sock_read((uint8_t *)g_rx + g_rx_len, (size_t)(sizeof g_rx - g_rx_len));
       if (r > 0) g_rx_len = (uint16_t)(g_rx_len + r);
       const char *body; uint16_t blen;
       if (rx_complete(&body, &blen)) { g_state = NET_CLOSE; return; }
-      if (r < 0 || (int32_t)(hal_millis() - g_deadline) >= 0) { finish(0, false); return; }
+      if (r < 0 && was_timeout(t0)) { poison(); return; }
+      if (r < 0 || (int32_t)(hal_millis() - g_deadline) >= 0) {
+        finish(0, false, g_rx_len == 0);   /* retry-eligible only if NOTHING at all arrived */
+        return;
+      }
       return;
     }
 
@@ -256,12 +349,13 @@ void net_poll(bool dosing) {
           g_cmd = rs.cmd; g_have_cmd = true;
           report_set_ack(rs.cmd.id, 0, "recv");   /* the ack exists from RECEIPT, not from a dose */
         }
-        finish(200, true);
+        finish(200, true, false);
       } else {
         /* Only a 200 body reaches response_parse: butler's 400 body echoes the board's own
            tokens (f"{key}= out of range: {value}"), so a 4xx body could otherwise be parsed
-           for cmd=/ml= (§4.2). */
-        finish(st, false);
+           for cmd=/ml= (§4.2). A complete 503 is the one non-200 that is retry-eligible —
+           sqlite3.OperationalError rolls the whole BEGIN IMMEDIATE back (spec §4.4). */
+        finish(st, false, st == 503);
       }
       return;
     }
