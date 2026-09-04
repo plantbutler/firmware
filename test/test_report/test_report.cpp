@@ -218,6 +218,173 @@ static void test_report_t_differs_across_two_boots_fifteen_seconds_apart(void) {
   TEST_ASSERT_NOT_EQUAL(first, report_t_wire());   /* else butler swallows the 2nd as a retry */
 }
 
+static void test_report_never_repeats_a_key(void) {
+  fresh_sweep();
+  report_set_ack(9, 5, "none");
+  TEST_ASSERT_TRUE(build() > 0);
+  char copy[PB_BODY_CAP]; memcpy(copy, g_buf, sizeof copy);
+  char *keys[48]; int nk = 0;
+  for (char *tok = strtok(copy, " \n"); tok && nk < 48; tok = strtok(NULL, " \n")) {
+    char *eq = strchr(tok, '=');
+    TEST_ASSERT_NOT_NULL(eq);            /* every token is k=v or the whole report 400s */
+    *eq = '\0';
+    for (int i = 0; i < nk; ++i) TEST_ASSERT_TRUE(strcmp(keys[i], tok) != 0);
+    keys[nk++] = tok;
+  }
+  TEST_ASSERT_TRUE(nk >= 13);
+}
+
+/* ch205 is pulses_leak_count(), and NOTHING advances it except pulses_leak_poll() — which
+   loop() calls once per pass (task 12 step 4) and no test harness calls for free. So the case
+   has to drive the poller itself, exactly as loop() does, and it has to reach PB_DIAG_CLAMP:
+   a 2 kHz storm for 60 s is ~120,000 pulses, an order of magnitude short. Storm the meter in
+   ten-second bursts, polling as loop() would, until the count is past the clamp. */
+static void test_a_saturated_diagnostic_counter_stays_inside_max_raw(void) {
+  fresh_sweep();
+  pulses_begin();                        /* a clean counter: g_leak_count is process-lifetime
+                                             state in pulses.cpp with no reset path of its own
+                                             (harness.h's pb_test_setup() resets hal_sim.cpp's
+                                             OWN statics only, a different translation unit),
+                                             and this test must not depend on running first
+                                             in the binary to start from zero */
+  pulses_leak_poll(false);               /* arm the watch (the rearm window is long past) */
+  sim_flow_storm(2000);
+  for (int i = 0; i < 100 && pulses_leak_count() <= (uint32_t)PB_DIAG_CLAMP; ++i) {
+    sim_advance(10000);
+    pulses_leak_poll(false);             /* pump OFF: every one of these pulses is a leak */
+  }
+  sim_flow_storm(0);
+  TEST_ASSERT_TRUE_MESSAGE(pulses_leak_count() > (uint32_t)PB_DIAG_CLAMP,
+                           "the leak watch never reached the clamp: is pulses_leak_poll() "
+                           "being called at all?");
+  TEST_ASSERT_TRUE(build() > 0);
+  char clamp[24];
+  snprintf(clamp, sizeof clamp, "ch205=%lu", (unsigned long)PB_DIAG_CLAMP);
+  TEST_ASSERT_TRUE(has_tok(clamp));
+}
+
+/* The same producer, at the other end of its range: one leaked pulse must reach the wire as
+   BOTH ch205 and err=leak. §4.1 carries `leak` in its fixed enum and §1 says there is no
+   latch, so this is the only surface the token has. */
+static void test_ch205_counts_leak_pulses_and_err_leak_reaches_the_wire(void) {
+  fresh_sweep();
+  report_clear_ack();                    /* no ack, so err= falls through to the leak watch */
+  pulses_leak_poll(false);
+  sim_flow_storm(50);
+  sim_advance(1000);
+  sim_flow_storm(0);
+  pulses_leak_poll(false);
+  TEST_ASSERT_TRUE(pulses_leak_count() > 0u);
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_FALSE(has_tok("ch205=0"));
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=leak"), g_buf);
+}
+
+static void test_ch204_is_zero_before_d5_has_ever_changed_not_a_sentinel(void) {
+  fresh_sweep();
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("ch204=0"));  /* never -1, "unknown" or "never": _int_in 400s those */
+}
+
+static void test_report_err_token_never_contains_whitespace(void) {
+  static const char *every_producer[] = {
+    "none","float","pos","noflow","noise","cap","stop","wdt","dry","contra","boot","range",
+    "cal","i2c","busy","cooldown","leak","adc","stuck","txcap","resetmid","heap","goto","recv"
+  };
+  /* The wire requirement is whitespace-freedom, not a-z-only: "i2c" is a real token in this
+     very enum (spec §4.1, and cart_err()'s own "i2c") and contains a digit. A brief draft of
+     this case asserted every character was 'a'..'z', which 400s "i2c" against the spec that
+     put it in the enum -- caught by running it: the loop aborted at i2c's '2' before ever
+     reaching the fresh_sweep()/build() half of the case below, so THIS half of the case had
+     never actually run under `pio test`. strpbrk() alone is the real, sufficient check: a
+     space, tab, CR or LF is what turns one k=v token into two on the wire. */
+  for (unsigned i = 0; i < sizeof every_producer / sizeof every_producer[0]; ++i)
+    TEST_ASSERT_NULL(strpbrk(every_producer[i], " \t\r\n"));
+  fresh_sweep();
+  /* Without this, a leak storm from an EARLIER test in this binary (g_leak_count is
+     process-lifetime state in pulses.cpp with no reset of its own) leaves
+     pulses_leak_seen() true here, and err='s precedence puts "leak" above
+     safety_last_err() — so this case would assert err=resetmid while the wire actually
+     said err=leak, for a reason that has nothing to do with what this case is testing.
+     Caught by running the full suite: this case passes alone under
+     `pio test -f test_report -F test_report_err_token_never_contains_whitespace` and fails
+     in the full run, which is exactly the test-order dependency this line closes. */
+  pulses_begin();
+  safety_set_err("resetmid");
+  report_clear_ack();
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("err=resetmid"));
+}
+
+static void test_report_refuses_to_send_on_truncation_and_says_txcap(void) {
+  fresh_sweep();
+  const uint32_t before = report_txcap_drops();
+  char small[40];
+  report_stamp();
+  TEST_ASSERT_EQUAL_UINT16(0, report_build(small, sizeof small));
+  TEST_ASSERT_EQUAL_UINT32(before + 1, report_txcap_drops());
+  TEST_ASSERT_EQUAL_STRING("txcap", safety_last_err());
+  /* ...and the NEXT body that fits clears it. Nothing else in the program ever does, so one
+     384-byte report would otherwise put err=txcap on every later report forever. */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_EQUAL_STRING("none", safety_last_err());
+}
+
+/* Spec §12 item 0: "hal_begin() and EVERY REPORT check the break against the stack, because
+   nothing else will." _sbrk is unchecked and __HeapLimit is referenced by nothing in the
+   image, so this is the only bound that exists during the 48-hour run - and the run is
+   exactly when the network stack, the largest allocator in the program, is active. */
+static void test_a_break_inside_the_stack_margin_latches_err_heap(void) {
+  fresh_sweep();
+  pulses_begin();       /* same leftover-leak hazard as test_report_err_token_never_
+                            contains_whitespace above: without this, a prior test's leak
+                            storm masks err=heap behind err=leak on the wire. */
+  TEST_ASSERT_TRUE(report_heap_ok());                  /* the fake starts well clear */
+  sim_set_heap_break(hal_stack_limit() - (uint32_t)PB_STACK_MARGIN + 4u);
+  TEST_ASSERT_FALSE(report_heap_ok());
+  report_clear_ack();
+  TEST_ASSERT_TRUE(build() > 0);                       /* a report saying heap beats no report */
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=heap"), g_buf);
+}
+
+static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
+  for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch) sim_set_channel(ch, 16383);  /* 14-bit maximum */
+  sim_set_channel(PB_CANARY_CHANNEL, 1);
+  TEST_ASSERT_TRUE(sensors_sweep());
+  sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt()));   /* jump, never 2^31 steps */
+  report_set_ack(4294967295u, PB_DOSE_MAX_ML, "resetmid");
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(strlen(g_buf) < PB_BODY_CAP);
+  TEST_ASSERT_TRUE(strlen(g_buf) <= sizeof(PB_CONTROLLER) + 2 + PB_BODY_WORST_FIXED);
+}
+
+/* backend/fake_device.py's build_report() is the shape butler was written against:
+   "c= t= chN=... float= pos= ack= flow_ml=", space-joined, one trailing newline. Ours adds
+   ch200..ch209 and err=; strip those and the two must be byte-identical. */
+static void test_report_matches_the_fake_device_shape(void) {
+  fresh_sweep();
+  sim_set_float(true);
+  report_set_ack(17, 248, "none");
+  TEST_ASSERT_TRUE(build() > 0);
+
+  char spine[PB_BODY_CAP] = {0};
+  char copy[PB_BODY_CAP]; memcpy(copy, g_buf, sizeof copy);
+  for (char *tok = strtok(copy, " \n"); tok; tok = strtok(NULL, " \n")) {
+    /* The diagnostic RANGE by name, never the prefix "ch2": `ch2=8002` is a WIRED channel and
+       starts with the same three characters, so a prefix filter deletes a token the golden
+       string keeps and this case can never pass. */
+    if (strncmp(tok, "ch20", 4) == 0 || strncmp(tok, "err=", 4) == 0) continue;
+    if (spine[0]) strncat(spine, " ", sizeof spine - strlen(spine) - 1);
+    strncat(spine, tok, sizeof spine - strlen(spine) - 1);
+  }
+  char golden[PB_BODY_CAP];
+  snprintf(golden, sizeof golden,
+           "c=%s t=%lu ch0=8000 ch1=8001 ch2=8002 ch3=8003 ch4=8004 ch5=8005 "
+           "float=1 pos=unknown ack=17 flow_ml=248",
+           PB_CONTROLLER, (unsigned long)report_t_wire());
+  TEST_ASSERT_EQUAL_STRING(golden, spine);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_report_carries_c_t_and_the_valid_channels);
@@ -237,5 +404,14 @@ int main(void) {
   RUN_TEST(test_report_ack_id_survives_above_sixty_five_thousand);
   RUN_TEST(test_report_t_is_unsigned_at_and_above_two_to_the_thirty_one);
   RUN_TEST(test_report_t_differs_across_two_boots_fifteen_seconds_apart);
+  RUN_TEST(test_report_never_repeats_a_key);
+  RUN_TEST(test_a_saturated_diagnostic_counter_stays_inside_max_raw);
+  RUN_TEST(test_ch205_counts_leak_pulses_and_err_leak_reaches_the_wire);
+  RUN_TEST(test_ch204_is_zero_before_d5_has_ever_changed_not_a_sentinel);
+  RUN_TEST(test_report_err_token_never_contains_whitespace);
+  RUN_TEST(test_report_refuses_to_send_on_truncation_and_says_txcap);
+  RUN_TEST(test_a_break_inside_the_stack_margin_latches_err_heap);
+  RUN_TEST(test_report_fits_the_buffer_at_maximum_field_widths);
+  RUN_TEST(test_report_matches_the_fake_device_shape);
   return UNITY_END();
 }
