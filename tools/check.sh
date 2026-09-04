@@ -74,9 +74,13 @@ check_files() {
 }
 
 # To count the invariants below (e.g. before adding more): almost all of them are one
-# check() or check_files() call each; exactly one (D2/D3, immediately below) is a bespoke
-# expect() because it compares two independently-derived numbers, not a single grep's
-# count against a literal. Count all three:
+# check() or check_files() call each; three are bespoke expect() calls, each because it
+# compares two independently-derived numbers rather than a single grep's count against a
+# literal. D2/D3 (immediately below) compares two pinMode counts derived two different
+# ways. The sim file-set pair (task 29, spec §8) each compare a want-bit against a file's
+# on-disk existence: an object file's PRESENCE has no text pattern to grep -- only its own
+# `-e` test -- so check()/check_files() cannot express it and expect() is the honest fit,
+# not a workaround. Count all three:
 #   grep -cE '^[[:space:]]*(check|check_files|expect)[[:space:]]' tools/check.sh
 # A bare `grep -c 'expect '` over-counts: it also matches expect()'s own doc comment.
 # ---- invariants land here (task 13, then task 30) ----
@@ -217,9 +221,11 @@ check 0 'String|std::map|std::string|(^|[^[:alnum:]_])new([^[:alnum:]_]|$)|mallo
 # by task 29 and recorded as a deviation in that task's commit message. It exists so that
 # hal_sim.cpp stays byte-identical between the sim binary and the host suites, which is the
 # whole reason one fake serves both. It is the only widening this line ever takes.
-expect 0 "$(grep -rEn 'Arduino\.h' include src test lib/Manifold \
-              --exclude=hal_uno.cpp --exclude=sim_console.cpp \
-              2>/dev/null | wc -l | tr -d ' ')" \
+# check(), not expect(): this IS a single grep's occurrence count against a literal (0),
+# exactly the shape check() exists for, and check()'s own `grep -n` diagnostic dump on a
+# mismatch (the tax task 13 fix round 1 removed project-wide) is worth keeping here too.
+check 0 'Arduino\.h' include src test lib/Manifold \
+  --exclude=hal_uno.cpp --exclude=sim_console.cpp -- \
   "the Arduino header lives only in hal_uno.cpp, sim_console.cpp, lib/Network and lib/Screen"
 check 0 'WiFi\.ping' "${SCAN[@]}" -- \
   "ping is never called (it resets the modem timeout to 10 s)"
@@ -236,16 +242,17 @@ check_files 2 'PB_BRINGUP' src lib -- \
   "PB_BRINGUP appears in src/cli.cpp and src/main.cpp, and in no other source file"
 
 # ---- sim: spec §8. The sim binary compiles no pump driver at all. ----
-# It greps the file set the env compiles, not a linker map: PIN_PUMP_EN is a macro and
-# leaves no symbol, so a map cannot prove this.
+# Through expect(), not raw fail/ok: it tests the file set the env compiled, not a grep
+# over source text (PIN_PUMP_EN is a macro and leaves no symbol, so a map or a source grep
+# cannot prove this either) -- an object file's PRESENCE has no pattern to count, only its
+# own `-e` test, which is exactly the "two independently-derived numbers" shape expect()
+# exists for. Fix round 1: this used to call fail/ok directly, invisible to this file's own
+# audit grep (the header comment, above) -- make check reported 22 while the grep said 21.
 if [ -d .pio/build/uno_r4_wifi_sim ]; then
-  if [ -e .pio/build/uno_r4_wifi_sim/src/hal_uno.cpp.o ]; then
-    fail "the sim env compiled hal_uno.cpp: D6 could be driven with 12 V on COM"
-  else
-    ok "the sim env compiles no pump driver"
-  fi
-  [ -e .pio/build/uno_r4_wifi_sim/src/hal_sim.cpp.o ] || \
-    fail "the sim env compiled no HAL at all - check build_src_filter"
+  expect 0 "$([ -e .pio/build/uno_r4_wifi_sim/src/hal_uno.cpp.o ] && echo 1 || echo 0)" \
+    "the sim env compiles no pump driver (hal_uno.cpp absent, or D6 could be driven with 12 V on COM)"
+  expect 1 "$([ -e .pio/build/uno_r4_wifi_sim/src/hal_sim.cpp.o ] && echo 1 || echo 0)" \
+    "the sim env compiled its HAL (hal_sim.cpp present -- check build_src_filter if not)"
 else
   printf 'skip  sim file set (run: pio run -e uno_r4_wifi_sim)\n'
 fi

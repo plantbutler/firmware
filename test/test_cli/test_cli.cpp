@@ -9,6 +9,9 @@
 #include "config.h"
 #include "hal.h"
 #include "noinit.h"
+#include "pins.h"     /* fix round 1: PIN_HALL_FLOAT, I2C_ADDR_OLED -- observable-effect
+                          checks for the sim command family's argument-differentiated pairs */
+#include "pulses.h"   /* fix round 1: pulses_begin()/pulses_screw() for `sim stall on|off` */
 #include "safety.h"
 #include "sim.h"
 #include "ui.h"
@@ -626,23 +629,99 @@ static void test_bringup_commands_are_absent_from_the_bench_build(void) {
 static void test_every_sim_command_is_parsed_and_dispatched(void) {
   pb_test_setup();
 #if PB_SIM_CLI
+  /* Fix round 1, finding 2: a routing-only check (TEST_ASSERT_TRUE on cli_dispatch's
+     return) cannot tell "float 0" from "float 1" -- both return true down the identical
+     code path. Confirmed against the committed tree: mutating src/cli.cpp:406's
+     sim_set_float(false) to sim_set_float(true), and mutating the resp handler's
+     link_fake_queue_response(body, n - 1) to (body, n), each passed the WHOLE 259-case
+     suite unchanged. Every pair below that shares one return path and differs only in its
+     argument is now followed by a read of the OBSERVABLE EFFECT through an existing,
+     unmodified host-visible route -- a HAL read, the real pulses.cpp counters, the noinit
+     struct itself, or (for `resp`) the seam-2 fake's own sock_open()/sock_read(), never an
+     added accessor and never link_fake.cpp, which this task does not modify. Commands with
+     no argument-differentiated counterpart in the grammar (flow <ml_s>, mux stuck, leak
+     on, wdt stop, wdt slow <hz>, noinit clobber, ch <ch> <raw>) are unchanged -- this
+     task's report names that boundary and why it was drawn there. */
   TEST_ASSERT_TRUE(cli_dispatch("sim float 0"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(PB_HIGH, hal_pin_read(PIN_HALL_FLOAT),
+                                 "float 0 must read as NOT ok (spec 2.10: LOW == OK)");
   TEST_ASSERT_TRUE(cli_dispatch("sim float 1"));
+  TEST_ASSERT_EQUAL_INT_MESSAGE(PB_LOW, hal_pin_read(PIN_HALL_FLOAT),
+                                 "float 1 must read as ok (spec 2.10: LOW == OK)");
+
   TEST_ASSERT_TRUE(cli_dispatch("sim flow 30"));
   TEST_ASSERT_TRUE(cli_dispatch("sim flow storm"));
+
   TEST_ASSERT_TRUE(cli_dispatch("sim i2c fail"));
+  TEST_ASSERT_FALSE_MESSAGE(hal_i2c_probe(I2C_ADDR_OLED), "i2c fail must fail every probe");
   TEST_ASSERT_TRUE(cli_dispatch("sim i2c ok"));
+  TEST_ASSERT_TRUE_MESSAGE(hal_i2c_probe(I2C_ADDR_OLED), "i2c ok must restore the bus");
+
   TEST_ASSERT_TRUE(cli_dispatch("sim mux stuck"));
+
+  /* stall's effect lives on the screw emitter, which has no getter of its own -- proved
+     by actually turning the screw and counting real pulses.cpp pulses, the same route
+     test_cart.cpp/test_sensors.cpp use against the identical fake. */
+  pulses_begin();
+  sim_set_screw_pulse_ms(50);           /* 20 Hz -- 0 would itself read as "not turning" */
+  hal_servo_us(1600);                   /* off the 1500 stop point, either direction */
+  pb_advance(100);
+  TEST_ASSERT_TRUE_MESSAGE(pulses_screw() > 0u, "arrange: the screw must turn unstalled");
   TEST_ASSERT_TRUE(cli_dispatch("sim stall on"));
+  pulses_begin();
+  pb_advance(100);
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0u, pulses_screw(), "stall on must freeze the screw");
   TEST_ASSERT_TRUE(cli_dispatch("sim stall off"));
+  pulses_begin();
+  pb_advance(100);
+  TEST_ASSERT_TRUE_MESSAGE(pulses_screw() > 0u, "stall off must let the screw turn again");
+  hal_servo_us(1500);                   /* back to stopped */
+  sim_set_screw_pulse_ms(0);            /* back to "does not turn", the model's own default */
+
   TEST_ASSERT_TRUE(cli_dispatch("sim leak on"));
   TEST_ASSERT_TRUE(cli_dispatch("sim wdt stop"));
   TEST_ASSERT_TRUE(cli_dispatch("sim wdt slow 100"));
   TEST_ASSERT_TRUE(cli_dispatch("sim noinit clobber"));
   TEST_ASSERT_TRUE(cli_dispatch("sim ch 2 8123"));
-  TEST_ASSERT_TRUE(cli_dispatch("sim resp \"next=60\\ncmd=7 water=3 ml=120 cap_s=11\\n\""));
+
+  /* resp: the confirmed mutation (link_fake_queue_response(body, n - 1) -> (body, n))
+     still returns true -- it only changes what a LATER sock_read() drains, so the
+     routing-only check above never saw it. Read it back exactly as seam 2's own consumer
+     would: link.h's unmodified sock_open()/sock_read(); link_fake.cpp itself is untouched
+     by this task, per the brief. */
+  {
+    /* Double-escaped, matching the dispatch string below byte for byte: cmd_sim_'s resp
+       handler copies the body it is handed verbatim (no unescaping), so the literal
+       two-character `\n` (backslash, n) the console line carries is exactly what a real
+       sock_read() must drain back -- a single-escaped (real newline) comparison string
+       here would be testing a body nobody ever actually sends. */
+    static const char body[] = "next=60\\ncmd=7 water=3 ml=120 cap_s=11\\n";
+    link_fake_reset();
+    link_begin(1);
+    link_fake_set_state(LINK_UP);
+    TEST_ASSERT_TRUE(cli_dispatch("sim resp \"next=60\\ncmd=7 water=3 ml=120 cap_s=11\\n\""));
+    TEST_ASSERT_TRUE_MESSAGE(sock_open(), "arrange: the fake socket must open");
+    uint8_t got[64];
+    int n = sock_read(got, sizeof got);
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)(sizeof body - 1u), n,
+                                   "resp must queue the body WITHOUT its closing quote");
+    TEST_ASSERT_EQUAL_MEMORY(body, got, (size_t)n);
+  }
+
+  /* reset warm|cold: identical shape to float/i2c/stall above -- sim_reset(true) and
+     sim_reset(false) share one function and one return path, differing only in the
+     argument. g_nv is the real noinit struct (include/noinit.h), not a sim-only fixture:
+     warm must keep it, cold must clear it (spec 2.3). */
+  g_nv.pattern = 0xABCD1234u;
+  noinit_commit();
   TEST_ASSERT_TRUE(cli_dispatch("sim reset warm"));
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0xABCD1234u, g_nv.pattern, "reset warm must keep .noinit");
+
+  g_nv.pattern = 0xABCD1234u;
+  noinit_commit();
   TEST_ASSERT_TRUE(cli_dispatch("sim reset cold"));
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE(0u, g_nv.pattern, "reset cold must clear .noinit");
+
   TEST_ASSERT_FALSE(cli_dispatch("sim ch 9 1"));       /* channel out of 0..5 */
   TEST_ASSERT_FALSE(cli_dispatch("sim nonsense"));
 #else
