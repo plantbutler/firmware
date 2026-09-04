@@ -40,6 +40,15 @@ static void ack(uint32_t id, uint16_t flow_ml, const char *err) {
     snprintf(g_last_text, sizeof g_last_text, "REF %s", err ? err : "?");
 }
 
+#ifdef PB_NATIVE
+/* Host-suite seam. The hang test cannot be written against timing: PB_HANG_MS and
+   PB_PRIME_MS_DEFAULT are both 3000, so the no-flow abort fires on the very millisecond
+   the deliberate starvation would have begun, and a dose that aborts looks exactly like a
+   dose that never set the flag. Asserting the FIELD is the only way to tell them apart. */
+static dose_req_t g_last_req;
+dose_req_t exec_test_last_req_(void) { return g_last_req; }
+#endif
+
 void exec_pending(void) {
   /* §2.11: the boot self-home runs under BOTH latches. Gating it on !dry_latched would leave
      the cart wherever a mid-dose watchdog reset stopped it — and §2.3 latches dry on exactly
@@ -89,6 +98,9 @@ void exec_pending(void) {
       uint32_t byt = (uint32_t)g_cmd.ml * 1000u / PB_ML_PER_S_MEASURED;
       if (byt < q.cap_ms) q.cap_ms = byt;
     }
+#endif
+#ifdef PB_NATIVE
+    g_last_req = q;      /* the request AS BUILT, for the host suite to assert on directly */
 #endif
     dose_result_t r = dose_run(&q);
     /* §6: the per-dose summary line is printed "at the end of every dose, from EVERY path".

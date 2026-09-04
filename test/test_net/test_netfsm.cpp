@@ -977,6 +977,12 @@ static void test_a_backend_command_never_sets_hang(void) {
   pb_advance(PB_HANG_MS * 3u);
   exec_pending();
   TEST_ASSERT_GREATER_THAN_UINT32(f0, sim_feeds());   /* the dog was fed throughout */
+
+  /* The feed count alone cannot prove this: PB_HANG_MS and PB_PRIME_MS_DEFAULT are both 3000,
+     so the no-flow abort ends the dose on the very millisecond the deliberate starvation would
+     have started, and feeds rise either way. Assert the field exec_pending() actually built --
+     the only observation that separates "never set hang" from "set it and aborted first". */
+  TEST_ASSERT_FALSE(exec_test_last_req_().hang);
 #endif
 }
 
