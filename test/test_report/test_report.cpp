@@ -98,6 +98,24 @@ static void test_report_float_is_the_debounced_tank_verdict_anded_with_not_contr
   TEST_ASSERT_TRUE(has_tok("float=0"));
 }
 
+/* The "anded_with_not_contra" half of the test above it: despite its name, that case never
+   latches the contradiction and so never proves the AND term at all -- found by mutating
+   report.cpp's `fl` expression to drop `&& !safety_contra()` entirely and re-running this
+   whole file: nothing failed. pb_latch_contra() (harness.h) drives a REAL dose_run() call
+   with the float OK and no flow, the only way §2.7's latch is ever set (there is
+   deliberately no setter), and leaves the float pin reading OK afterward — so the raw
+   debounce alone would say float=1, and only the AND with !safety_contra() can be the
+   reason the wire still says 0. */
+static void test_report_float_is_zero_under_the_contradiction_latch_even_though_the_tank_reads_ok(void) {
+  fresh_sweep();
+  pb_latch_contra();
+  sim_set_float(true);
+  TEST_ASSERT_TRUE(safety_float_ok_debounced());   /* the raw debounce alone says OK */
+  TEST_ASSERT_TRUE(safety_contra());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("float=0"));            /* §2.10, §4.1: ANDed with !contra */
+}
+
 static void test_report_float_is_only_ever_zero_or_one(void) {
   fresh_sweep();
   for (int i = 0; i < 6; ++i) {                  /* a float flapping at the waterline */
@@ -189,6 +207,32 @@ static void test_report_ack_id_survives_above_sixty_five_thousand(void) {
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE(has_tok("ack=4294967295"));
   TEST_ASSERT_TRUE(has_tok("flow_ml=1000"));
+}
+
+/* §4.3: "No report may be built while the ack slot still carries err=recv." netfsm sets the
+   slot to (id, flow_ml=0, err="recv") the MOMENT response_parse() yields a command (task 24's
+   job, out of this file's reach), but the refusal itself lives in report_build() via
+   report_may_build()/report_ack_is_recv() (this file, step 12) and is directly testable here
+   without netfsm existing yet. Found genuinely uncovered by mutation: deleting the
+   `if (!report_may_build()) return 0;` guard at the top of report_build() left every other
+   case in this file passing. Without this guard butler would mark the command acked with
+   flow_ml=0 (`:829-833`), page a HIGH "the meter counted 0 of N ml" (`:1367-1369`), set the
+   pot's cooldown from acked_ts (`:736-742`) and charge 0 ml against the daily cap - and only
+   THEN would the board run the dose it had already told the backend it refused. */
+static void test_report_build_refuses_while_the_ack_slot_still_reads_recv(void) {
+  fresh_sweep();
+  report_set_ack(23, 0, "recv");
+  TEST_ASSERT_TRUE(report_ack_is_recv());
+  TEST_ASSERT_FALSE(report_may_build());
+  report_stamp();
+  TEST_ASSERT_EQUAL_UINT16(0, report_build(g_buf, sizeof g_buf));
+  report_set_ack(23, 248, "none");           /* exec_pending() overwrites the slot with the
+                                                 real result (§4.3 step 2) */
+  TEST_ASSERT_TRUE(report_may_build());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("ack=23"));
+  TEST_ASSERT_TRUE(has_tok("flow_ml=248"));
+  TEST_ASSERT_FALSE(has_tok("err=recv"));
 }
 
 static void test_report_t_is_unsigned_at_and_above_two_to_the_thirty_one(void) {
@@ -401,6 +445,7 @@ int main(void) {
   RUN_TEST(test_report_omits_a_channel_whose_read_failed_rather_than_sending_zero);
   RUN_TEST(test_report_omits_the_wired_channels_and_says_stuck_when_the_canary_matches);
   RUN_TEST(test_report_float_is_the_debounced_tank_verdict_anded_with_not_contra);
+  RUN_TEST(test_report_float_is_zero_under_the_contradiction_latch_even_though_the_tank_reads_ok);
   RUN_TEST(test_report_float_is_only_ever_zero_or_one);
   RUN_TEST(test_repeated_float_refusals_drive_float_to_zero_on_the_wire);
   RUN_TEST(test_a_granted_dose_clears_the_float_refusal_counter);
@@ -411,6 +456,7 @@ int main(void) {
   RUN_TEST(test_report_never_emits_ack_without_flow_ml);
   RUN_TEST(test_report_never_emits_ack_zero);
   RUN_TEST(test_report_ack_id_survives_above_sixty_five_thousand);
+  RUN_TEST(test_report_build_refuses_while_the_ack_slot_still_reads_recv);
   RUN_TEST(test_report_t_is_unsigned_at_and_above_two_to_the_thirty_one);
   RUN_TEST(test_report_t_differs_across_two_boots_fifteen_seconds_apart);
   RUN_TEST(test_report_never_repeats_a_key);
