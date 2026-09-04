@@ -25,6 +25,29 @@ bool        net_take_command(cmd_t *out);
 void        net_disable(const char *why);   /* setup()'s watchdog-grant assertion (spec §3) */
 const char *net_disabled(void);
 
+/* This file owns the AT budget, so it owns when the seam's link information is refreshed:
+   nothing outside this file and the WiFiS3 driver behind it may call INTO the seam directly
+   (fix round, task 27) -- src/main.cpp's UI fill used to read the seam's state query twice,
+   its signal-strength query once and its address query once, UNCONDITIONALLY, every loop()
+   pass, on top of whatever this file's own poll had already spent -- against the real driver
+   that is up to ~5 AT commands in one pass against a 5592 ms grant, a guaranteed watchdog
+   reset in normal operation. These four are the only sanctioned way to read link information
+   from outside this file: each is a plain cached accessor and issues ZERO AT commands. The
+   state is refreshed every NET_JOIN_WAIT pass (this file already queries it there); the
+   signal strength and address are each refreshed at most once per successful join, in their
+   OWN separate NET_IDLE pass, and are cleared back to their "no link" defaults the moment the
+   FSM gives up on the link. None of these four names embeds the seam's own function-name
+   prefix, on purpose, so that prefix never leaks past this file's boundary -- the reason is
+   the same one make check already applies to the modem's ping helper elsewhere in this tree:
+   said in words, not spelled, because the invariant scans comments too. */
+uint8_t     net_link(void);      /* 0 down, 1 joining, 2 up -- cached, matches ui_state_t::link */
+int8_t      net_rssi(void);      /* cached */
+const char *net_ip(void);        /* cached, into this file's own static buffer, "0.0.0.0"
+                                     before the first successful join or after a drop */
+uint16_t    net_desyncs(void);   /* the seam's own desync counter is already a zero-AT
+                                     accessor; this wrapper exists only so nothing outside
+                                     this file and the driver behind the seam names it either */
+
 #ifdef PB_NATIVE
 /* Host-suite seam, same shape as sensors.h's sensors_test_reset_health_() (task 18) and
    pulses.h's pulses_test_reset_leak_() (task 22): g_retried and g_connect_starved are

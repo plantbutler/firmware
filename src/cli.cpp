@@ -2,14 +2,15 @@
    #if PB_BRINGUP block, and tasks 15/16/19 add dry, stop and the latch release.
    secrets.h is here for PB_CONTROLLER, which `status` prints: neither [env:uno_r4_wifi]
    nor [env:uno_r4_wifi_bringup] passes it in build_flags, and secrets.h is the only
-   header that defines it. Task 14 adds cart.h, task 15/16 safety.h, task 24 netfsm.h
-   and link.h -- each at TOP LEVEL, never inside the #if PB_BRINGUP block, because
-   cli_print_status() calls into all of them unconditionally. */
+   header that defines it. Task 14 adds cart.h, task 15/16 safety.h, task 24 netfsm.h --
+   each at TOP LEVEL, never inside the #if PB_BRINGUP block, because cli_print_status()
+   calls into all of them unconditionally. Fix round, task 27: this file used to reach
+   past netfsm.h straight into the seam for link/rssi/ip/desync info; it now reads
+   netfsm.h's own cached accessors instead and has no seam header of its own to include. */
 #include "cart.h"
 #include "cli.h"
 #include "config.h"
 #include "hal.h"
-#include "link.h"
 #include "netfsm.h"
 #include "noinit.h"
 #include "pins.h"
@@ -545,9 +546,9 @@ void cli_print_status(void) {
      line that is silent and unexplainable. Spec §4.3, §16.5.9. */
   cli_printf_u32("cmd_high_water=%lu (recovery: cold boot)\n", g_nv.cmd_high_water);
 
-  cli_printf_u32("link=%lu\n", (uint32_t)link_state());       /* 0 down, 1 joining, 2 up */
-  cli_printf_i32("rssi=%ld dBm\n", (int32_t)link_rssi());     /* task 11's signed printer */
-  hal_serial_write("ip="); hal_serial_write(link_ip()); hal_serial_write("\n");
+  cli_printf_u32("link=%lu\n", (uint32_t)net_link());         /* 0 down, 1 joining, 2 up */
+  cli_printf_i32("rssi=%ld dBm\n", (int32_t)net_rssi());      /* task 11's signed printer */
+  hal_serial_write("ip="); hal_serial_write(net_ip()); hal_serial_write("\n");
   cli_printf_u32("http_last=%lu\n", (uint32_t)net_last_status());
   cli_printf_u32("reports_ok=%lu\n", net_reports_ok());
   cli_printf_u32("reports_failed=%lu\n", net_reports_failed());
@@ -562,7 +563,7 @@ void cli_print_status(void) {
   cli_printf_u32("conn_timeout_ms=%lu\n", (uint32_t)PB_NET_STEP_MS);
   hal_serial_write("connect_form=_CLIENTCONNECT to HOST_NAME as a NAME"
                    " (setConnectionTimeout != 0; unit unverified off-bench)\n");
-  cli_printf_u32("desyncs=%lu\n", (uint32_t)link_desyncs());   /* rides out as ch206 */
+  cli_printf_u32("desyncs=%lu\n", (uint32_t)net_desyncs());   /* rides out as ch206 */
   if (net_disabled()) { hal_serial_write("net=DISABLED ("); hal_serial_write(net_disabled());
                         hal_serial_write(")\n"); }
 

@@ -116,7 +116,11 @@ static void test_http_post_carries_host_token_and_content_length(void) {
   sensors_begin();
   net_begin();
   link_fake_queue_response(k200, strlen(k200));
-  pump_passes(8);
+  pump_passes(10);   /* was 8 before the fix round: NET_JOIN_WAIT -> NET_IDLE now inserts two
+                         refresh-only passes (signal strength, then address) before NET_IDLE's
+                         first REAL pass, each returning immediately and spending zero on the
+                         report itself -- so reaching NET_SEND costs two more passes than it
+                         used to. See netfsm.cpp's NET_IDLE case. */
   uint16_t n = 0;
   const char *tx = (const char *)link_fake_sent(&n);
   TEST_ASSERT_TRUE(n > 0);
@@ -138,7 +142,7 @@ static void test_report_content_length_matches_the_bytes_actually_written(void) 
   sensors_begin();
   net_begin();
   link_fake_queue_response(k200, strlen(k200));
-  pump_passes(8);
+  pump_passes(10);   /* was 8 -- see the sibling case above for why */
   uint16_t n = 0;
   const char *tx = (const char *)link_fake_sent(&n);
   const char *hdr = strstr(tx, "Content-Length: ");
@@ -152,19 +156,22 @@ static void test_report_content_length_matches_the_bytes_actually_written(void) 
    CONNECT -> SEND -> RECV -> CLOSE -> SOCK_CLOSE -> IDLE: ten net_poll() calls, one state
    transition per call (spec's own per-pass table, §3/§4.2), never eight -- confirmed by
    tracing link_fake_at_count() and net_state() pass by pass against this file's own
-   reference netfsm.cpp. pump_passes(12) leaves two calls of margin once IDLE is reached
-   (idle passes are no-ops until g_next_s elapses, so the margin costs nothing). */
+   reference netfsm.cpp. Fix round, task 27: NET_JOIN_WAIT -> NET_IDLE now inserts two
+   refresh-only NET_IDLE passes (signal strength, then address) before NET_IDLE's first REAL
+   pass, so the same round trip is now TWELVE net_poll() calls, not ten -- see netfsm.cpp's
+   NET_IDLE case. pump_passes(14) leaves two calls of margin once IDLE is reached (idle passes
+   are no-ops until g_next_s elapses, so the margin costs nothing). */
 static void test_socket_is_closed_on_success_error_timeout_and_a_failed_open(void) {
   sensors_begin();
   /* success */
   net_begin(); link_fake_queue_response(k200, strlen(k200));
-  pump_passes(12);
+  pump_passes(14);
   TEST_ASSERT_EQUAL(NET_IDLE, net_state());
   TEST_ASSERT_TRUE(sock_open());          /* the precondition holds: _sock was left -1 */
   sock_close();
   /* a failed open */
   net_begin(); link_fake_fail_open(true);
-  pump_passes(12);
+  pump_passes(14);
   link_fake_fail_open(false);
   TEST_ASSERT_TRUE(sock_open());          /* would be false if the failed open had not closed */
   sock_close();
@@ -247,7 +254,8 @@ static void test_response_is_never_parsed_from_a_four_hundred_body(void) {
   sensors_begin();
   net_begin();
   link_fake_queue_response(k400, strlen(k400));
-  pump_passes(10);
+  pump_passes(12);   /* was 10: the full first-ever round trip is twelve passes now, not
+                         ten -- see test_socket_is_closed_...'s own comment above */
   cmd_t c;
   TEST_ASSERT_FALSE(net_take_command(&c));      /* a 400 body echoes OUR tokens back at us */
   TEST_ASSERT_EQUAL_UINT16(400, net_last_status());
@@ -271,7 +279,11 @@ static void test_stale_bytes_in_the_rx_buffer_cannot_become_a_command(void) {
   const char *with_cmd =
     "HTTP/1.1 200 OK\r\nContent-Length: 38\r\n\r\nnext=60\ncmd=5 water=3 ml=250 cap_s=30\n";
   link_fake_queue_response(with_cmd, strlen(with_cmd));
-  pump_passes(10);
+  pump_passes(12);   /* was 10: round 1 is a full first-ever round trip, now twelve passes,
+                         not ten -- see test_socket_is_closed_...'s own comment above. Round
+                         2 below does NOT need the same bump: it reuses the join from round 1
+                         instead of going through NET_JOIN_WAIT -> NET_IDLE a second time, so
+                         it inserts no extra refresh passes at all. */
   cmd_t c;
   TEST_ASSERT_TRUE(net_take_command(&c));
   TEST_ASSERT_EQUAL_UINT32(5, c.id);

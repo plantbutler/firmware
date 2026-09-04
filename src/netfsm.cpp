@@ -64,6 +64,17 @@ static uint16_t g_rx_len;
 static cmd_t    g_cmd;
 static bool     g_have_cmd;
 
+/* Fix round, task 27: this file's OWN cache of what the seam last reported, so every other
+   caller in the tree reads a plain, zero-AT accessor instead of the seam itself (netfsm.h's
+   own comment beside the four accessors below has the full story). g_link is refreshed every
+   NET_JOIN_WAIT pass; g_rssi/g_ip are populated at most once per successful join, one whole
+   NET_IDLE pass each (g_need_rssi/g_need_ip); all three collapse back to their "no link"
+   defaults the moment link_down() gives up on the join. */
+static uint8_t  g_link;
+static int8_t   g_rssi;
+static char     g_ip[16] = "0.0.0.0";
+static bool     g_need_rssi, g_need_ip;      /* set on the JOIN_WAIT -> IDLE transition */
+
 net_state_t net_state(void)           { return g_state; }
 uint16_t    net_last_status(void)     { return g_status; }
 uint16_t    net_next_s(void)          { return g_next_s; }
@@ -72,6 +83,10 @@ uint32_t    net_reports_failed(void)  { return g_failed; }
 bool        net_modem_ran_this_pass(void) { return g_modem_ran; }
 const char *net_disabled(void)        { return g_disabled; }
 void        net_disable(const char *why) { g_disabled = why; }
+uint8_t     net_link(void)            { return g_link; }
+int8_t      net_rssi(void)            { return g_rssi; }
+const char *net_ip(void)              { return g_ip; }
+uint16_t    net_desyncs(void)         { return link_desyncs(); }
 
 /* EVERY pass that issues an AT command goes through this, never through a bare
    `g_modem_ran = true;`. ui.cpp's own flag has to be raised in the SAME pass, or spec §3's and
@@ -98,6 +113,8 @@ void net_begin(void) {
   g_body_len = 0; g_tx_len = 0; g_rx_len = 0; g_have_cmd = false;
   g_retried = false; g_connect_starved = false;
   g_disabled = NULL;    /* a latch left standing here would make net_poll() a silent no-op */
+  g_link = 0; g_rssi = 0; snprintf(g_ip, sizeof g_ip, "0.0.0.0");
+  g_need_rssi = false; g_need_ip = false;
 }
 
 /* PB_RETRY_DEADLINE_MS = 30000, well inside butler's RETRY_WINDOW_S = 300 (butler.py:86).
@@ -137,6 +154,12 @@ static void link_down(void) {
   g_wait_until = hal_millis() + k_backoff[g_backoff_i];
   if (g_backoff_i + 1 < sizeof k_backoff / sizeof k_backoff[0]) ++g_backoff_i;
   g_state = NET_DOWN;
+  /* No stale signal-strength or address once the FSM has given up on this join: `status`
+     must never show an RSSI or an IP that belonged to a link that has already ended. A
+     fresh join re-arms g_need_rssi/g_need_ip on its own NET_JOIN_WAIT -> NET_IDLE
+     transition, so clearing them here just means the NEXT join's own passes do the work. */
+  g_link = 0; g_rssi = 0; snprintf(g_ip, sizeof g_ip, "0.0.0.0");
+  g_need_rssi = false; g_need_ip = false;
 }
 
 static bool assemble(void) {
@@ -239,13 +262,52 @@ void net_poll(bool dosing) {
       modem_ran_();
       const uint32_t t0 = hal_millis();
       link_state_t s = link_state();            /* 1 AT */
-      if (s == LINK_UP) { g_backoff_i = 0; g_state = NET_IDLE; return; }
+      /* The ONE place net_link()'s cache is written: this file's own JOIN_WAIT poll already
+         has the answer, so this costs zero extra ATs. Kept in the same three-way shape
+         ui_state_t::link and cli's `link=` have always used (0 down, 1 joining, 2 up). */
+      g_link = (uint8_t)(s == LINK_UP ? 2 : (s == LINK_JOINING ? 1 : 0));
+      if (s == LINK_UP) {
+        g_backoff_i = 0;
+        g_need_rssi = true; g_need_ip = true;   /* NET_IDLE spends one whole pass on each */
+        g_state = NET_IDLE;
+        return;
+      }
       if (was_timeout(t0)) { poison(); return; }
       if ((int32_t)(hal_millis() - g_deadline) >= 0) link_down();
       return;
     }
 
     case NET_IDLE: {
+      /* Refresh passes come first and each spends the WHOLE pass: link_rssi() is 1 AT,
+         link_ip() up to 2 (once per join; the driver's own cache makes every call after the
+         first free even within this same join -- see link_wifi.cpp). 1 + 2 = 3 ATs in one
+         pass would be 3600 ms, and 3600 + PB_NET_SLACK_MS = 5600 > 5592 -- the same
+         arithmetic every other pass in this file already respects, which is why these are
+         never combined into one. */
+      if (g_need_rssi) {
+        modem_ran_();
+        const uint32_t t0 = hal_millis();
+        g_rssi = link_rssi();                   /* 1 AT */
+        if (was_timeout(t0)) { poison(); return; }
+        g_need_rssi = false;
+        return;
+      }
+      if (g_need_ip) {
+        /* No was_timeout()/poison() pairing here, unlike every other AT-issuing pass: a
+           SUCCESSFUL link_ip() call legitimately costs up to ~2.5 s (a 100 ms wait plus up
+           to 2 ATs) by design (link_wifi.cpp), which already exceeds PB_NET_STEP_MS on the
+           ordinary, no-error path -- was_timeout()'s >= PB_NET_STEP_MS test would misfire
+           and poison the link on every single successful join. The driver's own guard
+           (only queries the seam's address once per join, gated on the link being up) is
+           what actually bounds the common case; the pathological one is Finding 3, and it
+           is not fixable from this side of the seam (task 27 report). */
+        modem_ran_();
+        const char *ip = link_ip();              /* up to 2 ATs, once per join */
+        snprintf(g_ip, sizeof g_ip, "%s", ip);
+        g_need_ip = false;
+        return;
+      }
+
       const uint32_t due = (uint32_t)g_next_s * 1000u;
       if (!g_first_report_due && hal_millis() - g_last_report_ms < due) return;
       if (!report_may_build()) return;   /* §4.3: the report WAITS while the ack reads recv */

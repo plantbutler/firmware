@@ -10,8 +10,10 @@
 #include "config.h"
 #include "exec.h"     /* exec_begin/exec_pending/exec_last_cmd_id/exec_last_cmd_text */
 #include "hal.h"
-#include "link.h"     /* link_state/link_rssi/link_ip */
-#include "netfsm.h"   /* net_disable/net_begin/net_poll/net_last_status/net_next_s */
+#include "netfsm.h"   /* net_disable/net_begin/net_poll/net_last_status/net_next_s, and
+                          (fix round, task 27) net_link/net_rssi/net_ip: netfsm.cpp owns the
+                          AT budget, so it owns the seam, and this file may not call into it
+                          directly any more -- see netfsm.h's own comment on why. */
 #include "noinit.h"
 #include "pins.h"
 #include "pulses.h"
@@ -167,10 +169,17 @@ static void ui_fill_(ui_state_t *s) {
   s->pos_known    = cart_pos_known();
   s->pos          = cart_pos();
   s->parked       = cart_parked();
-  s->link         = (uint8_t)(link_state() == LINK_UP ? 2 :
-                             (link_state() == LINK_JOINING ? 1 : 0));
-  s->rssi         = link_rssi();
-  strncpy(s->ip, link_ip(), sizeof s->ip - 1);
+  /* Fix round, task 27: this USED to call into the seam directly -- twice for the state
+     alone, once each for signal strength and address, UNCONDITIONALLY every loop() pass, on
+     top of whatever net_poll() had already spent that same pass. Against the fake that cost
+     nothing; against the real driver it was up to ~5 AT commands in one pass against a
+     5592 ms grant, a guaranteed watchdog reset in normal operation (task 27 fix-round
+     report). netfsm.cpp now owns the seam and refreshes these on its own schedule, at most
+     once per join for the ones that cost an AT; the three accessors below are cached and
+     issue none, so nothing here can ever repeat that mistake. */
+  s->link         = net_link();
+  s->rssi         = net_rssi();
+  strncpy(s->ip, net_ip(), sizeof s->ip - 1);
   s->http_status  = net_last_status();          /* a 400/401 loop is otherwise invisible
                                                    to anyone not on the serial port */
   s->next_s       = net_next_s();

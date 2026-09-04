@@ -6,7 +6,9 @@
 #include "report.h"
 #include "config.h"
 #include "hal.h"
-#include "link.h"
+#include "netfsm.h"    /* net_desyncs(): fix round, task 27 -- the seam's own desync counter
+                          is read through netfsm.cpp's cache now, same as every other module
+                          outside netfsm.cpp and its driver. */
 #include "sensors.h"
 #include "pulses.h"
 #include "safety.h"
@@ -98,7 +100,7 @@ uint16_t report_build(char *buf, uint16_t cap) {
   const uint32_t diag[10] = {
     hal_heap_arena(), hal_heap_ordblks(), hal_stack_hwm(),
     sensors_i2c_errors(), sensors_float_change_age_s(), pulses_leak_count(),
-    (uint32_t)link_desyncs(), safety_contra() ? 1u : 0u,
+    (uint32_t)net_desyncs(), safety_contra() ? 1u : 0u,
     cart_parked() ? 1u : 0u, hal_wdt_last_delta()
   };
   for (uint32_t i = 0; i < 10; ++i) {
