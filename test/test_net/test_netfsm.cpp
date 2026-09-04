@@ -3,8 +3,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../support/bodies.h"
 #include "../support/harness.h"
 #include "config.h"
+#include "exec.h"
 #include "hal.h"
 #include "link.h"
 #include "netfsm.h"
@@ -777,6 +779,54 @@ static void test_a_poisoned_close_does_not_leave_starvation_armed_for_the_next_r
   TEST_ASSERT_EQUAL_UINT32(1u, net_reports_ok());
 }
 
+static void test_an_ack_is_set_the_moment_a_command_is_received(void) {
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
+  net_begin(); exec_begin();
+  pb_net_passes(12, 100);
+  TEST_ASSERT_TRUE(report_ack_is_recv());     /* (id, flow_ml = 0, err = "recv") on RECEIPT */
+  TEST_ASSERT_FALSE(report_may_build());
+}
+
+static void test_command_is_not_executed_in_the_pass_that_received_it(void) {
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
+  net_begin(); exec_begin();
+  for (int i = 0; i < 40; ++i) {
+    link_fake_pass_begin();
+    net_poll(false);
+    if (report_ack_is_recv()) {               /* the pass that received it */
+      TEST_ASSERT_EQUAL_UINT32(0, sim_pump_on_ms());
+      break;
+    }
+    pb_advance(100);
+  }
+}
+
+static void test_command_is_surfaced_only_once_per_round_trip(void) {
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
+  net_begin(); exec_begin();
+  pb_net_passes(12, 100);
+  cmd_t c;
+  TEST_ASSERT_TRUE(net_take_command(&c));
+  TEST_ASSERT_EQUAL_UINT32(17, c.id);
+  TEST_ASSERT_FALSE(net_take_command(&c));
+}
+
+static void test_no_report_is_built_between_receiving_a_command_and_executing_it(void) {
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
+  net_begin(); exec_begin();
+  pb_net_passes(12, 100);
+  /* link_fake_write_count() and not link_fake_sent(): the question is whether ANYTHING was
+     sent across two whole report intervals, and the last-buffer accessor cannot answer it. */
+  uint16_t writes = link_fake_write_count();
+  pb_advance(120000);                          /* two report intervals go by */
+  pb_net_passes(20, 100);
+  TEST_ASSERT_EQUAL_UINT16(writes, link_fake_write_count());   /* the report WAITS */
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -815,5 +865,9 @@ int main(void) {
   RUN_TEST(test_a_poisoned_close_does_not_leave_starvation_armed_for_the_next_report);
   RUN_TEST(test_was_timeout_boundary_is_inclusive);
   RUN_TEST(test_link_drop_returns_to_joining_with_exponential_backoff);
+  RUN_TEST(test_an_ack_is_set_the_moment_a_command_is_received);
+  RUN_TEST(test_command_is_not_executed_in_the_pass_that_received_it);
+  RUN_TEST(test_command_is_surfaced_only_once_per_round_trip);
+  RUN_TEST(test_no_report_is_built_between_receiving_a_command_and_executing_it);
   return UNITY_END();
 }

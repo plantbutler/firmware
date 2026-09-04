@@ -3,6 +3,7 @@
 #include <unity.h>
 #include "cli.h"
 #include "config.h"
+#include "exec.h"
 #include "hal.h"
 #include "netfsm.h"
 #include "pulses.h"
@@ -92,7 +93,17 @@ static inline void pb_test_setup(void) {
    netfsm.cpp with no reset path but net_begin() and NET_IDLE's own per-report reset. Every
    case in test_netfsm.cpp today calls net_begin() as its own first or second statement,
    which is exactly why this gap produced no failure on its own — the same shape as every
-   entry above it before ITS test existed. See netfsm.h's own declaration. */
+   entry above it before ITS test existed. See netfsm.h's own declaration.
+
+   exec_begin() belongs here as the TENTH entry, for the identical reason again (task 26):
+   g_boot_home_due, g_pending, g_cmd, g_last_id and g_last_text are process-lifetime statics
+   in exec.cpp, and every case that touches this file calls exec_begin() itself — but a case
+   that longjmps out before reaching its own call (or a future case that never calls it at
+   all) would otherwise read a PRIOR case's pending command, boot-home flag or last-ack text.
+   Unlike the dedicated _test_reset_ wrappers above, exec_begin() needs no second, test-only
+   copy: it is already the production entry point and it already has no side effect beyond
+   resetting exactly these statics (same shape as report_clear_ack() above) — it does not
+   touch the cart, the network or the pump. */
 static inline void pb_test_teardown(void) {
   sim_events_clear();
   safety_set_dosing(false);
@@ -103,6 +114,7 @@ static inline void pb_test_teardown(void) {
   pulses_test_reset_leak_();
   report_clear_ack();
   netfsm_test_reset_retry_();
+  exec_begin();
 }
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }
