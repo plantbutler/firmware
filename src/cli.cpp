@@ -263,10 +263,11 @@ void cli_poll(void) {
 
 /* WHOLE-TOKEN parse of `pump`'s [prime] [hang] flags, over the text AFTER the ms argument:
    `hanging` is not `hang`, and a substring match would starve the watchdog on a word
-   nobody typed. Pure string inspection, no side effect and no call into dose_run() -- so
-   the literal-token requirement can be proven directly by a host case, without ever
-   letting hang=true reach the loop that deliberately starves the dog (a host case that
-   did THAT would hang the suite by construction: see safety.cpp's hang hook). */
+   nobody typed. Pure string inspection with no side effect and no call into the dosing
+   entry point -- so the literal-token requirement can be proven directly by a host case,
+   without ever letting hang=true reach the loop that deliberately starves the dog (a host
+   case that did THAT would hang the suite by construction: see safety.cpp's hang hook).
+   (Not spelled literally: §9's count of that call in this file must stay exactly one.) */
 static void cli_pump_flags_(const char *args, bool *prime, bool *hang) {
   *prime = false; *hang = false;
   for (const char *t = args; *t != '\0'; ) {

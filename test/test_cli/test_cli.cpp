@@ -266,16 +266,32 @@ static void test_status_delta_reflects_the_probe_that_produced_it(void) {
   TEST_ASSERT_TRUE(delta_slow < delta_fast);
 }
 
-static void test_no_float_formatting_appears_in_any_printed_line(void) {
-  /* newlib's float formatting is the deepest stack consumer in the program (spec §12),
-     so the float conversions are banned. A float-formatted number shows as
-     <digit>.<digit>. Two exemptions, and only two: the ip= line's dotted quad, and -
-     from task 20 - the mls= field of the dose summary line, computed in integer tenths.
+/* newlib's float formatting is the deepest stack consumer in the program (spec §12), so
+   the float conversions are banned. A float-formatted number shows as <digit>.<digit>.
+   Two exemptions, and only two: the ip= line's dotted quad (whole line -- the line IS the
+   field), and -- from task 20 -- the mls= field of the dose summary line, computed in
+   integer tenths. mls='s exemption is FIELD-scoped, not line-scoped: that line also
+   carries outlet=, ms=, pulses=, ml= and r= on the same line, and a whole-line skip would
+   hide a stray dot on any one of THOSE too. */
+static void scan_line_for_float_formatting_(const char *line) {
+  if (strncmp(line, "ip=", 3) == 0) return;
+  const char *mv = strstr(line, "mls=");
+  size_t lo = mv ? (size_t)((mv - line) + 4) : (size_t)-1;    /* mls='s first digit */
+  size_t hi = lo;
+  if (mv) while (line[hi] != '\0' && line[hi] != ' ') ++hi;   /* one past its last digit */
+  for (size_t i = 1; line[i] != '\0' && line[i + 1] != '\0'; ++i) {
+    if (mv && i >= lo && i < hi) continue;                    /* inside mls='s own value */
+    if (line[i] == '.' && line[i - 1] >= '0' && line[i - 1] <= '9' &&
+        line[i + 1] >= '0' && line[i + 1] <= '9')
+      TEST_FAIL_MESSAGE(line);
+  }
+}
 
-     THE TWO NEEDLES ARE BUILT CHARACTER BY CHARACTER ON PURPOSE. make check greps this
-     tree for a percent sign followed by a float conversion letter, and it scans string
-     literals in test/ exactly as it scans code; writing the needles out would make this
-     file the one hit that fails the check it exists to defend. */
+static void test_no_float_formatting_appears_in_any_printed_line(void) {
+  /* THE TWO NEEDLES BELOW ARE BUILT CHARACTER BY CHARACTER ON PURPOSE. make check greps
+     this tree for a percent sign followed by a float conversion letter, and it scans
+     string literals in test/ exactly as it scans code; writing the needles out would make
+     this file the one hit that fails the check it exists to defend. */
   pb_test_setup();
   char out[4096];
   size_t n = feed("status\n", out, sizeof out);
@@ -287,11 +303,31 @@ static void test_no_float_formatting_appears_in_any_printed_line(void) {
   TEST_ASSERT_NULL(strstr(out, needle));
   char *line = strtok(out, "\n");
   while (line) {
-    if (strncmp(line, "ip=", 3) != 0)
-      for (size_t i = 1; line[i] != '\0' && line[i + 1] != '\0'; ++i)
-        if (line[i] == '.' && line[i - 1] >= '0' && line[i - 1] <= '9' &&
-            line[i + 1] >= '0' && line[i + 1] <= '9')
-          TEST_FAIL_MESSAGE(line);
+    scan_line_for_float_formatting_(line);
+    line = strtok(0, "\n");
+  }
+
+  /* Task 20 step 12's own acceptance criterion: this scanner must still pass with the
+     dose summary line in the output -- and `status` alone never prints mls=, so nothing
+     above actually exercised that exemption. Drive a REAL dose to DOSE_OK (the console's
+     own pump/calib are always by_time=true and can structurally never reach DOSE_OK, so
+     this is the only route to it) and scan the summary line it produces through the exact
+     same scanner. */
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true);
+  sim_set_flow_ml_s(85u);
+  dose_req_t q = {0};
+  q.ml = (uint16_t)PB_DOSE_RIG_MAX_ML;
+  q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  q.long_prime = true;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q), "arrange: a granted dose reaching target");
+  (void)sim_serial_tx(out, sizeof out);
+  cli_print_dose_summary();
+  n = sim_serial_tx(out, sizeof out); out[n] = '\0';
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, " mls="), out);   /* the exemption under test */
+  line = strtok(out, "\n");
+  while (line) {
+    scan_line_for_float_formatting_(line);
     line = strtok(0, "\n");
   }
 }
