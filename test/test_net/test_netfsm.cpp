@@ -5,6 +5,7 @@
 #include <string.h>
 #include "../support/bodies.h"
 #include "../support/harness.h"
+#include "cart.h"
 #include "config.h"
 #include "exec.h"
 #include "hal.h"
@@ -827,6 +828,158 @@ static void test_no_report_is_built_between_receiving_a_command_and_executing_it
   TEST_ASSERT_EQUAL_UINT16(writes, link_fake_write_count());   /* the report WAITS */
 }
 
+static void test_a_stop_command_is_acked(void) {
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_stop_200, strlen(k_stop_200));
+  net_begin(); exec_begin();
+  pb_net_passes(14, 100);
+  exec_pending();
+  TEST_ASSERT_FALSE(report_ack_is_recv());
+  report_stamp();
+  char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
+  TEST_ASSERT_NOT_NULL(strstr(b, " ack=31 flow_ml=0 err=stop"));
+}
+
+static void test_a_failed_goto_still_acks(void) {
+  /* PB_PULSES_PER_GATE == 0 compiles cart_goto() to `return false` (§2.15), so this is the
+     shipped configuration's normal answer, not a contrived one. */
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
+  net_begin(); exec_begin();
+  pb_net_passes(14, 100);
+  exec_pending();
+  report_stamp();
+  char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
+  TEST_ASSERT_NOT_NULL(strstr(b, " ack=17 flow_ml=0 err=goto"));
+}
+
+static void test_every_terminal_path_in_exec_pending_sets_an_ack(void) {
+  static const char *bodies[] = {
+    "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=41 water=0 ml=100 cap_s=10\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=42 water=9 ml=100 cap_s=10\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=43 water=3 ml=100 cap_s=10\n",
+    "HTTP/1.1 200 OK\r\nContent-Length: 22\r\n\r\nnext=60\ncmd=44 stop=1\n"
+  };
+  for (unsigned i = 0; i < 4; ++i) {
+    pb_test_setup();
+    link_fake_reset(); link_fake_set_state(LINK_UP);
+    link_fake_queue_response(bodies[i], strlen(bodies[i]));
+    net_begin(); exec_begin();
+    pb_net_passes(14, 100);
+    exec_pending();
+    TEST_ASSERT_FALSE(report_ack_is_recv());
+    report_stamp();
+    char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, " ack="), "a terminal path left no ack");
+    TEST_ASSERT_NOT_NULL(strstr(b, " flow_ml="));
+  }
+}
+
+static void test_refused_dose_acks_with_flow_ml_zero_and_an_err_token(void) {
+  static const char k[] =
+    "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=51 water=3 ml=999 cap_s=10\n";
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k, strlen(k));
+  net_begin(); exec_begin();
+  pb_net_passes(14, 100);
+  exec_pending();
+  report_stamp();
+  char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
+  TEST_ASSERT_NOT_NULL(strstr(b, "flow_ml=0"));   /* an ACKED refusal charges the pot 0 ml */
+}
+
+static void test_pending_ack_rides_the_next_report_after_every_discard_path(void) {
+  static const char k_400[] = "HTTP/1.1 400 Bad Request\r\nContent-Length: 3\r\n\r\nno\n";
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
+  net_begin(); exec_begin();
+  pb_net_passes(14, 100);
+  exec_pending();                       /* ack=17 is now real */
+  link_fake_queue_response(k_400, strlen(k_400));
+  pb_net_passes(30, 2500);                 /* that report 400s and is discarded */
+  uint16_t n = 0;
+  const char *tx = (const char *)link_fake_sent(&n);
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_NOT_NULL(strstr(tx, " ack=17 "));                 /* still on the next one */
+}
+
+static void test_err_recv_never_reaches_the_wire(void) {
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
+  net_begin(); exec_begin();
+  pb_net_passes(60, 2500);                 /* many intervals; exec runs, then reports resume */
+  uint16_t n = 0;
+  const char *tx = (const char *)link_fake_sent(&n);
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_NULL(strstr(tx, "err=recv"));
+}
+
+/* PB_PULSES_PER_GATE == 0 compiles cart_goto() to `return false` (§2.15, test_cart.cpp's own
+   test_goto_refuses_when_pulses_per_gate_is_zero) -- the shipped [env:native] configuration.
+   k_cmd_200 names outlet 3, so under that arm exec_pending() acks err=goto (proved above by
+   test_a_failed_goto_still_acks on this SAME body) and dose_run() -- hence
+   cli_print_dose_summary() -- is never reached at all: found by running this test as the brief
+   states it, which failed outright rather than passing for the wrong reason. Same fork,
+   same idiom test_cart.cpp/test_report.cpp already use for this identical condition: ignore
+   here, prove it for real under native_cal where PB_PULSES_PER_GATE=1450 lets cart_goto(3)
+   actually succeed. */
+static void test_a_backend_dose_prints_the_per_dose_summary_line(void) {
+#if PB_PULSES_PER_GATE == 0
+  TEST_IGNORE_MESSAGE("uncalibrated arm: cart_goto() always fails, so dose_run() is never "
+                       "reached; see native_cal");
+#else
+  pb_test_setup();
+  /* Under native_cal cart_goto() still fails without this: cart_goto()'s own
+     `if (!g_home_seen && !cart_home()) return false;` (lib/Manifold/src/cart.cpp) needs a
+     screw that actually turns and a home region to find, neither of which any earlier case
+     in this binary has armed. cart_begin() also resets cart.cpp's own process-lifetime
+     statics, which carry no teardown reset of their own (unlike this file's g_retried) --
+     necessary because test_net.cpp cases before this one may have left g_home_seen/g_pos
+     dirty even though none of them reach a successful cart_goto() today. */
+  cart_begin();
+  sim_set_screw_pulse_ms(2);
+  sim_set_home_region(0, 40);
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);
+  net_begin(); exec_begin();
+  pb_net_passes(14, 100);
+  char out[512]; (void)sim_serial_tx(out, sizeof out);
+  exec_pending();
+  size_t n = sim_serial_tx(out, sizeof out); out[n] = 0;
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "dose outlet="), out);
+#endif
+}
+
+/* A garbage `hang` byte plus el >= PB_HANG_MS puts a BACKEND command into the loop that
+   deliberately starves the watchdog. The field is unconditional (§6's object-hash rule), so
+   zero-initialising the request is the only defence there is. Same fork as the summary-line
+   case immediately above, for the identical reason: under [env:native]'s uncalibrated arm,
+   cart_goto(3) fails and dose_run() is never called at all, so this case would pass vacuously
+   -- sim_feeds() still advances, but only from cart_home()'s own bounded loop (the boot
+   self-home and the unconditional park), never from a single iteration of dose_run()'s loop
+   with an unexercised hang field. Proved by running it unguarded: PASSED even with q.hang's
+   zero-init deleted from exec.cpp entirely, which is the vacuous-pass shape this whole run's
+   brief warns about. */
+static void test_a_backend_command_never_sets_hang(void) {
+#if PB_PULSES_PER_GATE == 0
+  TEST_IGNORE_MESSAGE("uncalibrated arm: cart_goto() always fails, so dose_run() is never "
+                       "reached; see native_cal");
+#else
+  pb_test_setup();
+  cart_begin();                    /* same reason as the summary-line case immediately above */
+  sim_set_screw_pulse_ms(2);
+  sim_set_home_region(0, 40);
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);
+  net_begin(); exec_begin();
+  pb_net_passes(14, 100);
+  uint32_t f0 = sim_feeds();
+  pb_advance(PB_HANG_MS * 3u);
+  exec_pending();
+  TEST_ASSERT_GREATER_THAN_UINT32(f0, sim_feeds());   /* the dog was fed throughout */
+#endif
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -869,5 +1022,13 @@ int main(void) {
   RUN_TEST(test_command_is_not_executed_in_the_pass_that_received_it);
   RUN_TEST(test_command_is_surfaced_only_once_per_round_trip);
   RUN_TEST(test_no_report_is_built_between_receiving_a_command_and_executing_it);
+  RUN_TEST(test_a_stop_command_is_acked);
+  RUN_TEST(test_a_failed_goto_still_acks);
+  RUN_TEST(test_every_terminal_path_in_exec_pending_sets_an_ack);
+  RUN_TEST(test_refused_dose_acks_with_flow_ml_zero_and_an_err_token);
+  RUN_TEST(test_pending_ack_rides_the_next_report_after_every_discard_path);
+  RUN_TEST(test_err_recv_never_reaches_the_wire);
+  RUN_TEST(test_a_backend_dose_prints_the_per_dose_summary_line);
+  RUN_TEST(test_a_backend_command_never_sets_hang);
   return UNITY_END();
 }
