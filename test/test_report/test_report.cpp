@@ -466,6 +466,17 @@ static void test_response_ignores_unknown_keys(void) {
   TEST_ASSERT_EQUAL_UINT16(100, r.cmd.ml);
 }
 
+/* field_u32 only matches "ml=" at the start of the line or right after a space -- without that
+   guard it would also match the tail of a key like "flow_ml=", which is not a shape butler's
+   response ever carries today but is exactly the shape its OWN report body carries the other
+   direction (§4.1's flow_ml=). One shared parsing habit away from a real body someday. */
+static void test_response_a_key_embedded_in_a_longer_key_is_not_matched(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=3 flow_ml=999 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL_UINT16(250, r.cmd.ml);   /* the real ml=, not flow_ml=999's tail */
+}
+
 static void test_response_rejects_command_id_zero(void) {
   response_t r;
   const char *b = "next=60\ncmd=0 water=3 ml=250 cap_s=30\n";
@@ -531,13 +542,21 @@ static void test_response_next_out_of_range_keeps_the_previous_interval(void) {
 
 /* "a header with no body": at this function's boundary that is exactly len==0, since
    response_parse only ever sees the BODY (netfsm scans past the CRLFCRLF itself). A NULL
-   body must be equally inert -- a truncated read that produced no buffer at all. */
+   body must be equally inert -- a truncated read that produced no buffer at all.
+
+   NULL with len==0 alone would pass even without the `!body` guard -- the while(pos<len)
+   loop bound stops it before any dereference -- so that pairing does not actually pin the
+   guard down (found by mutating it away: nothing failed). NULL with a NONZERO len is the
+   case that matters: a caller bug handing this function a length without a buffer to match
+   must not walk into memchr(NULL, ...) and crash the one path between a fault and water. */
 static void test_response_empty_or_null_body_yields_no_command(void) {
   response_t r;
   TEST_ASSERT_FALSE(response_parse("", 0, &r));
   TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
   TEST_ASSERT_EQUAL_UINT16(0, r.next_s);
   TEST_ASSERT_FALSE(response_parse(NULL, 0, &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+  TEST_ASSERT_FALSE(response_parse(NULL, 40, &r));   /* a length with no buffer to match */
   TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
 }
 
@@ -604,6 +623,20 @@ static void test_response_an_outlet_too_wide_for_the_field_yields_no_command(voi
   response_t r;
   const char *b = "next=60\ncmd=17 water=256 ml=250 cap_s=30\n";
   TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
+}
+
+/* The same width rule, the other two fields: a value well within uint32_t (no overflow, so
+   field_u32 itself is not what stops it) but too wide for ml/cap_s's own uint16_t must be
+   refused here, not truncated by the (uint16_t) cast into a small, wrong, accepted number. */
+static void test_response_rejects_ml_or_cap_s_too_wide_for_their_fields(void) {
+  response_t r;
+  const char *wide_ml = "next=60\ncmd=17 water=3 ml=70000 cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(wide_ml, (uint16_t)strlen(wide_ml), &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+  const char *wide_cap = "next=60\ncmd=17 water=3 ml=250 cap_s=70000\n";
+  TEST_ASSERT_FALSE(response_parse(wide_cap, (uint16_t)strlen(wide_cap), &r));
   TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
   TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
 }
@@ -698,6 +731,25 @@ static void test_response_carries_cap_s_through_unclamped(void) {
                             "narrows it");
 }
 
+/* The reason the mark lives in .noinit at all: a WARM reset (watchdog, RESET button -- the
+   board resetting mid-dose is the exact physical scenario requirement 2 names) must not
+   reopen the replay window. This is only true if g_nv.cmd_high_water's own bump is
+   noinit_commit()ed -- without that call, noinit_begin()'s sum check fails on the next boot,
+   the struct is read as garbage-since-last-cold-boot, and sim_reset(true)'s "!warm" branch
+   never runs to explain why: the .noinit block would simply be judged COLD when it is not,
+   silently wiping cmd_high_water back to 0 on a reset the operator never asked for. */
+static void test_response_cmd_high_water_survives_a_warm_reset(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL_UINT32(17, g_nv.cmd_high_water);
+
+  sim_reset(true);                                    /* warm: watchdog or RESET, not power */
+  TEST_ASSERT_FALSE_MESSAGE(noinit_was_cold(), "a warm reset must not be read as a cold one");
+  TEST_ASSERT_EQUAL_UINT32(17, g_nv.cmd_high_water);   /* the mark survived the reset */
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));   /* still a replay */
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_report_carries_c_t_and_the_valid_channels);
@@ -732,6 +784,7 @@ int main(void) {
   RUN_TEST(test_response_parses_a_water_command);
   RUN_TEST(test_response_parses_a_stop_command);
   RUN_TEST(test_response_ignores_unknown_keys);
+  RUN_TEST(test_response_a_key_embedded_in_a_longer_key_is_not_matched);
   RUN_TEST(test_response_rejects_command_id_zero);
   RUN_TEST(test_response_rejects_a_repeated_or_lower_command_id);
   RUN_TEST(test_response_rejects_water_without_ml_or_without_cap_s);
@@ -745,6 +798,7 @@ int main(void) {
   RUN_TEST(test_response_water_zero_is_accepted_structurally);
   RUN_TEST(test_response_an_outlet_above_pb_outlets_is_accepted_structurally);
   RUN_TEST(test_response_an_outlet_too_wide_for_the_field_yields_no_command);
+  RUN_TEST(test_response_rejects_ml_or_cap_s_too_wide_for_their_fields);
   RUN_TEST(test_response_a_trailing_non_digit_does_not_truncate_to_a_smaller_number);
   RUN_TEST(test_response_stop_zero_is_neither_stop_nor_water);
   RUN_TEST(test_response_two_cmd_fields_on_one_line_the_first_wins);
@@ -752,5 +806,6 @@ int main(void) {
   RUN_TEST(test_response_an_overflowing_numeric_field_is_rejected_not_wrapped);
   RUN_TEST(test_response_the_exact_uint32_boundary_still_parses);
   RUN_TEST(test_response_carries_cap_s_through_unclamped);
+  RUN_TEST(test_response_cmd_high_water_survives_a_warm_reset);
   return UNITY_END();
 }

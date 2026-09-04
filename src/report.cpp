@@ -232,7 +232,15 @@ bool response_parse(const char *body, uint16_t len, response_t *out) {
     if (field_u32(line, llen, "stop=", &stop) && stop != 0) {
       out->cmd.id = id; out->cmd.kind = CMD_STOP;
     } else {
-      uint32_t outlet, ml, cap_s;
+      /* Sentinel-initialised, not left indeterminate: field_u32 only writes *out on success, so
+         an absent field must fail the width check three lines down on its own, EVEN IF a future
+         edit drops the `continue` that is supposed to catch it here. An uninitialised local
+         would make that failure mode depend on whatever the stack happened to hold — caught in
+         this task's own mutation sweep, where deleting the ml= guard alone slipped through
+         because the leftover stack value happened to still land outside [1,65535]. A sentinel
+         above every field's own maximum removes the coin flip: the guards below stay the fast,
+         readable path, and the width check is the backstop that holds even if they are gone. */
+      uint32_t outlet = 0xFFFFFFFFu, ml = 0xFFFFFFFFu, cap_s = 0xFFFFFFFFu;
       if (!field_u32(line, llen, "water=", &outlet)) continue;
       if (!field_u32(line, llen, "ml=", &ml))       continue;   /* no ml= is no command */
       if (!field_u32(line, llen, "cap_s=", &cap_s)) continue;   /* an absent cap is unbounded */
