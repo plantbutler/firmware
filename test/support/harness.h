@@ -1,22 +1,30 @@
-/* test/support/harness.h — the Unity fixture over hal_sim. A header, not a suite. */
+/* test/support/harness.h -- the Unity fixture. A HEADER (spec §10).
+   Host arm ([env:native] and friends): hal_sim's injectors and a driven clock.
+   Device arm ([env:uno_r4_wifi_test]): real hardware, real time, no injectors -- a case
+   needing one is #ifdef PB_SIM'd out. config.h and safety.h are NOT optional: pb_latch_contra()
+   names dose_req_t, dose_run(), safety_contra(), PB_BOOT_GAP_MS, PB_PRIME_MS_DEFAULT and
+   PB_STALL_MS_DEFAULT, and nothing else this header includes reaches any of them (task 28). */
 #pragma once
-#include <unity.h>
-#include "cli.h"
 #include "config.h"
-#include "exec.h"
 #include "hal.h"
+#include "safety.h"
+#include <unity.h>
+
+#ifdef PB_SIM
+#include "cli.h"
+#include "exec.h"
 #include "netfsm.h"
 #include "pulses.h"
 #include "report.h"
 #include "sensors.h"
 #include "sim.h"
-#include "safety.h"
 
 static inline void pb_test_setup(void) {
   sim_reset(false);          /* a cold boot: clock at 0, .noinit cleared */
   hal_begin();
   hal_boot_pump_off();
-  (void)hal_wdt_start();
+  (void)hal_wdt_start();     /* KEEP THIS: without it hal_wdt_alive() is false and the
+                                 dose ladder refuses every dose in test_dose/test_contra */
   sim_events_clear();
 }
 
@@ -28,9 +36,9 @@ static inline void pb_test_setup(void) {
    of how the case ended, so it is the only place that can actually promise every case starts
    with g_dosing == false.
 
-   safety_float_refusal_count(false) belongs here for the identical reason (task 15 fix round
-   1): g_float_refusals is the same shape of process-lifetime static in safety.cpp, and a test
-   that only clears it as its own last line -- as test_the_flap_counter_trips_after_three_
+   safety_float_refusal_count(false) belongs here for the identical reason (task 15 fix
+   round 1): g_float_refusals is the same shape of process-lifetime static in safety.cpp, and a
+   test that only clears it as its own last line -- as test_the_flap_counter_trips_after_three_
    consecutive_float_refusals did before this fix -- leaves it dirty for every following case
    in the binary the moment an assertion earlier in that body fails and longjmps past the
    clear. `false` is not a magic reset value here: it is the SAME call dose_end_ml_() (task 17)
@@ -103,7 +111,12 @@ static inline void pb_test_setup(void) {
    Unlike the dedicated _test_reset_ wrappers above, exec_begin() needs no second, test-only
    copy: it is already the production entry point and it already has no side effect beyond
    resetting exactly these statics (same shape as report_clear_ack() above) — it does not
-   touch the cart, the network or the pump. */
+   touch the cart, the network or the pump.
+
+   ALL of the above is host-only (task 28): sensors_test_reset_health_() and
+   netfsm_test_reset_retry_() are declared under #ifdef PB_NATIVE, and pulses_test_reset_leak_()
+   under #if PB_SIM -- none of the three exist in a device build, where PB_NATIVE and PB_SIM
+   are both undefined. The device arm's teardown below is a no-op instead. */
 static inline void pb_test_teardown(void) {
   sim_events_clear();
   safety_set_dosing(false);
@@ -119,14 +132,17 @@ static inline void pb_test_teardown(void) {
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }
 
+/* task 3: counts call-trace events of one kind. Used five times by test_sensors. */
 static inline uint32_t pb_count(sim_ev_kind_t kind) {
   const sim_ev_t *ev; size_t n = sim_events(&ev); uint32_t hits = 0;
   for (size_t i = 0; i < n; ++i) if (ev[i].kind == kind) hits++;
   return hits;
 }
 
-/* Strictly inside: the two feeds that BRACKET hal_wdt_alive()'s probe are legal, and
-   anything between them is the bug this exists to catch (§2.5). */
+/* task 3: the ONE deliberately unfed window in the program is hal_wdt_alive()'s probe.
+   Strictly inside: the two feeds that BRACKET the probe are legal. A static inline
+   DEFINITION, not a declaration - the definition reads sim_events() and there is nowhere
+   else it could live without every suite that includes this header owning a copy. */
 static inline void pb_expect_no_feed_between(uint32_t from_ms, uint32_t to_ms) {
   const sim_ev_t *ev; size_t n = sim_events(&ev); uint32_t hits = 0;
   for (size_t i = 0; i < n; ++i)
@@ -134,24 +150,8 @@ static inline void pb_expect_no_feed_between(uint32_t from_ms, uint32_t to_ms) {
   TEST_ASSERT_EQUAL_UINT32(0u, hits);
 }
 
-/* Drive a REAL latching dose: the float says OK, nothing ever flows, the dose runs past
-   its own prime window, and it is not a console prime. That is §2.7's five conditions,
-   and it is the ONLY way the latch can be set -- there is no setter, on purpose. */
-/* Drive n whole network passes, advancing the fake clock ms between them. THE ONE
-   SPELLING: task 24's own cases, task 25's retry cases and task 26's ack-cycle cases all
-   use it, so a change to what "a pass" means lands once. Guarded #ifdef PB_SIM -- it calls
-   link_fake_pass_begin(), which the device test env filters out. netfsm.h itself is
-   included unconditionally above, for pb_test_teardown()'s netfsm_test_reset_retry_(). */
-#ifdef PB_SIM
-static inline void pb_net_passes(uint16_t n, uint32_t ms) {
-  for (uint16_t i = 0; i < n; ++i) {
-    link_fake_pass_begin();
-    net_poll(false);            /* not dosing: dose_run() blocks, so a pass cannot overlap one */
-    if (ms) pb_advance(ms);
-  }
-}
-#endif
-
+/* task 19: there is no safety_contra_set_(). The latch is settable in exactly one place,
+   so the fixture EARNS it by driving a real latching dose. */
 static inline void pb_latch_contra(void) {
   pb_advance(PB_BOOT_GAP_MS + 1u);
   sim_set_float(true);
@@ -163,3 +163,29 @@ static inline void pb_latch_contra(void) {
   (void)dose_run(&q);
   TEST_ASSERT_TRUE_MESSAGE(safety_contra(), "pb_latch_contra did not latch");
 }
+
+/* task 24: drive n whole network passes, advancing the fake clock ms between them.
+   THE ONE SPELLING of "a pass" -- task 24's cases, task 25's retries and task 26's ack
+   cycles all use it. Guarded here (rather than just at the call site) because it calls
+   link_fake_pass_begin(), which [env:uno_r4_wifi_test] filters link_fake.cpp out of. */
+static inline void pb_net_passes(uint16_t n, uint32_t ms) {
+  for (uint16_t i = 0; i < n; ++i) {
+    link_fake_pass_begin();
+    net_poll(false);         /* not dosing: the dosing loop blocks, so no pass overlaps one */
+    if (ms) pb_advance(ms);
+  }
+}
+
+#else   /* ---- the device arm ([env:uno_r4_wifi_test]): real hardware, real time, no
+             injectors. Only the three helpers above that genuinely differ between host and
+             board get a body here; the rest (pb_count, pb_expect_no_feed_between,
+             pb_latch_contra, pb_net_passes) read sim_events() or the fake link and have no
+             device meaning -- the device suite does not call them. ---- */
+static inline void pb_test_setup(void)     { hal_begin(); hal_boot_pump_off(); }
+static inline void pb_test_teardown(void)  {}
+static inline void pb_advance(uint32_t ms) { safety_wait_ms(ms); }   /* fed, on real time */
+#endif
+
+/* There is no pb_begin_fake_dose() / pb_end_fake_dose() pair (and there never was one in the
+   tree): task 7's two I2C-recovery cases call safety_set_dosing() -- task 5's declared seam,
+   spelled exactly that way -- directly. */
