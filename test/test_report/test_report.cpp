@@ -1,7 +1,9 @@
 /* test/test_report/test_report.cpp — report_build() and response_parse(). */
 #include <unity.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include "../support/bodies.h"
 #include "../support/harness.h"
 #include "config.h"
 #include "hal.h"
@@ -750,8 +752,19 @@ static void test_response_cmd_high_water_survives_a_warm_reset(void) {
   TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));   /* still a replay */
 }
 
+static void test_every_canned_body_declares_its_own_true_content_length(void) {
+  const char *const raw[] = { k_cmd_200, k_stop_200, k_out_of_range_200 };
+  for (unsigned i = 0; i < 3u; ++i) {
+    const char *hdr  = strstr(raw[i], "Content-Length: ");
+    const char *body = strstr(raw[i], "\r\n\r\n") + 4;
+    TEST_ASSERT_NOT_NULL(hdr);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)strtoul(hdr + 16, NULL, 10), (uint32_t)strlen(body));
+  }
+}
+
 int main(void) {
   UNITY_BEGIN();
+  RUN_TEST(test_every_canned_body_declares_its_own_true_content_length);
   RUN_TEST(test_report_carries_c_t_and_the_valid_channels);
   RUN_TEST(test_report_always_carries_at_least_one_diagnostic_channel);
   RUN_TEST(test_report_omits_a_channel_whose_read_failed_rather_than_sending_zero);
