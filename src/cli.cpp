@@ -546,6 +546,17 @@ void cli_print_status(void) {
   cli_printf_u32("reports_ok=%lu\n", net_reports_ok());
   cli_printf_u32("reports_failed=%lu\n", net_reports_failed());
   cli_printf_u32("modem_ran=%lu\n", (uint32_t)(net_modem_ran_this_pass() ? 1u : 0u));
+  /* The connect form is printed rather than asserted: this package proves only the command
+     SELECTION, and whether _CLIENTCONNECT still resolves HOST_NAME as a hostname is a bring-up
+     question task 27's real driver settles, not something a host test can check (spec §3
+     change 4). modem_timeout_ms/conn_timeout_ms are both PB_NET_STEP_MS because a single
+     modem.timeout() call sets the ONE budget every AT round trip in this file shares -- there
+     is no separate connect-specific timeout to print a different number for. */
+  cli_printf_u32("modem_timeout_ms=%lu\n", (uint32_t)PB_NET_STEP_MS);
+  cli_printf_u32("conn_timeout_ms=%lu\n", (uint32_t)PB_NET_STEP_MS);
+  hal_serial_write("connect_form=_CLIENTCONNECT(HOST_NAME as a name)"
+                   " - UNVERIFIED until bring-up (spec 3 change 4)\n");
+  cli_printf_u32("desyncs=%lu\n", (uint32_t)link_desyncs());   /* rides out as ch206 */
   if (net_disabled()) { hal_serial_write("net=DISABLED ("); hal_serial_write(net_disabled());
                         hal_serial_write(")\n"); }
 
