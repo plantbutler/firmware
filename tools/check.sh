@@ -193,21 +193,19 @@ check 0 'WiFiS3|link\.h|Network\.h' src/safety.cpp lib/Manifold -- \
   "the safety layer never names the network stack (safety.cpp, lib/Manifold)"
 
 # ---- blocking, buffers and formatting: spec §3, §9, §12 ----
-# lib/Network/src/Network.cpp is the pre-bench-sketch sketch: task 1 already orphaned it
-# (nothing under src/ or lib/ includes its header any more, so the LDF never builds it --
-# "main.cpp: a bare sketch" says so directly), but the file is not deleted yet. The
-# drop-3 seam-2 task deletes it and removes the --exclude below in the same commit -- the
-# way task 14 removed lib/Manifold/src/Manifold.cpp's own --exclude here (and its
-# library.json srcFilter, see 190b56d) in the same commit that deleted the file. Excluded
-# by FILE NAME, never by directory, so a real file added to either library -- cart.cpp
-# already, link_wifi.cpp later -- is still checked.
-check 0 '(^|[^[:alnum:]_])delay\(' "${SCAN[@]}" \
-  --exclude=hal_uno.cpp --exclude=Network.cpp -- \
+# lib/Network/src/Network.cpp -- the pre-bench-sketch sketch, orphaned since task 1 and
+# excluded here by name because it was still on disk -- is deleted by this task (drop 3,
+# seam 2), in the same commit that removes the --exclude=Network.cpp that used to sit on
+# each check below, the way task 14 removed lib/Manifold/src/Manifold.cpp's own --exclude
+# here (and its library.json srcFilter, see 190b56d) in the same commit that deleted that
+# file. Excluded by FILE NAME, never by directory, so a real file added to either library
+# -- cart.cpp already, link_wifi.cpp in task 27 -- is still checked.
+check 0 '(^|[^[:alnum:]_])delay\(' "${SCAN[@]}" --exclude=hal_uno.cpp -- \
   "no unbounded blocking wait outside hal_uno.cpp's power-on settles"
-check 0 '%[0-9.]*[fgeFGE]([^[:alnum:]]|$)' "${SCAN[@]}" --exclude=Network.cpp -- \
+check 0 '%[0-9.]*[fgeFGE]([^[:alnum:]]|$)' "${SCAN[@]}" -- \
   "no float formatting anywhere (newlib float printf is the deepest stack consumer)"
 check 0 'for[[:space:]]*\([[:space:]]*;[[:space:]]*;[[:space:]]*\)|while[[:space:]]*\([[:space:]]*(true|1)[[:space:]]*\)' \
-  "${SCAN[@]}" --exclude=safety.cpp --exclude=Network.cpp -- \
+  "${SCAN[@]}" --exclude=safety.cpp -- \
   "the program's only intentional unbounded loop is in the function that owns D6"
 # `malloc[[:space:]]*\(` -- the CALL, never the bare word. src/hal_uno.cpp writes
 # `#include <malloc.h>` for mallinfo(), which is how the heap diagnostics of ch200/ch201
