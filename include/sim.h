@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "link.h"       /* link_state_t, for the seam-2 fake's control surface at EOF */
 
 /* THE FAKE'S CLOCK CONTRACT, and every later task depends on it:
      hal_millis()   advances the rig by exactly 1 ms and runs every model (watchdog,
@@ -99,3 +100,18 @@ typedef struct {
 
 size_t sim_events(const sim_ev_t **out);
 void   sim_events_clear(void);
+
+/* ---- seam 2's fake (src/link_fake.cpp). sim + native only. ---- */
+void        link_fake_reset(void);
+void        link_fake_set_state(link_state_t s);
+void        link_fake_queue_response(const char *raw, size_t n);
+void        link_fake_fail_open(bool fail);
+void        link_fake_timeout_next(void);   /* next AT round trip burns PB_NET_STEP_MS and fails */
+void        link_fake_drop_link(void);
+void        link_fake_pass_begin(void);     /* zero the per-pass AT counter */
+uint16_t    link_fake_at_count(void);
+bool        link_fake_saw_available(void);
+bool        link_fake_saw_connected(void);
+uint16_t    link_fake_reset_count(void);
+const uint8_t *link_fake_sent(uint16_t *len);
+uint16_t    link_fake_write_count(void);    /* sock_write() calls since link_fake_reset() */
