@@ -144,6 +144,13 @@ extern "C" void setup(void) {
     hal_serial_write(b);
   }
 
+#if PB_SIM
+  hal_pin_mode(PIN_LED, PB_OUT);   /* hal_pin_mode()'s ONE caller in the tree: seam 1
+                                      declares it and nothing else in the program
+                                      configures an ordinary output pin */
+  hal_serial_write("SIM *** D6 NOT DRIVEN. This binary has no pump driver and no network stack.\n");
+#endif
+
   /* spec §2.5: a failed watchdog, ADC or heap assertion disables the network and says why in
      status. main.cpp holds the verdict; netfsm.cpp holds the flag, because [env:native]
      filters main.cpp out and no host test could otherwise reach it. */
@@ -209,6 +216,17 @@ static void ui_fill_(ui_state_t *s) {
                           s->lcd_detail = detail; }
 }
 
+#if PB_SIM
+/* 200 on / 200 off / 200 on / 1400 off: a rhythm no bench binary produces, readable across
+   a room. `PIN_LED` is include/pins.h's (task 2 step 5, the value 13) -- NOT
+   `LED_BUILTIN_PIN`, which is in no header, and NOT `LED_BUILTIN`, which is an
+   Arduino-header name main.cpp may not have (spec §9). */
+static void sim_blink_(void) {
+  const uint32_t p = hal_millis() % 2000u;
+  hal_pin_write(PIN_LED, (p < 200u || (p >= 400u && p < 600u)) ? PB_HIGH : PB_LOW);
+}
+#endif
+
 extern "C" void loop(void) {
   safety_tick();               /* pump idle re-asserted (D6's direction repaired), then fed */
   cli_poll();                  /* one whole line; may block, but only through safety_wait_ms() */
@@ -223,4 +241,7 @@ extern "C" void loop(void) {
                                                  in the one pass with no AT command. */
   ui_fill_(&g_ui);
   ui_poll(&g_ui);              /* no-ops while dosing, while the cart moves, or after a modem pass */
+#if PB_SIM
+  sim_blink_();
+#endif
 }

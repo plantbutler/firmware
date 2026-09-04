@@ -20,6 +20,7 @@ bringup:
 sim:
 	@echo "SIM BUILD - the 12 V brick must be unplugged"
 	$(PIO) run -e uno_r4_wifi_sim -t upload
+	cp .pio/build/uno_r4_wifi_sim/firmware.bin firmware-SIM.bin
 
 calib:
 	@echo "BRING-UP 7b: upload the bringup binary, then type calib in the monitor"

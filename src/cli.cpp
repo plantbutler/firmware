@@ -382,6 +382,69 @@ static bool cli_dispatch_bringup_(const char *line) {
 }
 #endif /* PB_BRINGUP */
 
+#if PB_SIM_CLI
+#include "sim.h"           /* the injectors AND link_fake_queue_response(): task 21 put the
+                              link_fake_* control surface at the end of this header, and
+                              there is no include/link_fake.h in this tree */
+
+/* spec §8. Each of these maps to a bring-up step or a finding:
+   float 0|1        -> 5a, and dropping it mid-dose is 5b
+   flow <ml_s>      -> the prime abort at 0; a mid-dose stop is the stall abort (7b)
+   flow storm       -> DOSE_REFUSED_NOISE / DOSE_ABORT_NOISE
+   i2c fail|ok      -> position unknown, pump refused, pos=unknown
+   mux stuck        -> the canary, err=stuck
+   stall on|off     -> goto aborts, position lost
+   leak on          -> ch205 rises and err=leak
+   wdt stop         -> hal_wdt_alive() false, every dose refused
+   wdt slow <hz>    -> delta below PB_WDT_PROBE_MIN_COUNTS
+   noinit clobber   -> the checksum fails and it reads as a cold boot
+   ch <0-5> <raw>   -> plant a raw count
+   resp "<body>"    -> the ack offbeat, on a desk
+   reset warm|cold  -> re-enter setup() with .noinit kept or cleared */
+static bool cmd_sim_(const char *a) {
+  uint32_t v = 0, w = 0;
+  if (strcmp(a, "float 0") == 0)  { sim_set_float(false);   return true; }
+  if (strcmp(a, "float 1") == 0)  { sim_set_float(true);    return true; }
+  if (strcmp(a, "flow storm") == 0) { sim_flow_storm(10000u); return true; }
+  if (strncmp(a, "flow ", 5) == 0 && parse_u32_(a + 5, &v) && v <= 65535u) {
+    sim_set_flow_ml_s((uint16_t)v); return true;
+  }
+  if (strcmp(a, "i2c fail") == 0) { sim_set_i2c_fail(true);  return true; }
+  if (strcmp(a, "i2c ok") == 0)   { sim_set_i2c_fail(false); return true; }
+  if (strcmp(a, "mux stuck") == 0){ sim_set_mux_stuck(true); return true; }
+  if (strcmp(a, "stall on") == 0) { sim_set_stall(true);     return true; }
+  if (strcmp(a, "stall off") == 0){ sim_set_stall(false);    return true; }
+  if (strcmp(a, "leak on") == 0)  { sim_set_leak(true);      return true; }
+  if (strcmp(a, "wdt stop") == 0) { sim_wdt_stop();          return true; }
+  if (strncmp(a, "wdt slow ", 9) == 0 && parse_u32_(a + 9, &v)) {
+    sim_wdt_rate_hz(v); return true;
+  }
+  if (strcmp(a, "noinit clobber") == 0) { sim_noinit_clobber(); return true; }
+  if (strncmp(a, "ch ", 3) == 0) {
+    const char *sp = strchr(a + 3, ' ');
+    char chbuf[4];
+    if (!sp || (size_t)(sp - (a + 3)) >= sizeof chbuf) return false;
+    memcpy(chbuf, a + 3, (size_t)(sp - (a + 3)));
+    chbuf[sp - (a + 3)] = '\0';
+    if (!parse_u32_(chbuf, &v) || v >= PB_CHANNELS) return false;
+    if (!parse_u32_(sp + 1, &w) || w > 16383u) return false;
+    sim_set_channel((uint8_t)v, (uint16_t)w);
+    return true;
+  }
+  if (strncmp(a, "resp \"", 6) == 0) {
+    const char *body = a + 6;
+    size_t n = strlen(body);
+    if (n == 0 || body[n - 1] != '"') return false;
+    link_fake_queue_response(body, n - 1);
+    return true;
+  }
+  if (strcmp(a, "reset warm") == 0) { sim_reset(true);  return true; }
+  if (strcmp(a, "reset cold") == 0) { sim_reset(false); return true; }
+  hal_serial_write("sim: unknown injector; see spec section 8\n");
+  return false;
+}
+#endif /* PB_SIM_CLI */
+
 bool cli_dispatch(const char *line) {
   if (strcmp(line, "i2c")    == 0) { cmd_i2c_();    return true; }
   if (strncmp(line, "mux ", 4) == 0) return cmd_mux_(line + 4);
@@ -419,6 +482,9 @@ bool cli_dispatch(const char *line) {
   }
 #if PB_BRINGUP
   if (cli_dispatch_bringup_(line)) return true;
+#endif
+#if PB_SIM_CLI
+  if (strncmp(line, "sim ", 4) == 0) return cmd_sim_(line + 4);
 #endif
   hal_serial_write("? unknown; type help\n");
   return false;

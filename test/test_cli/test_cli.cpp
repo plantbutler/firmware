@@ -621,6 +621,70 @@ static void test_bringup_commands_are_absent_from_the_bench_build(void) {
 #endif
 }
 
+/* task 29: the whole `sim ...` console family, one dispatch per injector, plus the two
+   range/parse rejections that must return false rather than crash or silently accept. */
+static void test_every_sim_command_is_parsed_and_dispatched(void) {
+  pb_test_setup();
+#if PB_SIM_CLI
+  TEST_ASSERT_TRUE(cli_dispatch("sim float 0"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim float 1"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim flow 30"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim flow storm"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim i2c fail"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim i2c ok"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim mux stuck"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim stall on"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim stall off"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim leak on"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim wdt stop"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim wdt slow 100"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim noinit clobber"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim ch 2 8123"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim resp \"next=60\\ncmd=7 water=3 ml=120 cap_s=11\\n\""));
+  TEST_ASSERT_TRUE(cli_dispatch("sim reset warm"));
+  TEST_ASSERT_TRUE(cli_dispatch("sim reset cold"));
+  TEST_ASSERT_FALSE(cli_dispatch("sim ch 9 1"));       /* channel out of 0..5 */
+  TEST_ASSERT_FALSE(cli_dispatch("sim nonsense"));
+#else
+  /* Deviation from the brief's literal test body, noted in this task's commit message:
+     PB_SIM_CLI undefined ([env:native_nosimcli]) makes every `sim ...` token NOT A
+     COMMAND AT ALL, so the unconditional TEST_ASSERT_TRUE calls above cannot compile true
+     in that arm. Guarded the same way test_pump_ms_is_clamped_to_the_hard_cap and every
+     other #if PB_BRINGUP case in this same file already is, so `pio test -e
+     native_nosimcli -f test_cli` reports this case IGNORED rather than FAILED - "both
+     runs green" (step 8) means zero failures, exactly like the ten pre-existing ignores
+     the baseline already carries, not that every case executes its assertions in every
+     env. */
+  TEST_IGNORE_MESSAGE("PB_SIM_CLI is undefined: `sim ...` is not a command at all");
+#endif
+}
+
+/* The absence case: [env:native_nosimcli] undefines PB_SIM_CLI alone (not PB_SIM, which
+   would leave the host suite linking against no HAL at all - task 28's gate), so this
+   case is compiled twice, once per env, exactly as test_bringup_commands_are_absent_
+   from_the_bench_build above is compiled once per env:native/-UPB_BRINGUP. */
+static void test_sim_commands_are_absent_from_the_bench_and_bringup_builds(void) {
+#ifdef PB_SIM_CLI
+  TEST_ASSERT_TRUE(cli_dispatch("sim float 0"));
+#else
+  TEST_ASSERT_FALSE(cli_dispatch("sim float 0"));      /* not a command at all */
+#endif
+}
+
+/* EXACT, not a substring: an earlier draft had "*** SIM: D6 NOT" on the OLED and
+   "*** SIM: NO D6 *" on the LCD, and a substring check for "SIM" would have shipped that
+   truncation. Task 10's renderers, task 29's banner text. */
+static void test_the_sim_banner_holds_row_zero_on_both_screens(void) {
+  ui_state_t s = base_state();
+  s.sim = true;
+  char oled[8][17], lcd[2][17];
+  ui_render(&s, oled);
+  ui_render_lcd(&s, lcd);
+  TEST_ASSERT_EQUAL_STRING("*** SIM NO D6 **", oled[0]);
+  TEST_ASSERT_EQUAL_STRING("*** SIM NO D6 **", lcd[0]);
+  TEST_ASSERT_NULL(strstr(oled[0], "PB "));            /* the banner WINS row 0 */
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_ui_render_fills_eight_rows_of_sixteen_characters);
@@ -650,5 +714,8 @@ int main(void) {
   RUN_TEST(test_dose_summary_line_prints_r_ok_only_for_a_successful_dose);
   RUN_TEST(test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls);
   RUN_TEST(test_bringup_commands_are_absent_from_the_bench_build);
+  RUN_TEST(test_every_sim_command_is_parsed_and_dispatched);
+  RUN_TEST(test_sim_commands_are_absent_from_the_bench_and_bringup_builds);
+  RUN_TEST(test_the_sim_banner_holds_row_zero_on_both_screens);
   return UNITY_END();
 }

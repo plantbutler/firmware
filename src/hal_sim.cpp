@@ -7,6 +7,9 @@
 #include "noinit.h"
 #include "pulses.h"
 #include <string.h>
+#ifndef PB_NATIVE
+#include "sim_console.h"      /* the device-only shim (task 29); native never links it */
+#endif
 
 #if PB_SIM
 
@@ -480,7 +483,10 @@ bool hal_wdt_alive(void) {
 bool hal_irq_armed(uint8_t pin)    { return pin == PIN_FLOW || pin == PIN_HALL_SCREW; }
 bool hal_irq_filtered(uint8_t pin) { return pin == PIN_FLOW || pin == PIN_HALL_SCREW; }
 
-/* ---- serial ---- */
+/* ---- the console. ONE file, two arms. On the host this is the fake UART, byte for byte
+   as task 3 wrote it. In the sim binary on a real board it is src/sim_console.cpp, the
+   device-only shim, and hal_sim.cpp itself is unchanged between the two. ---- */
+#ifdef PB_NATIVE
 size_t hal_serial_read(char *buf, size_t cap) {
   size_t n = 0;
   while (n < cap && g_rx_pos < g_rx_len) buf[n++] = g_rx[g_rx_pos++];
@@ -491,6 +497,15 @@ void hal_serial_write(const char *s) {
   g_tx[g_tx_len] = '\0';
 }
 void hal_serial_drain(void) { g_rx_pos = g_rx_len; }
+#else
+size_t hal_serial_read(char *buf, size_t cap) { return sim_console_read(buf, cap); }
+void   hal_serial_write(const char *s)        { sim_console_write(s); }
+void   hal_serial_drain(void) {
+  char b[32];
+  for (uint8_t i = 0; i < 8u; ++i)            /* BOUNDED: 256 bytes, never "until empty" */
+    if (sim_console_read(b, sizeof b) == 0) return;
+}
+#endif
 void sim_serial_rx(const char *s) {
   size_t n = strlen(s);
   if (g_rx_len + n > sizeof g_rx) n = sizeof g_rx - g_rx_len;
@@ -522,6 +537,9 @@ void hal_begin(void) {
   g_mux_sel = 0;
   g_exp_port = 0xFFFFu;
   g_servo_us = 1500u;
+#ifndef PB_NATIVE
+  sim_console_begin();     /* the real UART, in the one binary that has one */
+#endif
 }
 
 /* A partial clobber: the magic survives, the checksum does not. That is the shape

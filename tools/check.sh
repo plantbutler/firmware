@@ -213,13 +213,14 @@ check 0 'for[[:space:]]*\([[:space:]]*;[[:space:]]*;[[:space:]]*\)|while[[:space
 check 0 'String|std::map|std::string|(^|[^[:alnum:]_])new([^[:alnum:]_]|$)|malloc[[:space:]]*\(' \
   include src test lib/Manifold -- \
   "no dynamic allocation outside lib/Network and lib/Screen"
-# Task 29 widens this ONE exclusion to sim_console.cpp, the device-only console shim the
-# sim binary needs, and records it as a deviation from §9's table in its own commit. It is
-# the only widening this line ever takes. (It used to also exclude Manifold.cpp, for the
-# same dead-orphaned-code reason as the block above; task 14 deleted that file and this
-# exclusion with it, in the same commit.)
-check 0 'Arduino\.h' include src lib/Manifold --exclude=hal_uno.cpp -- \
-  "the Arduino header lives only in hal_uno.cpp, lib/Network and lib/Screen"
+# spec §9 names three homes for the Arduino header; src/sim_console.cpp is a FOURTH, added
+# by task 29 and recorded as a deviation in that task's commit message. It exists so that
+# hal_sim.cpp stays byte-identical between the sim binary and the host suites, which is the
+# whole reason one fake serves both. It is the only widening this line ever takes.
+expect 0 "$(grep -rEn 'Arduino\.h' include src test lib/Manifold \
+              --exclude=hal_uno.cpp --exclude=sim_console.cpp \
+              2>/dev/null | wc -l | tr -d ' ')" \
+  "the Arduino header lives only in hal_uno.cpp, sim_console.cpp, lib/Network and lib/Screen"
 check 0 'WiFi\.ping' "${SCAN[@]}" -- \
   "ping is never called (it resets the modem timeout to 10 s)"
 
@@ -233,6 +234,21 @@ check 0 'WiFi\.ping' "${SCAN[@]}" -- \
 # test/ makes make check fail on every task from 20 onward.
 check_files 2 'PB_BRINGUP' src lib -- \
   "PB_BRINGUP appears in src/cli.cpp and src/main.cpp, and in no other source file"
+
+# ---- sim: spec §8. The sim binary compiles no pump driver at all. ----
+# It greps the file set the env compiles, not a linker map: PIN_PUMP_EN is a macro and
+# leaves no symbol, so a map cannot prove this.
+if [ -d .pio/build/uno_r4_wifi_sim ]; then
+  if [ -e .pio/build/uno_r4_wifi_sim/src/hal_uno.cpp.o ]; then
+    fail "the sim env compiled hal_uno.cpp: D6 could be driven with 12 V on COM"
+  else
+    ok "the sim env compiles no pump driver"
+  fi
+  [ -e .pio/build/uno_r4_wifi_sim/src/hal_sim.cpp.o ] || \
+    fail "the sim env compiled no HAL at all - check build_src_filter"
+else
+  printf 'skip  sim file set (run: pio run -e uno_r4_wifi_sim)\n'
+fi
 
 if [ "$fails" -gt 0 ]; then
   printf '\n%s invariant(s) FAILED\n' "$fails" >&2
