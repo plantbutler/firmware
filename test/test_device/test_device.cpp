@@ -12,6 +12,7 @@
 #include "hal.h"
 #include "link.h"
 #include <unity.h>
+#include <stdio.h>   /* snprintf, for the wdt probe's TEST_MESSAGE */
 
 void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
@@ -29,6 +30,12 @@ static void test_sock_open_from_a_stale_socket_completes_within_the_wdt_window(v
   while (link_state() != LINK_UP && hal_millis() < 30000u) { safety_tick(); }
   TEST_ASSERT_EQUAL_INT(LINK_UP, link_state());
   TEST_ASSERT_TRUE(sock_open());          /* leave it open and abandon it on purpose */
+  /* No safety_tick() between the close and the re-open, and that is deliberate: the device
+     pb_test_setup() does NOT start the dog, so nothing is counting down here. Do not "fix"
+     that by moving hal_wdt_start() into the device setup the way the host arm does -- the
+     two ATs this pair costs (up to 2 x PB_NET_STEP_MS) would then run unfed, and a slow
+     round-trip would reset the board mid-suite with no diagnostic and no failing assert.
+     The dog is started by the LAST case, on purpose. */
   uint32_t t0 = hal_millis();
   sock_close();
   bool again = sock_open();
@@ -62,7 +69,16 @@ static void test_wdt_alive_returns_true_on_real_silicon(void) {
   TEST_ASSERT_TRUE(hal_wdt_start());
   TEST_ASSERT_EQUAL_UINT32(PB_WDT_GRANTED_MS, hal_wdt_granted());
   TEST_ASSERT_TRUE(hal_wdt_alive());
-  TEST_ASSERT_GREATER_OR_EQUAL_UINT32(PB_WDT_PROBE_MIN_COUNTS, hal_wdt_last_delta());
+  /* NOT a second assertion: hal_wdt_alive() RETURNS delta >= PB_WDT_PROBE_MIN_COUNTS
+     (hal_uno.cpp:160), so asserting that again cannot fail independently of the line above.
+     What is actually wanted from a case that has never executed is the number itself, so
+     the operator running this on the bench sees how much margin the probe really had. */
+  {
+    char m[64];
+    snprintf(m, sizeof m, "wdt probe: delta=%lu min=%lu",
+             (unsigned long)hal_wdt_last_delta(), (unsigned long)PB_WDT_PROBE_MIN_COUNTS);
+    TEST_MESSAGE(m);
+  }
 }
 
 /* setup()/loop() are declared inside an extern "C" block by arduino_main() (api/Common.h,
