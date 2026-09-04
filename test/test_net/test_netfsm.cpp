@@ -1025,6 +1025,48 @@ static void test_a_backend_command_never_sets_hang(void) {
 #endif
 }
 
+static void test_the_cached_accessors_fill_after_a_join_and_cost_nothing(void) {
+  sensors_begin();
+  net_begin();
+  /* Before any join the cache must read as "no link" rather than as leftovers. */
+  TEST_ASSERT_EQUAL_UINT8(0, net_link());
+  TEST_ASSERT_EQUAL_INT8(0, net_rssi());
+  TEST_ASSERT_EQUAL_STRING("0.0.0.0", net_ip());
+
+  link_fake_queue_response(k200, strlen(k200));
+  pb_net_passes(20, 100);
+  TEST_ASSERT_EQUAL_UINT8(2, net_link());                    /* LINK_UP, cached in JOIN_WAIT */
+  TEST_ASSERT_EQUAL_INT8(-52, net_rssi());                   /* the fake's fixed answers, so */
+  TEST_ASSERT_EQUAL_STRING("192.168.1.42", net_ip());        /* the refresh passes really ran */
+
+  /* The whole point of the accessors: reading them is free. ui_fill_() calls all three on
+     every loop() pass, and against the real driver that was ~5 ATs stacked on the FSM's own. */
+  link_fake_pass_begin();
+  (void)net_link(); (void)net_rssi(); (void)net_ip(); (void)net_desyncs();
+  TEST_ASSERT_EQUAL_UINT16(0, link_fake_at_count());
+}
+
+static void test_a_dropped_link_clears_the_cached_signal_and_address(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  pb_net_passes(20, 100);
+  TEST_ASSERT_EQUAL_STRING("192.168.1.42", net_ip());        /* armed, so the clear is visible */
+
+  /* A join the FSM gives up on must not leave `status` showing the address of a link that has
+     already ended -- a stale address reads as a working board. */
+  link_fake_drop_link();
+  int guard = 0;
+  while (net_state() != NET_DOWN && guard++ < 200) {
+    link_fake_timeout_next();
+    pb_net_passes(1, 1000);
+  }
+  TEST_ASSERT_EQUAL(NET_DOWN, net_state());
+  TEST_ASSERT_EQUAL_UINT8(0, net_link());
+  TEST_ASSERT_EQUAL_INT8(0, net_rssi());
+  TEST_ASSERT_EQUAL_STRING("0.0.0.0", net_ip());
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -1076,5 +1118,7 @@ int main(void) {
   RUN_TEST(test_err_recv_never_reaches_the_wire);
   RUN_TEST(test_a_backend_dose_prints_the_per_dose_summary_line);
   RUN_TEST(test_a_backend_command_never_sets_hang);
+  RUN_TEST(test_the_cached_accessors_fill_after_a_join_and_cost_nothing);
+  RUN_TEST(test_a_dropped_link_clears_the_cached_signal_and_address);
   return UNITY_END();
 }
