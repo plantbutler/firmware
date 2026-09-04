@@ -93,12 +93,37 @@ static uint32_t g_screw_pulse_ms;          /* 0 == the screw does not turn at al
 static uint32_t g_home_lo, g_home_hi;      /* sim_reset() sets [0, 40] */
 static uint32_t g_screw_pos;
 
+/* ---- capacities for the three buffers below: a HOST default and a DEVICE default, not
+   one shrunk constant. The host suites capture whole console lines and dose-length event
+   traces for assertions, on a machine where 12 KB is noise; [env:uno_r4_wifi_sim] has to
+   find these same three inside a 32 KB part that also carries the framework, WiFiS3's
+   headers (unused code, still linked) and every other static in the image. Nothing on the
+   device ever reads g_rx/g_tx back — hal_serial_read()/hal_serial_write()'s device arm
+   (below) goes through sim_console.cpp's real UART instead, and sim_serial_rx()/
+   sim_serial_tx() (task 28: the injectors are never gated) have no caller in a device
+   build; they are still compiled, so the arrays cannot be dropped to zero, but the choice
+   of "how much" no longer answers to anything but "not zero". g_ev is the one of the three
+   with an on-device reader in prospect (a future `sim events` dump), so it gets the larger
+   of the three device numbers: enough for one bring-up step's worth of pin/I2C/servo/WDT
+   admin (a single sensors_sweep() or safety_tick() pass is a few dozen events; 64 is
+   several such passes, not one). See this task's commit message for the host figure that
+   justifies leaving 1024 alone rather than trimming it too. */
+#ifdef PB_NATIVE
+#define SIM_RX_CAP 256
+#define SIM_TX_CAP 4096
+#define SIM_EV_CAP 1024
+#else
+#define SIM_RX_CAP 32
+#define SIM_TX_CAP 64
+#define SIM_EV_CAP 64
+#endif
+
 /* ---- serial ---- */
-static char   g_rx[256]; static size_t g_rx_len, g_rx_pos;
-static char   g_tx[4096]; static size_t g_tx_len;
+static char   g_rx[SIM_RX_CAP]; static size_t g_rx_len, g_rx_pos;
+static char   g_tx[SIM_TX_CAP]; static size_t g_tx_len;
 
 /* ---- call trace ---- */
-static sim_ev_t g_ev[1024];
+static sim_ev_t g_ev[SIM_EV_CAP];
 static size_t   g_ev_n;
 
 static void ev_(sim_ev_kind_t k, uint8_t pin, uint32_t arg) {
