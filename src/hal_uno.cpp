@@ -55,9 +55,8 @@ uint32_t hal_micros(void) { return (uint32_t)micros(); }
 void     hal_delay_us(uint16_t us) { delayMicroseconds(us); }
 
 /* ------------------------------------------------------------------- ordinary pins */
-void hal_pin_mode(uint8_t pin, uint8_t mode) {
-  pinMode(pin, mode == PB_OUT ? OUTPUT : INPUT_PULLUP);
-}
+/* hal_pin_mode() was deleted here, task 30: it had no caller anywhere in the tree.
+   See include/hal.h's comment on the deletion. */
 int  hal_pin_read(uint8_t pin) { return digitalRead(pin) == HIGH ? PB_HIGH : PB_LOW; }
 void hal_pin_write(uint8_t pin, uint8_t level) { digitalWrite(pin, level ? HIGH : LOW); }
 

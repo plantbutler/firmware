@@ -13,7 +13,16 @@ uint32_t hal_millis(void);
 uint32_t hal_micros(void);                 /* ADDED to the printed seam: the ISR gap rejects of
                                               §2.14 are 500 us and 2000 us, not milliseconds */
 void     hal_delay_us(uint16_t us);        /* the ONLY sub-ms wait; never > 200 us */
-void     hal_pin_mode(uint8_t pin, uint8_t mode);   /* NEVER for D2, D3 or D6 */
+/* hal_pin_mode() and PIN_LED (pins.h) were deleted together, task 30: neither had a
+   caller anywhere in the tree. The original plan routed the sim console's blink through
+   this seam (hal_pin_mode(PIN_LED, PB_OUT) + hal_pin_write(PIN_LED, ...)), but hal_sim.cpp's
+   hal_pin_write() only appends to the fake rig's event trace and drives no real pin in the
+   sim build (build_src_filter excludes hal_uno.cpp there) -- fix round 1 (task 29) moved
+   the blink to real pinMode()/digitalWrite()/LED_BUILTIN in the device-only
+   src/sim_console.cpp instead, which left this seam entry with zero callers. An unused
+   seam function with no invariant over it is exactly how src/link_wifi.cpp went uncompiled
+   for five tasks without anyone noticing -- see lib/Network/include/Network.h -- so it is
+   deleted rather than kept as a hopeful stub. */
 int      hal_pin_read(uint8_t pin);
 void     hal_pin_write(uint8_t pin, uint8_t level);
 

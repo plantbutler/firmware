@@ -329,7 +329,11 @@ bool     sim_pump_is_on(void)    { return g_pump_on; }
 uint32_t sim_pump_on_ms(void)    { return g_pump_on_us / 1000u; }
 
 /* ---- ordinary pins ---- */
-void hal_pin_mode(uint8_t pin, uint8_t mode) { ev_(SIM_EV_PIN_MODE, pin, mode); }
+/* hal_pin_mode() was deleted here, task 30: it had no caller anywhere in the tree, on
+   the host or the device (see include/hal.h's comment on the deletion). SIM_EV_PIN_MODE
+   (include/sim.h) is left declared: test_dose.cpp's test_pinmode_is_never_called_on_
+   the_pump_pin still counts it, and it is now permanently zero because nothing emits it
+   any more, which is the correct answer for a pin no seam 1 function ever configures. */
 void hal_pin_write(uint8_t pin, uint8_t level) {
   ev_(SIM_EV_PIN_CFG, pin, SIM_PFS_DIR_OUT | (level ? SIM_PFS_LEVEL_HI : 0u));
 }

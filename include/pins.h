@@ -28,12 +28,13 @@ PB_RELAY_ACTIVE_HIGH in platformio.ini build_flags after you have READ THE MODUL
 #define PIN_SERVO          9   /* SG90 continuous servo, manifold 1. A servo needs its 50 Hz
                                   train unbroken, so it is a direct pin, never the expander.
                                   SEE THE NOTE IN STEP 6 BEFORE YOU TRUST THIS NUMBER. */
-#define PIN_LED           13   /* NOT FROM THE SPEC, and not from cad/wiring either: it is the
-                                  board's own LED_BUILTIN. §8's sim double-blink is the only
-                                  consumer (task 29), and it must not spell `LED_BUILTIN` —
-                                  that name comes from the Arduino header, which task 29's
-                                  callers may not include (spec §9). Named here so exactly one
-                                  file in the tree holds the number. */
+/* PIN_LED (13, the board's own LED_BUILTIN) was deleted here, task 30: the plan's original
+   consumer -- hal_pin_mode(PIN_LED, ...)/hal_pin_write(PIN_LED, ...), so that exactly one
+   file held the number -- was superseded by fix round 1 (task 29), which blinks through
+   real pinMode()/digitalWrite()/LED_BUILTIN in the device-only src/sim_console.cpp
+   instead (see include/hal.h's comment on hal_pin_mode's own deletion). Nothing reads
+   PIN_LED any more; LED_BUILTIN is the Arduino core's own name for pin 13 and needs no
+   second one here. */
 #define PIN_MUX_ADC       14   /* A0 == PIN_A0 == 14u
                                   (framework-arduinorenesas-uno/variants/UNOWIFIR4/
                                    pins_arduino.h:15). MUX1 SIG lands here. */
