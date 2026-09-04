@@ -44,9 +44,23 @@ static void test_the_fake_counts_at_commands_per_pass(void) {
   TEST_ASSERT_EQUAL_UINT16(0, link_fake_at_count());
 }
 
+static void test_a_second_link_reset_still_produces_a_working_at_round_trip(void) {
+  up();
+  link_reset();
+  TEST_ASSERT_EQUAL_UINT16(1, link_fake_reset_count());
+  TEST_ASSERT_EQUAL_UINT16(1, link_desyncs());
+  link_join();                          /* must resync: 2 ATs into a REOPENED UART */
+  TEST_ASSERT_EQUAL(LINK_UP, link_state());
+  link_reset();                         /* and again — this is the one that used to die */
+  link_join();
+  TEST_ASSERT_EQUAL(LINK_UP, link_state());
+  TEST_ASSERT_EQUAL_UINT16(2, link_fake_reset_count());
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
   RUN_TEST(test_the_fake_counts_at_commands_per_pass);
+  RUN_TEST(test_a_second_link_reset_still_produces_a_working_at_round_trip);
   return UNITY_END();
 }

@@ -87,6 +87,14 @@ int sock_read(uint8_t *b, size_t cap) {
 
 void sock_close(void) { if (g_sock >= 0) { (void)at_(); g_sock = -1; } }
 
+void link_reset(void) {
+  g_serial_open = false;        /* modem.end() — Modem.cpp:45-48 */
+  g_beginned = false;           /* Modem.cpp:45-48 never does this. Without it, begin() no-ops. */
+  if (!g_beginned) { g_beginned = true; g_serial_open = true; }   /* modem.begin() */
+  g_state = LINK_DOWN; g_join_pending = false; g_sock = -1;
+  ++g_desyncs; ++g_resets;
+}
+
 void link_fake_reset(void) {
   g_state = LINK_DOWN; g_beginned = false; g_serial_open = false; g_join_pending = false;
   g_sock = -1; g_fail_open = false; g_timeout_next = false;
