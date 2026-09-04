@@ -9,6 +9,7 @@
 #include "link.h"
 #include "netfsm.h"
 #include "report.h"
+#include "safety.h"
 #include "secrets.h"
 #include "sensors.h"
 #include "sim.h"
@@ -284,6 +285,38 @@ static void test_stale_bytes_in_the_rx_buffer_cannot_become_a_command(void) {
   TEST_ASSERT_EQUAL_UINT32(1, net_reports_failed());   /* it must count as the timeout it is */
 }
 
+static uint16_t g_at_in_dose;
+static net_state_t g_state_in_dose;
+static void poke_net_from_inside_the_dose(void) {
+  link_fake_pass_begin();
+  /* safety_dosing() is TRUE here — we are inside hal_pump_write(true) — and this is the one
+     call site in the suite that must pass it, because it is the guard under test. */
+  net_poll(safety_dosing());
+  g_at_in_dose = link_fake_at_count();
+  g_state_in_dose = net_state();
+}
+
+static void test_poll_is_a_noop_while_the_pump_is_asserted(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  pump_passes(4);                              /* park the FSM somewhere with work to do */
+  const net_state_t before = net_state();
+  sim_set_float(true);
+  sim_set_flow_ml_s(30);
+  sim_on_pump_on(poke_net_from_inside_the_dose);
+  /* dose_run()'s ladder refuses DOSE_REFUSED_BOOT below PB_BOOT_GAP_MS (safety.cpp), and
+     pump_passes(4) alone leaves the fake clock nowhere near that -- without this the pump
+     never asserts, poke_net_from_inside_the_dose() never runs, and both asserts below pass
+     vacuously on g_at_in_dose/g_state_in_dose's zero-initialised defaults. Same shape as
+     harness.h's own pb_latch_contra(). */
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  dose_req_t q = { 0, 0, true, 1500, false, false };   /* by_time, no position needed */
+  (void)dose_run(&q);
+  TEST_ASSERT_EQUAL_UINT16(0, g_at_in_dose);   /* not one AT command while D6 is hot */
+  TEST_ASSERT_EQUAL(before, g_state_in_dose);  /* and not one state transition either */
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -300,5 +333,6 @@ int main(void) {
   RUN_TEST(test_sock_read_calls_neither_available_nor_connected);
   RUN_TEST(test_response_is_never_parsed_from_a_four_hundred_body);
   RUN_TEST(test_stale_bytes_in_the_rx_buffer_cannot_become_a_command);
+  RUN_TEST(test_poll_is_a_noop_while_the_pump_is_asserted);
   return UNITY_END();
 }

@@ -40,6 +40,11 @@ void     sim_flow_storm_at_pump_on(uint32_t hz);
 /* Deliver exactly n flow pulses immediately after the ON write, then nothing, ever. The
    stall rule's fixture: a dose that flowed briefly and stopped (task 18 step 7). */
 void     sim_set_flow_burst_pulses(uint32_t n);
+/* Called ONCE, from inside the next pump assertion (i.e. from inside hal_pump_write(true),
+   before it returns) -- the fixture for a case that has to observe net_poll() from a point
+   dose_run() alone can reach, because dose_run() blocks and safety_dosing() has no setter
+   by design. Task 24. */
+void     sim_on_pump_on(void (*cb)(void));
 /* Scheduled injectors, both measured from the next pump-on: apply the change when the
    fake's clock reaches `ms` into the dose. Task 18 step 8's two mid-dose console cases use
    the second; task 19 step 4 uses both, and must not add a second spelling of either. */

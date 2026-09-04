@@ -70,6 +70,8 @@ static bool     g_float_due;      static uint32_t g_float_due_us;
 static bool     g_rx_at_armed;    static uint32_t g_rx_at_off_ms;
 static char     g_rx_at_buf[64];
 static bool     g_rx_due;         static uint32_t g_rx_due_us;
+static void   (*g_on_pump_on)(void);   /* sim_on_pump_on(): fires ONCE, from inside the next
+                                          hal_pump_write(true), then clears itself (task 24) */
 static bool     g_i2c_fail;
 static bool     g_mux_stuck;
 static bool     g_stall;
@@ -291,7 +293,9 @@ void hal_pump_write(bool on) {
     g_burst_left = 0u;
   }
   g_pump_on = on;
+  if (on && g_on_pump_on) { void (*cb)(void) = g_on_pump_on; g_on_pump_on = 0; cb(); }
 }
+void sim_on_pump_on(void (*cb)(void)) { g_on_pump_on = cb; }
 bool     hal_pump_level_on(void) { return true; }
 bool     sim_pump_is_on(void)    { return g_pump_on; }
 uint32_t sim_pump_on_ms(void)    { return g_pump_on_us / 1000u; }
@@ -508,6 +512,7 @@ void sim_reset(bool warm) {
   g_storm_on_armed = false; g_storm_on_hz = 0u; g_burst_left = 0u;
   g_float_at_armed = false; g_float_due = false;
   g_rx_at_armed    = false; g_rx_due    = false; g_rx_at_buf[0] = '\0';
+  g_on_pump_on     = 0;
   g_i2c_fail = false; g_mux_stuck = false; g_stall = false; g_leak = false;
   g_adc_settled = false; g_adc_prev = 0;
   memset(g_chan, 0, sizeof g_chan);
