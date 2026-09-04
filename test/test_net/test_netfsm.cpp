@@ -144,6 +144,95 @@ static void test_report_content_length_matches_the_bytes_actually_written(void) 
   TEST_ASSERT_EQUAL_UINT32((uint32_t)claimed, (uint32_t)(n - (uint16_t)(body - tx)));
 }
 
+/* A full first-ever round trip is DOWN -> JOIN_ISSUE -> JOIN_WAIT -> IDLE -> SOCK_CLOSE ->
+   CONNECT -> SEND -> RECV -> CLOSE -> SOCK_CLOSE -> IDLE: ten net_poll() calls, one state
+   transition per call (spec's own per-pass table, §3/§4.2), never eight -- confirmed by
+   tracing link_fake_at_count() and net_state() pass by pass against this file's own
+   reference netfsm.cpp. pump_passes(12) leaves two calls of margin once IDLE is reached
+   (idle passes are no-ops until g_next_s elapses, so the margin costs nothing). */
+static void test_socket_is_closed_on_success_error_timeout_and_a_failed_open(void) {
+  sensors_begin();
+  /* success */
+  net_begin(); link_fake_queue_response(k200, strlen(k200));
+  pump_passes(12);
+  TEST_ASSERT_EQUAL(NET_IDLE, net_state());
+  TEST_ASSERT_TRUE(sock_open());          /* the precondition holds: _sock was left -1 */
+  sock_close();
+  /* a failed open */
+  net_begin(); link_fake_fail_open(true);
+  pump_passes(12);
+  link_fake_fail_open(false);
+  TEST_ASSERT_TRUE(sock_open());          /* would be false if the failed open had not closed */
+  sock_close();
+  /* a timeout in RECV: no response was ever queued. Each pass's own AT round trips only
+     advance the fake clock by a couple of ms (sim.h's "hal_millis() advances the rig by
+     exactly 1 ms" contract), so reaching the 5 s PB_NET_DEADLINE_MS needs real elapsed time
+     between passes, not just more of them -- pb_net_passes()'s second argument, which
+     pump_passes() (this file's alias for it with ms hardwired to 0) cannot supply. 20 passes
+     x 500 ms comfortably crosses the deadline with passes to spare for the SOCK_CLOSE/IDLE
+     cleanup that follows it. */
+  net_begin();
+  pb_net_passes(20, 500u);
+  TEST_ASSERT_TRUE(sock_open());
+  sock_close();
+}
+
+static void test_connect_is_never_issued_without_a_close_in_a_prior_pass(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  net_state_t prev = net_state();
+  for (int i = 0; i < 24; ++i) {
+    link_fake_pass_begin();
+    net_poll(false);
+    if (net_state() == NET_CONNECT) TEST_ASSERT_EQUAL(NET_SOCK_CLOSE, prev);
+    prev = net_state();
+  }
+}
+
+static void test_no_pass_issues_more_than_two_at_commands(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  for (int i = 0; i < 40; ++i) {
+    link_fake_pass_begin();
+    net_poll(false);
+    TEST_ASSERT_TRUE(link_fake_at_count() <= 2);
+  }
+}
+
+static void test_every_error_exit_transitions_to_sock_close_rather_than_closing_inline(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_fail_open(true);
+  for (int i = 0; i < 24; ++i) {
+    link_fake_pass_begin();
+    net_state_t before = net_state();
+    net_poll(false);
+    if (before == NET_CONNECT) {
+      TEST_ASSERT_EQUAL(NET_SOCK_CLOSE, net_state());
+      TEST_ASSERT_EQUAL_UINT16(2, link_fake_at_count());  /* NOT 3: no inline _CLIENTCLOSE */
+      link_fake_fail_open(false);
+      return;
+    }
+  }
+  TEST_FAIL_MESSAGE("the FSM never reached NET_CONNECT");
+}
+
+static void test_sock_read_calls_neither_available_nor_connected(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  for (int i = 0; i < 40; ++i) {
+    link_fake_pass_begin();
+    net_state_t before = net_state();
+    net_poll(false);
+    if (before == NET_RECV) TEST_ASSERT_EQUAL_UINT16(1, link_fake_at_count());
+  }
+  TEST_ASSERT_FALSE(link_fake_saw_available());
+  TEST_ASSERT_FALSE(link_fake_saw_connected());
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -153,5 +242,10 @@ int main(void) {
   RUN_TEST(test_sock_write_records_the_bytes_and_the_write_count);
   RUN_TEST(test_http_post_carries_host_token_and_content_length);
   RUN_TEST(test_report_content_length_matches_the_bytes_actually_written);
+  RUN_TEST(test_socket_is_closed_on_success_error_timeout_and_a_failed_open);
+  RUN_TEST(test_connect_is_never_issued_without_a_close_in_a_prior_pass);
+  RUN_TEST(test_no_pass_issues_more_than_two_at_commands);
+  RUN_TEST(test_every_error_exit_transitions_to_sock_close_rather_than_closing_inline);
+  RUN_TEST(test_sock_read_calls_neither_available_nor_connected);
   return UNITY_END();
 }
