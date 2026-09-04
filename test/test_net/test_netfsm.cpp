@@ -562,6 +562,151 @@ static void test_a_modem_timeout_poisons_the_link_and_counts_a_desync(void) {
   TEST_FAIL_MESSAGE("the FSM never reached NET_CONNECT");
 }
 
+/* Fix round 1, finding 2: the review disabled each of the six "any modem timeout poisons"
+   brackets in turn and found four of them uncaught by anything in this suite --
+   NET_JOIN_WAIT, NET_SOCK_CLOSE, NET_SEND and NET_RECV's r<0 branch. Only NET_CONNECT
+   (above) and NET_JOIN_ISSUE (test_link_drop_returns_to_joining_with_exponential_backoff,
+   below) were proven. One case per unproven site, same shape as the one above: force a
+   timeout on that site's own AT round trip and prove BOTH halves of poison() fired
+   (link_reset()'s desync count, link_down()'s NET_DOWN) -- either alone leaves a live bug
+   this bracket exists to catch. */
+
+static void test_a_modem_timeout_in_join_wait_poisons_the_link(void) {
+  sensors_begin();
+  net_begin();
+  net_poll(false);                              /* NET_DOWN -> NET_JOIN_ISSUE */
+  net_poll(false);                              /* issues the join -> NET_JOIN_WAIT */
+  TEST_ASSERT_EQUAL(NET_JOIN_WAIT, net_state());
+  link_fake_timeout_next();                     /* times out link_state()'s OWN AT this pass */
+  const uint16_t desyncs_before = link_desyncs();
+  const uint16_t resets_before = link_fake_reset_count();
+  net_poll(false);
+  TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
+  TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
+  TEST_ASSERT_EQUAL(NET_DOWN, net_state());      /* not left sitting in JOIN_WAIT for the
+                                                     5 s deadline to (much later) also catch */
+}
+
+static void test_a_modem_timeout_in_sock_close_poisons_the_link(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  /* the FIRST NET_SOCK_CLOSE of a report (right after IDLE) never opened a socket, so its
+     own sock_close() costs 0 ATs and can never time out (§3's table: 0 or 1 AT). Walk past
+     a full successful round trip to the SECOND one, entered from NET_CLOSE with the socket
+     CONNECT opened still allocated -- that is the one sock_close() actually has an AT to
+     lose. */
+  bool seen_close = false;
+  for (int i = 0; i < 40; ++i) {
+    link_fake_pass_begin();
+    const net_state_t before = net_state();
+    if (before == NET_CLOSE) seen_close = true;
+    if (seen_close && before == NET_SOCK_CLOSE) {
+      link_fake_timeout_next();
+      const uint16_t desyncs_before = link_desyncs();
+      const uint16_t resets_before = link_fake_reset_count();
+      net_poll(false);
+      TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
+      TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
+      TEST_ASSERT_EQUAL(NET_DOWN, net_state());
+      return;
+    }
+    net_poll(false);
+  }
+  TEST_FAIL_MESSAGE("never reached the socket-allocated NET_SOCK_CLOSE");
+}
+
+static void test_a_modem_timeout_in_send_poisons_the_link(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  for (int i = 0; i < 40; ++i) {
+    link_fake_pass_begin();
+    const net_state_t before = net_state();
+    if (before == NET_SEND) {
+      link_fake_timeout_next();
+      const uint16_t desyncs_before = link_desyncs();
+      const uint16_t resets_before = link_fake_reset_count();
+      net_poll(false);
+      TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
+      TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
+      TEST_ASSERT_EQUAL(NET_DOWN, net_state());   /* not NET_SOCK_CLOSE with a retry armed --
+                                                      that is what a bare send failure does */
+      return;
+    }
+    net_poll(false);
+  }
+  TEST_FAIL_MESSAGE("the FSM never reached NET_SEND");
+}
+
+static void test_a_modem_timeout_in_recv_poisons_the_link(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  for (int i = 0; i < 40; ++i) {
+    link_fake_pass_begin();
+    const net_state_t before = net_state();
+    if (before == NET_RECV) {
+      link_fake_timeout_next();     /* sock_read()'s own AT times out: r < 0, not r == 0 */
+      const uint16_t desyncs_before = link_desyncs();
+      const uint16_t resets_before = link_fake_reset_count();
+      net_poll(false);
+      TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
+      TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
+      TEST_ASSERT_EQUAL(NET_DOWN, net_state());   /* not NET_SOCK_CLOSE with a retry armed --
+                                                      that is what the deadline-expiry exit does */
+      return;
+    }
+    net_poll(false);
+  }
+  TEST_FAIL_MESSAGE("the FSM never reached NET_RECV");
+}
+
+/* Fix round 1, finding 3: NET_IDLE's own `g_retried = false; g_connect_starved = false;`
+   has no test that can fail, because every existing case drives exactly one report cycle
+   and net_begin()'s OWN reset (called once, at the top of the case) masks the gap. Drive
+   TWO report cycles back to back with no intervening net_begin() -- if the second report
+   inherited the first's spent retry, it would send once and be abandoned instead of
+   retrying, because finish()'s `!g_retried` would already read false walking in. */
+static void test_each_report_gets_its_own_single_retry(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response("", 0);              /* round 1: the server never answers at all */
+  const int sends1 = run_passes(120, 200);      /* 24 s: two RECV deadlines, inside the 30 s
+                                                    retry window -- same budget as
+                                                    test_an_exchange_that_produced_no_bytes_
+                                                    is_retried_exactly_once, above */
+  TEST_ASSERT_EQUAL_INT(2, sends1);             /* the original and its one retry */
+  TEST_ASSERT_EQUAL(NET_IDLE, net_state());
+
+  pb_advance(60000);            /* g_next_s is still 60 (no 200 ever arrived to change it),
+                                    so this alone makes round 2 due */
+  link_fake_queue_response("", 0);              /* round 2: also nothing, ever */
+  const int sends2 = run_passes(120, 200);
+  TEST_ASSERT_EQUAL_INT(2, sends2);             /* round 2 gets its OWN retry, not zero */
+}
+
+/* Fix round 1, finding 4: was_timeout()'s `(int32_t)(hal_millis() - t0) >= PB_NET_STEP_MS`
+   idiom is never exercised at the exact boundary through net_poll() -- hal_sim.cpp's own
+   "every hal_millis() read advances the rig by 1 ms" contract means capturing t0 costs one
+   tick and was_timeout()'s own hal_millis() call costs a second, so every timeout net_poll()
+   can ever manufacture reads PB_NET_STEP_MS + 1, never PB_NET_STEP_MS itself -- verified by
+   hand-tracing every poison test above. >= and > agree on PB_NET_STEP_MS + 1, so none of
+   the four poison tests just added above, nor the pre-existing ones, can tell the two
+   forms apart.
+   netfsm_test_was_timeout_() calls the real (only) copy of the comparison directly against a
+   clock landed on the boundary by hand, via sim_advance(), so the +1 never happens. */
+static void test_was_timeout_boundary_is_inclusive(void) {
+  const uint32_t t0 = hal_millis();
+  sim_advance(PB_NET_STEP_MS - 1u);   /* + netfsm_test_was_timeout_()'s own hal_millis() tick
+                                          == exactly PB_NET_STEP_MS elapsed */
+  TEST_ASSERT_TRUE(netfsm_test_was_timeout_(t0));
+
+  const uint32_t t1 = hal_millis();
+  sim_advance(PB_NET_STEP_MS - 2u);   /* + the same tick == PB_NET_STEP_MS - 1: one short */
+  TEST_ASSERT_FALSE(netfsm_test_was_timeout_(t1));
+}
+
 static void test_link_drop_returns_to_joining_with_exponential_backoff(void) {
   static const uint32_t ladder[] = PB_NET_BACKOFF_MS;
   sensors_begin();
@@ -628,6 +773,12 @@ int main(void) {
   RUN_TEST(test_a_five_oh_three_is_retried_once);
   RUN_TEST(test_report_body_is_byte_identical_on_the_retry);
   RUN_TEST(test_a_modem_timeout_poisons_the_link_and_counts_a_desync);
+  RUN_TEST(test_a_modem_timeout_in_join_wait_poisons_the_link);
+  RUN_TEST(test_a_modem_timeout_in_sock_close_poisons_the_link);
+  RUN_TEST(test_a_modem_timeout_in_send_poisons_the_link);
+  RUN_TEST(test_a_modem_timeout_in_recv_poisons_the_link);
+  RUN_TEST(test_each_report_gets_its_own_single_retry);
+  RUN_TEST(test_was_timeout_boundary_is_inclusive);
   RUN_TEST(test_link_drop_returns_to_joining_with_exponential_backoff);
   return UNITY_END();
 }

@@ -207,6 +207,11 @@ static bool was_timeout(uint32_t t0) {
   return (int32_t)(hal_millis() - t0) >= (int32_t)PB_NET_STEP_MS;
 }
 
+#ifdef PB_NATIVE
+void netfsm_test_reset_retry_(void) { g_retried = false; g_connect_starved = false; }
+bool netfsm_test_was_timeout_(uint32_t t0) { return was_timeout(t0); }
+#endif
+
 void net_poll(bool dosing) {
   g_modem_ran = false;
   if (g_disabled) return;              /* the boot assertion's consumer (§3) */

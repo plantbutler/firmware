@@ -4,6 +4,7 @@
 #include "cli.h"
 #include "config.h"
 #include "hal.h"
+#include "netfsm.h"
 #include "pulses.h"
 #include "report.h"
 #include "sensors.h"
@@ -84,7 +85,14 @@ static inline void pb_test_setup(void) {
    self-cleanup exactly like every static above, leaving the slot dirty for whatever runs next.
    Unlike the others this one needs no dedicated test-only wrapper: report_clear_ack() is
    already the production entry point exec_pending() will call, and it already does exactly
-   what teardown needs. */
+   what teardown needs.
+
+   netfsm_test_reset_retry_() is this list's NINTH entry, for the identical reason (task 25
+   fix round 1, finding 3): g_retried and g_connect_starved are process-lifetime statics in
+   netfsm.cpp with no reset path but net_begin() and NET_IDLE's own per-report reset. Every
+   case in test_netfsm.cpp today calls net_begin() as its own first or second statement,
+   which is exactly why this gap produced no failure on its own — the same shape as every
+   entry above it before ITS test existed. See netfsm.h's own declaration. */
 static inline void pb_test_teardown(void) {
   sim_events_clear();
   safety_set_dosing(false);
@@ -94,6 +102,7 @@ static inline void pb_test_teardown(void) {
   sensors_test_reset_health_();
   pulses_test_reset_leak_();
   report_clear_ack();
+  netfsm_test_reset_retry_();
 }
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }
@@ -118,10 +127,10 @@ static inline void pb_expect_no_feed_between(uint32_t from_ms, uint32_t to_ms) {
    and it is the ONLY way the latch can be set -- there is no setter, on purpose. */
 /* Drive n whole network passes, advancing the fake clock ms between them. THE ONE
    SPELLING: task 24's own cases, task 25's retry cases and task 26's ack-cycle cases all
-   use it, so a change to what "a pass" means lands once. Guarded #ifdef PB_SIM -- it names
-   the fake link, which the device test env filters out. */
+   use it, so a change to what "a pass" means lands once. Guarded #ifdef PB_SIM -- it calls
+   link_fake_pass_begin(), which the device test env filters out. netfsm.h itself is
+   included unconditionally above, for pb_test_teardown()'s netfsm_test_reset_retry_(). */
 #ifdef PB_SIM
-#  include "netfsm.h"
 static inline void pb_net_passes(uint16_t n, uint32_t ms) {
   for (uint16_t i = 0; i < n; ++i) {
     link_fake_pass_begin();

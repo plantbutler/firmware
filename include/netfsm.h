@@ -24,3 +24,26 @@ bool        net_modem_ran_this_pass(void);  /* printed by `status` as modem_ran=
 bool        net_take_command(cmd_t *out);
 void        net_disable(const char *why);   /* setup()'s watchdog-grant assertion (spec §3) */
 const char *net_disabled(void);
+
+#ifdef PB_NATIVE
+/* Host-suite seam, same shape as sensors.h's sensors_test_reset_health_() (task 18) and
+   pulses.h's pulses_test_reset_leak_() (task 22): g_retried and g_connect_starved are
+   process-lifetime statics in netfsm.cpp with no reset path but net_begin() and NET_IDLE's
+   own per-report reset. Every case in test_netfsm.cpp today calls net_begin() as its own
+   first or second statement, which is why no teardown entry has been needed before this —
+   but that is exactly the trap the other six entries above it exist to close, and a case
+   that longjmps out mid-body before reaching ITS OWN net_begin() (or a future case that
+   never calls it at all) would otherwise read the previous case's retry/starvation state.
+   pb_test_teardown() is the only caller. */
+void netfsm_test_reset_retry_(void);
+
+/* Host-suite seam: was_timeout()'s subtract-and-test-sign idiom is a file-static, and the
+   fake clock's own "every hal_millis() read advances the rig by 1 ms" contract means net_poll()
+   can never present it with an elapsed time of EXACTLY PB_NET_STEP_MS -- capturing t0 costs one
+   tick, was_timeout()'s own hal_millis() call costs a second, so every timeout net_poll() can
+   ever manufacture reads PB_NET_STEP_MS + 1, one past the boundary this idiom's >= is supposed
+   to pin. Calling the real comparison directly against a clock landed on the exact boundary is
+   the only way to tell >= apart from >. Not a second copy of the policy — the same static,
+   exposed for a controlled t0. */
+bool netfsm_test_was_timeout_(uint32_t t0);
+#endif
