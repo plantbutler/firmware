@@ -233,6 +233,57 @@ static void test_sock_read_calls_neither_available_nor_connected(void) {
   TEST_ASSERT_FALSE(link_fake_saw_connected());
 }
 
+static const char *k400 =
+  "HTTP/1.1 400 Bad Request\r\nContent-Length: 38\r\n\r\n"
+  "next=60\ncmd=1 water=3 ml=250 cap_s=30\n";
+
+static void test_response_is_never_parsed_from_a_four_hundred_body(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k400, strlen(k400));
+  pump_passes(10);
+  cmd_t c;
+  TEST_ASSERT_FALSE(net_take_command(&c));      /* a 400 body echoes OUR tokens back at us */
+  TEST_ASSERT_EQUAL_UINT16(400, net_last_status());
+  TEST_ASSERT_EQUAL_UINT32(0, net_reports_ok());
+}
+
+/* pump_passes(n) (== pb_net_passes(n, 0)) cannot drive a SECOND round trip on its own: with
+   g_next_s left at 60 by round 1's own "next=60", NET_IDLE's due check never lets the FSM
+   leave IDLE again until 60 s of fake-clock time have actually elapsed, and pump_passes()'s
+   zero ms step advances the clock by only a couple of ms per pass (sim.h's "hal_millis()
+   advances the rig by exactly 1 ms" contract). Without real elapsed time between passes,
+   round 2 never leaves IDLE, SOCK_CLOSE's rx-buffer reset is never re-exercised, and this
+   case would pass for a reason that has nothing to do with the bug it names -- so this uses
+   pb_net_passes() directly, with a step big enough to cross both the 60 s report interval
+   and, once round 2's own RECV starts, the 5 s PB_NET_DEADLINE_MS its intentionally-empty
+   response never answers. */
+static void test_stale_bytes_in_the_rx_buffer_cannot_become_a_command(void) {
+  sensors_begin();
+  net_begin();
+  /* round 1: a complete 200 carrying a command */
+  const char *with_cmd =
+    "HTTP/1.1 200 OK\r\nContent-Length: 38\r\n\r\nnext=60\ncmd=5 water=3 ml=250 cap_s=30\n";
+  link_fake_queue_response(with_cmd, strlen(with_cmd));
+  pump_passes(10);
+  cmd_t c;
+  TEST_ASSERT_TRUE(net_take_command(&c));
+  TEST_ASSERT_EQUAL_UINT32(5, c.id);
+  TEST_ASSERT_EQUAL_UINT32(1, net_reports_ok());
+  report_clear_ack();                            /* stand in for exec_pending()'s real ack */
+  /* round 2: the server answers with nothing at all. The old bytes must not be re-parsed --
+     and must not even be mistaken for a completed response, which is the guard-independent
+     half of the proof: the replay guard (task 23) would refuse a re-executed cmd=5 anyway,
+     but a stale, un-cleared g_rx would still let rx_complete() see an already-complete
+     response the instant RECV starts, short-circuiting the real (empty) exchange and
+     crediting a 200 that never happened. */
+  link_fake_queue_response("", 0);
+  pb_net_passes(40, 2000u);
+  TEST_ASSERT_FALSE(net_take_command(&c));
+  TEST_ASSERT_EQUAL_UINT32(1, net_reports_ok());       /* round 2 must NOT count as a second 200 */
+  TEST_ASSERT_EQUAL_UINT32(1, net_reports_failed());   /* it must count as the timeout it is */
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -247,5 +298,7 @@ int main(void) {
   RUN_TEST(test_no_pass_issues_more_than_two_at_commands);
   RUN_TEST(test_every_error_exit_transitions_to_sock_close_rather_than_closing_inline);
   RUN_TEST(test_sock_read_calls_neither_available_nor_connected);
+  RUN_TEST(test_response_is_never_parsed_from_a_four_hundred_body);
+  RUN_TEST(test_stale_bytes_in_the_rx_buffer_cannot_become_a_command);
   return UNITY_END();
 }
