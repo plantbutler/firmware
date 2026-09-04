@@ -1,10 +1,16 @@
 /* test/test_net/test_netfsm.cpp — seam 2, the FSM, the AT budget, the retry policy. */
 #include <unity.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "../support/harness.h"
 #include "config.h"
 #include "hal.h"
 #include "link.h"
+#include "netfsm.h"
+#include "report.h"
+#include "secrets.h"
+#include "sensors.h"
 #include "sim.h"
 
 void setUp(void)    { pb_test_setup(); link_fake_reset(); link_begin(PB_NET_STEP_MS); }
@@ -96,6 +102,48 @@ static void test_sock_write_records_the_bytes_and_the_write_count(void) {
   sock_close();
 }
 
+/* pump_passes(n) is pb_net_passes(n, 0) and nothing else -- one spelling, so the cases
+   below and task 25's cannot drift apart. */
+static void pump_passes(uint8_t n) { pb_net_passes(n, 0u); }
+static const char *k200 =
+  "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\n\r\nnext=60\n";
+
+static void test_http_post_carries_host_token_and_content_length(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  pump_passes(8);
+  uint16_t n = 0;
+  const char *tx = (const char *)link_fake_sent(&n);
+  TEST_ASSERT_TRUE(n > 0);
+  TEST_ASSERT_TRUE(strstr(tx, "POST /report HTTP/1.1\r\n") == tx);
+  /* HOST_NAME and BUTLER_TOKEN are `const char[]` OBJECTS in secrets.h, not string-literal
+     macros the way PB_CONTROLLER is, so `"Host: " HOST_NAME` would not compile. Build the
+     needles instead; the c= assertion below juxtaposes because PB_CONTROLLER really is one. */
+  char want[128];
+  snprintf(want, sizeof want, "\r\nHost: %s\r\n", HOST_NAME);
+  TEST_ASSERT_NOT_NULL(strstr(tx, want));
+  snprintf(want, sizeof want, "\r\nX-Token: %s\r\n", BUTLER_TOKEN);
+  TEST_ASSERT_NOT_NULL(strstr(tx, want));
+  TEST_ASSERT_NOT_NULL(strstr(tx, "\r\nContent-Type: text/plain\r\n"));
+  TEST_ASSERT_NOT_NULL(strstr(tx, "\r\nConnection: close\r\n"));
+  TEST_ASSERT_NOT_NULL(strstr(tx, "\r\n\r\nc=" PB_CONTROLLER " t="));
+}
+
+static void test_report_content_length_matches_the_bytes_actually_written(void) {
+  sensors_begin();
+  net_begin();
+  link_fake_queue_response(k200, strlen(k200));
+  pump_passes(8);
+  uint16_t n = 0;
+  const char *tx = (const char *)link_fake_sent(&n);
+  const char *hdr = strstr(tx, "Content-Length: ");
+  TEST_ASSERT_NOT_NULL(hdr);
+  unsigned long claimed = strtoul(hdr + strlen("Content-Length: "), NULL, 10);
+  const char *body = strstr(tx, "\r\n\r\n") + 4;
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)claimed, (uint32_t)(n - (uint16_t)(body - tx)));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -103,5 +151,7 @@ int main(void) {
   RUN_TEST(test_a_second_link_reset_still_produces_a_working_at_round_trip);
   RUN_TEST(test_a_failed_connect_leaves_the_socket_allocated);
   RUN_TEST(test_sock_write_records_the_bytes_and_the_write_count);
+  RUN_TEST(test_http_post_carries_host_token_and_content_length);
+  RUN_TEST(test_report_content_length_matches_the_bytes_actually_written);
   return UNITY_END();
 }

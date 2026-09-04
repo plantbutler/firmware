@@ -116,6 +116,21 @@ static inline void pb_expect_no_feed_between(uint32_t from_ms, uint32_t to_ms) {
 /* Drive a REAL latching dose: the float says OK, nothing ever flows, the dose runs past
    its own prime window, and it is not a console prime. That is §2.7's five conditions,
    and it is the ONLY way the latch can be set -- there is no setter, on purpose. */
+/* Drive n whole network passes, advancing the fake clock ms between them. THE ONE
+   SPELLING: task 24's own cases, task 25's retry cases and task 26's ack-cycle cases all
+   use it, so a change to what "a pass" means lands once. Guarded #ifdef PB_SIM -- it names
+   the fake link, which the device test env filters out. */
+#ifdef PB_SIM
+#  include "netfsm.h"
+static inline void pb_net_passes(uint16_t n, uint32_t ms) {
+  for (uint16_t i = 0; i < n; ++i) {
+    link_fake_pass_begin();
+    net_poll(false);            /* not dosing: dose_run() blocks, so a pass cannot overlap one */
+    if (ms) pb_advance(ms);
+  }
+}
+#endif
+
 static inline void pb_latch_contra(void) {
   pb_advance(PB_BOOT_GAP_MS + 1u);
   sim_set_float(true);
