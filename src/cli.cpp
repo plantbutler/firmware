@@ -527,6 +527,12 @@ void cli_print_status(void) {
 #if PB_REPORT_POS_UNKNOWN
   hal_serial_write("pos: FORCED unknown (PB_REPORT_POS_UNKNOWN=1)\n");
 #endif
+  cli_printf_u32("parked=%lu\n", (uint32_t)(cart_parked() ? 1u : 0u));
+  /* §2.12: the dosing loop blocks and net_poll() cannot run while it does, and enqueue() returns
+     409 while the water command it would abort is still 'sent'. Say so, so nobody reaches for
+     it in an emergency. The live aborts are the console `stop`, `dry on`, the float, the two
+     flow rules, the plausibility ceiling, the cap and the watchdog. */
+  hal_serial_write("note: a backend stop=1 CANNOT interrupt a running dose; type `stop`\n");
 
   /* §4.2 requires the drop to be loud: a truncated body is a DROPPED report, not a 400, and
      the console is the only place that failure is otherwise visible at all. */

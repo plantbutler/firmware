@@ -5,9 +5,13 @@
    secrets.h is here for PB_CONTROLLER, which ui_fill_() copies into ui_state_t: the two
    device envs do not pass it in build_flags and secrets.h is its only other definition. */
 #include "Screen.h"
+#include "cart.h"     /* cart_begin/pos_known/pos/parked/busy */
 #include "cli.h"
 #include "config.h"
+#include "exec.h"     /* exec_begin/exec_pending/exec_last_cmd_id/exec_last_cmd_text */
 #include "hal.h"
+#include "link.h"     /* link_state/link_rssi/link_ip */
+#include "netfsm.h"   /* net_disable/net_begin/net_poll/net_last_status/net_next_s */
 #include "noinit.h"
 #include "pins.h"
 #include "pulses.h"
@@ -55,6 +59,7 @@ extern "C" void setup(void) {
 
   sensors_begin();
   pulses_begin();
+  cart_begin();                                    /* beside pulses_begin(), in setup()'s first half */
 
   /* spec §2.3: a reset taken with the pump asserted is the single loudest thing this rig
      can discover about itself. noinit_begin() has already latched the verdict and the dry
@@ -137,6 +142,13 @@ extern "C" void setup(void) {
     hal_serial_write(b);
   }
 
+  /* spec §2.5: a failed watchdog, ADC or heap assertion disables the network and says why in
+     status. main.cpp holds the verdict; netfsm.cpp holds the flag, because [env:native]
+     filters main.cpp out and no host test could otherwise reach it. */
+  if (main_net_disabled()) net_disable(main_boot_err());
+  net_begin();
+  exec_begin();
+
   cli_begin();
 }
 
@@ -150,28 +162,56 @@ static void ui_fill_(ui_state_t *s) {
   s->screw_pulses = pulses_screw();
   s->flow_hz      = pulses_flow_rate();
   s->flow_total   = pulses_flow();
-  s->dry          = g_nv.dry_latched;
-  s->contra       = g_nv.contra_latched;
+  s->dry          = safety_dry();
+  s->contra       = safety_contra();
+  s->pos_known    = cart_pos_known();
+  s->pos          = cart_pos();
+  s->parked       = cart_parked();
+  s->link         = (uint8_t)(link_state() == LINK_UP ? 2 :
+                             (link_state() == LINK_JOINING ? 1 : 0));
+  s->rssi         = link_rssi();
+  strncpy(s->ip, link_ip(), sizeof s->ip - 1);
+  s->http_status  = net_last_status();          /* a 400/401 loop is otherwise invisible
+                                                   to anyone not on the serial port */
+  s->next_s       = net_next_s();
+  s->cmd_id       = exec_last_cmd_id();
+  s->cmd_text     = exec_last_cmd_text();
 #ifdef PB_SIM
   s->sim = true;
 #endif
-  s->lcd_state  = s->pump_on ? "PUMP" : "IDLE";
-  s->lcd_detail = s->float_ok ? "float ok" : "float NOT OK";
-  /* TASK 26 OWNS THE REST OF THIS FUNCTION and rewrites it whole: pos/pos_known/parked
-     from the cart, link/rssi/ip from seam 2, http_status/next_s from the report FSM,
-     cmd_id/cmd_text from exec.cpp, and spec §5's real lcd_state selection. Until then
-     rows 1 and 4-7 of the OLED read pos ?, wifi -- 0 dBm, no link, next 0s and cmd -,
-     which is correct for a tree with no cart and no network in it. */
+
+  /* spec §5's LCD state selection, most-urgent first. Row 1 is human prose and is tested
+     (task 10) never to equal a wire err= token. NOTE what this does NOT decide: the
+     renderer itself overrides row 1 with `HTTP <n>` whenever http_status is a non-200
+     (task 10 step 4, §4.2), and overrides row 0 with the contra banner and then the sim
+     banner (task 19 step 7). A 400/401 loop is therefore visible on the panel whichever
+     branch below happened to run, which is the point - it must not depend on this
+     function choosing the right prose. */
+  static char detail[17];
+  if (s->contra)        { s->lcd_state = "CONTRA LATCH"; s->lcd_detail = "float ok,no flow"; }
+  else if (s->dry)      { s->lcd_state = "REFUSED";      s->lcd_detail = "dry latch set"; }
+  else if (s->pump_on)  { snprintf(detail, sizeof detail, "PUMP o%u", (unsigned)s->pos);
+                          s->lcd_state = detail;         s->lcd_detail = "dosing"; }
+  else if (cart_busy()) { snprintf(detail, sizeof detail, "MOVE o%u", (unsigned)s->pos);
+                          s->lcd_state = detail;         s->lcd_detail = "cart moving"; }
+  else if (s->link != 2){ s->lcd_state = "WIFI?";        s->lcd_detail = "no link"; }
+  else                  { s->lcd_state = "IDLE";
+                          snprintf(detail, sizeof detail, "next %us", (unsigned)s->next_s);
+                          s->lcd_detail = detail; }
 }
 
 extern "C" void loop(void) {
-  safety_tick();     /* pump idle re-asserted, D6's direction repaired, then the dog fed */
-  cli_poll();        /* one whole line; may block, but only through safety_wait_ms() */
-  /* net_poll(safety_dosing()); <- task 26 adds this line (spec §3) */
-  /* exec_pending();            <- task 26 adds this line (spec §3) */
-  pulses_leak_poll(safety_dosing());   /* the leak watch, EVERY pass: ch205's only driver.
-                                          report_build() (task 22) is what turns a non-zero
-                                          count into err=leak; nothing here does. */
+  safety_tick();               /* pump idle re-asserted (D6's direction repaired), then fed */
+  cli_poll();                  /* one whole line; may block, but only through safety_wait_ms() */
+  net_poll(safety_dosing());   /* ONE bounded link/socket step. The flag is passed IN: netfsm.cpp
+                                  may not include safety.h (§9), so the caller supplies it. */
+  exec_pending();              /* at most one command; runs only when the socket is closed */
+  pulses_leak_poll(safety_dosing());          /* the leak watch, EVERY pass: ch205's only
+                                                 driver, and report_build() turns a non-zero
+                                                 count into err=leak (task 22 step 12).
+                                                 sensors_sweep() is NOT here - task 24's
+                                                 NET_IDLE pass owns it, once per report cycle,
+                                                 in the one pass with no AT command. */
   ui_fill_(&g_ui);
-  ui_poll(&g_ui);    /* no-ops while the pump is asserted, the cart moves, or a modem ran */
+  ui_poll(&g_ui);              /* no-ops while dosing, while the cart moves, or after a modem pass */
 }
