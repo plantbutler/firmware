@@ -853,6 +853,33 @@ static void test_a_failed_goto_still_acks(void) {
   TEST_ASSERT_NOT_NULL(strstr(b, " ack=17 flow_ml=0 err=goto"));
 }
 
+static void test_an_out_of_range_outlet_acks_range_and_never_reaches_the_cart(void) {
+  /* The range check sits ABOVE cart_goto() so the backend is told which refusal it got. Nothing
+     pinned the string: the terminal-path case above accepts ANY ack, so deleting the branch just
+     falls through to cart_goto() and acks err=goto, which is still an ack. Both bounds are
+     checked because water=0 is a legal thing for butler to send, and 0 and 6 fail different
+     halves of the comparison. Meaningful under [env:native] as well as native_cal: the check
+     runs before the cart is ever consulted, so PB_PULSES_PER_GATE does not reach it. */
+  static const struct { const char *body; const char *want; } k[] = {
+    { "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=51 water=0 ml=100 cap_s=10\n",
+      " ack=51 flow_ml=0 err=range" },
+    { "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=52 water=6 ml=100 cap_s=10\n",
+      " ack=52 flow_ml=0 err=range" },
+  };
+  for (unsigned i = 0; i < sizeof k / sizeof k[0]; ++i) {
+    pb_test_setup();
+    link_fake_reset(); link_fake_set_state(LINK_UP);
+    link_fake_queue_response(k[i].body, strlen(k[i].body));
+    net_begin(); exec_begin();
+    pb_net_passes(14, 100);
+    exec_pending();
+    report_stamp();
+    char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
+    TEST_ASSERT_NOT_NULL(strstr(b, k[i].want));
+    TEST_ASSERT_NULL(strstr(b, "err=goto"));   /* it never got as far as the cart */
+  }
+}
+
 static void test_every_terminal_path_in_exec_pending_sets_an_ack(void) {
   static const char *bodies[] = {
     "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=41 water=0 ml=100 cap_s=10\n",
@@ -1030,6 +1057,7 @@ int main(void) {
   RUN_TEST(test_no_report_is_built_between_receiving_a_command_and_executing_it);
   RUN_TEST(test_a_stop_command_is_acked);
   RUN_TEST(test_a_failed_goto_still_acks);
+  RUN_TEST(test_an_out_of_range_outlet_acks_range_and_never_reaches_the_cart);
   RUN_TEST(test_every_terminal_path_in_exec_pending_sets_an_ack);
   RUN_TEST(test_refused_dose_acks_with_flow_ml_zero_and_an_err_token);
   RUN_TEST(test_pending_ack_rides_the_next_report_after_every_discard_path);
