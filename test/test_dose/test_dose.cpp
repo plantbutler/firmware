@@ -961,19 +961,24 @@ void test_metered_dose_with_a_zero_target_is_refused_not_run_to_cap(void) {
 
        target       = ml * cfg / 1000 = 250 * 5880 / 1000 = 1470 pulses   (MULTIPLY FIRST)
        fake's rate  = 85 ml/s * PB_PULSES_PER_L_DEFAULT / 1000 = 499 pulses/s
-       first pulse  = PB_PRIME_MS_DEFAULT + 1 = 3001 ms into the dose
-       target at    = 3001 + 1469 * 1000/499 = ~5945 ms
 
-   and 5945 ms is inside every cap that applies: PB_PRIME_CAP_MS (20000) under long_prime,
-   and 250 * 1000 / 30 * 2 = 16666 ms under native_measured.
+   Under task 18's onset ramp (SIM_FLOW_ONSET_MS, hal_sim.cpp), the fake's first pulse lands
+   about 1 ms after the ON write, not at PB_PRIME_MS_DEFAULT + 1 (3001 ms) the way it did
+   before that fix -- measured directly (a 1 ms cap already shows one pulse landed), not
+   estimated. dose_last_ms() for THIS exact request measures 3279 ms, not the pre-fix ~5945:
+   still governed by the meter's own 499 pulses/s, plus the ramp's own ~150 ms of reduced
+   early rate, not by any prime-window arithmetic at all.
 
-   `long_prime` is not decoration here, and the reason is a property of the FIXTURE rather
-   than of dose_run(): the fake's pump model delivers its first pulse at
-   PB_PRIME_MS_DEFAULT + 1 ms after the ON write, which is one millisecond AFTER task 18's
-   prime rule fires at `el >= prime_ms && got < PB_PRIME_MIN_PULSES`. A metered dose on the
-   default window therefore aborts NOFLOW at exactly 3000 ms with nothing wrong with it.
-   PB_PRIME_LONG_MS is the only printed lever that moves that window, and the
-   PB_PRIME_CAP_MS it brings with it is still three times the time this dose needs. */
+   3279 ms is inside every cap that applies: PB_PRIME_CAP_MS (20000) under long_prime, and
+   250 * 1000 / 30 * 2 = 16666 ms under native_measured -- and, unlike before this task's
+   fix, inside the UNTOUCHED default prime window (3000 ms) too, with margin to spare, since
+   flow is continuous throughout and neither the prime nor the stall rule ever finds a gap to
+   fire on. `long_prime` is kept here anyway, for stability against exactly the kind of
+   arithmetic drift this comment itself is being corrected for -- confirmed empirically:
+   this case still passes with `q.long_prime` commented out -- but it is no longer load-
+   bearing the way it was pre-fix, when the fake's own onset model made the default window
+   fail by construction. See test_a_healthy_metered_dose_completes_on_the_default_prime_
+   window for the case that exercises the default window on purpose. */
 void test_dose_stops_at_the_millilitre_target(void) {
   pb_test_setup();
   pb_advance(PB_BOOT_GAP_MS + 1u);
@@ -1447,6 +1452,42 @@ void test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached(voi
   (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
 }
 
+/* Fix round 1, Important finding (review of this task): the two cases above do not actually
+   prove rule 1 is evaluated ABOVE the target rule -- they prove the storm aborts the dose,
+   which is a weaker claim. Their target (250 ml -> 1250 pulses at cfg 5000) needs ~625 ms of
+   a 2000 Hz storm, six rate-estimator windows (100 ms each) after the storm is first visible
+   at ~100 ms -- so under EITHER ordering the loop has already exited via the rate ceiling
+   long before the target could ever be reached, and swapping which of the two checks runs
+   FIRST changes nothing observable. The reviewer proved this by mutation: moving ONLY the
+   rate-ceiling check below the target check (leaving the plausibility check where it
+   belongs) passed the entire suite unchanged, under BOTH native and native_measured.
+
+   This fixture is built to land the target INSIDE the same loop iteration the rate
+   estimator's first 100 ms window closes and reports the storm, so both conditions
+   (`got >= target` and `pulses_flow_rate() > PB_FLOW_MAX_HZ`) become true at once and the
+   ORDER of the two checks is what actually decides the result. 45 ml (-> 225 pulses at
+   cfg 5000) was found empirically, not derived: at a 2000 Hz storm with cfg 5000 the window
+   closes at el ~= 115 ms with 227 pulses on the counter (one ml lower, 44, reaches its own
+   220-pulse target at ~112 ms, BEFORE the window has closed at all -- the estimator has not
+   measured anything yet, so neither ordering can catch it, which is a real, different
+   limitation of a 100 ms window and not what this case is testing; one ml higher, 46, is not
+   reached until AFTER the window has already closed and broken the loop via rate1, so it is
+   back to "order does not matter" territory). Reversing only the rate-ceiling check below
+   the target check flips THIS exact fixture to DOSE_OK at the same 227 pulses -- proof
+   below. */
+void test_the_rate_ceiling_alone_wins_the_race_against_the_target(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  TEST_ASSERT_TRUE(cfg_pulses_per_l_set(5000u));
+  sim_flow_storm_at_pump_on(2000u);
+  dose_req_t q = {0}; q.ml = 45u; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_NOISE, dose_run(&q),
+      "the rate ceiling must win the race against the target rule, not lose it");
+  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
+}
+
 /* The no-flow abort, half 1: a line that never primes. The pump runs the whole default
    window and nothing at all comes out -- the pitch-28a903 scenario, bring-up 7a's own
    "run it dry the first time" case. */
@@ -1738,6 +1779,7 @@ int main(void) {
   RUN_TEST(test_dose_refused_when_the_idle_pulse_rate_is_nonzero);
   RUN_TEST(test_the_rate_rules_are_evaluated_above_the_target_rule);
   RUN_TEST(test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached);
+  RUN_TEST(test_the_rate_ceiling_alone_wins_the_race_against_the_target);
   RUN_TEST(test_metered_dose_with_a_zero_target_is_refused_not_run_to_cap);
   RUN_TEST(test_dose_stops_at_the_millilitre_target);
   RUN_TEST(test_dose_stops_at_the_cap_when_flow_never_reaches_target);

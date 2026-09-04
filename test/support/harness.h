@@ -3,6 +3,7 @@
 #include <unity.h>
 #include "cli.h"
 #include "hal.h"
+#include "sensors.h"
 #include "sim.h"
 #include "safety.h"
 
@@ -53,13 +54,23 @@ static inline void pb_test_setup(void) {
    real "no dose has ended yet" boot would read it, rather than every case having to land its
    own clock in the one safe zone above or below whatever the previous case left behind.
    test_dose.cpp carries a g_last_end_ms proof pair, the same shape as the two above, to
-   guard this teardown line the same way. */
+   guard this teardown line the same way.
+
+   sensors_test_reset_health_() belongs here for the identical reason a fourth time (task 18
+   fix round 1, finding 2): g_healthy, g_fails and g_backoff_until are process-lifetime
+   statics in sensors.cpp, and a test that calls sim_set_i2c_fail(true) and cleans up with
+   `sim_set_i2c_fail(false); sensors_begin();` as its own LAST lines loses that cleanup to the
+   same longjmp as every static above the moment an earlier assertion in that body fails —
+   leaving the bus reading unhealthy for every later test in the binary that never happens to
+   call sensors_begin() itself. Seen directly: one mutation's real diagnostic buried under two
+   unrelated downstream DOSE_REFUSED_I2C failures. */
 static inline void pb_test_teardown(void) {
   sim_events_clear();
   safety_set_dosing(false);
   safety_float_refusal_count(false);
   cli_stop_clear();
   safety_reset_dose_cooldown_();
+  sensors_test_reset_health_();
 }
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }

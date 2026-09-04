@@ -165,3 +165,16 @@ void sensors_scan(char *out, size_t cap) {
     at += (size_t)snprintf(out + at, cap - at, "0x%02X ", (unsigned)a);
   }
 }
+
+#ifdef PB_NATIVE
+/* Host-suite seam (task 18 fix round 1, finding 2): see the declaration in sensors.h for the
+   full reasoning. Just the three fields gate_()/note_() actually consult to decide "is the
+   bus healthy" -- not a full sensors_begin() (which also probes the bus, drives a real
+   recovery sequence, and resets the mux/canary/float-tracking state), so a test that never
+   touches sensors.cpp at all pays nothing extra in teardown. */
+void sensors_test_reset_health_(void) {
+  g_healthy = true;
+  g_fails = 0u;
+  g_backoff_until = 0u;
+}
+#endif

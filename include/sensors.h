@@ -35,3 +35,18 @@ uint32_t sensors_i2c_txn_per_min(void);         /* `status` prints it so the cos
 uint32_t sensors_float_change_age_s(void);
 
 void     sensors_scan(char *out, size_t cap);   /* the `i2c` console command */
+
+#ifdef PB_NATIVE
+/* Host-suite seam, same shape as safety.cpp's g_dosing/g_float_refusals/g_last_end_ms trio
+   (task 18 fix round 1, finding 2): g_healthy, g_fails and g_backoff_until are process-
+   lifetime statics in sensors.cpp with no ordinary reset path of their own -- only
+   sensors_begin() clears them, and no test is obliged to call that if it never touches the
+   bus. A test that DOES call sim_set_i2c_fail(true) and then fails its OWN assertion before
+   its OWN cleanup line runs never gets there: Unity's longjmp on a failing TEST_ASSERT_*
+   skips every line after it, including a `sim_set_i2c_fail(false); sensors_begin();` written
+   as the test's own last lines. That leaves g_healthy false (or g_fails/g_backoff_until
+   mid-count) for every later test in the binary that never happens to call sensors_begin()
+   itself -- one real mutation's diagnostic was seen buried under two misleading downstream
+   DOSE_REFUSED_I2C failures this way. pb_test_teardown() is the only caller. */
+void sensors_test_reset_health_(void);
+#endif
