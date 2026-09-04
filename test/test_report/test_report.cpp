@@ -466,6 +466,238 @@ static void test_response_ignores_unknown_keys(void) {
   TEST_ASSERT_EQUAL_UINT16(100, r.cmd.ml);
 }
 
+static void test_response_rejects_command_id_zero(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=0 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);   /* and it never moves the mark */
+}
+
+static void test_response_rejects_a_repeated_or_lower_command_id(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL_UINT32(17, g_nv.cmd_high_water);
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));   /* the same body again */
+  const char *lower = "next=60\ncmd=9 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(lower, (uint16_t)strlen(lower), &r));
+  const char *higher = "next=60\ncmd=18 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(higher, (uint16_t)strlen(higher), &r));
+}
+
+static void test_response_rejects_water_without_ml_or_without_cap_s(void) {
+  response_t r;
+  const char *no_ml = "next=60\ncmd=17 water=3 cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(no_ml, (uint16_t)strlen(no_ml), &r));
+  const char *no_cap = "next=60\ncmd=17 water=3 ml=250\n";     /* an absent cap is unbounded */
+  TEST_ASSERT_FALSE(response_parse(no_cap, (uint16_t)strlen(no_cap), &r));
+  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
+}
+
+static void test_response_rejects_ml_zero(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=3 ml=0 cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
+}
+
+static void test_response_truncated_body_yields_no_command(void) {
+  response_t r;
+  const char *full = "next=60\ncmd=17 water=3 ml=250 cap_s=30\n";
+  for (uint16_t cut = 9; cut < strlen(full); ++cut) {        /* every mid-token truncation */
+    TEST_ASSERT_FALSE(response_parse(full, cut, &r));
+    TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+  }
+  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
+}
+
+static void test_response_next_out_of_range_keeps_the_previous_interval(void) {
+  response_t r;
+  const char *lo = "next=4\n";
+  TEST_ASSERT_FALSE(response_parse(lo, (uint16_t)strlen(lo), &r));
+  TEST_ASSERT_EQUAL_UINT16(0, r.next_s);                    /* 0 == keep what we had */
+  const char *hi = "next=3601\n";
+  TEST_ASSERT_FALSE(response_parse(hi, (uint16_t)strlen(hi), &r));
+  TEST_ASSERT_EQUAL_UINT16(0, r.next_s);
+  const char *edge_lo = "next=5\n";
+  TEST_ASSERT_FALSE(response_parse(edge_lo, (uint16_t)strlen(edge_lo), &r));
+  TEST_ASSERT_EQUAL_UINT16(5, r.next_s);
+  const char *edge_hi = "next=3600\n";
+  TEST_ASSERT_FALSE(response_parse(edge_hi, (uint16_t)strlen(edge_hi), &r));
+  TEST_ASSERT_EQUAL_UINT16(3600, r.next_s);
+}
+
+/* ---- the rest of the enumeration: shapes the brief's ten cases do not cover ---- */
+
+/* "a header with no body": at this function's boundary that is exactly len==0, since
+   response_parse only ever sees the BODY (netfsm scans past the CRLFCRLF itself). A NULL
+   body must be equally inert -- a truncated read that produced no buffer at all. */
+static void test_response_empty_or_null_body_yields_no_command(void) {
+  response_t r;
+  TEST_ASSERT_FALSE(response_parse("", 0, &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT16(0, r.next_s);
+  TEST_ASSERT_FALSE(response_parse(NULL, 0, &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+}
+
+/* Butler always sends next= first, but a body missing it entirely must not refuse the
+   command that follows -- next_s simply stays 0 ("keep the previous interval"). */
+static void test_response_body_with_no_next_line_still_parses_the_command(void) {
+  response_t r;
+  const char *b = "cmd=17 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL_UINT16(0, r.next_s);
+  TEST_ASSERT_EQUAL(CMD_WATER, r.cmd.kind);
+}
+
+/* A cmd= with neither water= nor stop=1 is a shape butler never sends and a corrupted body
+   might: neither branch's field checks succeed, so the line yields nothing and the mark
+   does not move -- the id stays available for a LATER, well-formed response to use. */
+static void test_response_cmd_with_no_water_or_stop_yields_no_command(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=21\n";
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
+}
+
+/* field_u32 requires the first character after '=' to be a digit -- a leading '-' or letter
+   fails that test immediately, so ml= reads as ABSENT, not as some salvaged magnitude. */
+static void test_response_rejects_negative_or_non_numeric_ml(void) {
+  response_t r;
+  const char *neg = "next=60\ncmd=17 water=3 ml=-5 cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(neg, (uint16_t)strlen(neg), &r));
+  const char *nan = "next=60\ncmd=17 water=3 ml=abc cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(nan, (uint16_t)strlen(nan), &r));
+  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
+}
+
+/* §4.5, verbatim: an outlet outside 1..PB_OUTLETS -- water=0 included -- is ACCEPTED here.
+   exec_pending() (task 26) refuses it with err=range, above cart_goto(), so the backend
+   learns the real reason instead of whichever step happened to fail first. Rejecting it
+   HERE would be the more "obviously safe" instinct and would be wrong: the outlet never
+   drives hardware from this function, and the backend needs the honest refusal reason. */
+static void test_response_water_zero_is_accepted_structurally(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=0 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_WATER, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT8(0, r.cmd.outlet);
+}
+
+/* Same point, the other side of PB_OUTLETS: an outlet that fits the uint8_t field but is
+   well above the five real gates is ALSO accepted here for the identical reason. */
+static void test_response_an_outlet_above_pb_outlets_is_accepted_structurally(void) {
+  response_t r;
+  TEST_ASSERT_TRUE_MESSAGE(PB_OUTLETS < 200, "fixture assumes PB_OUTLETS stays small");
+  const char *b = "next=60\ncmd=17 water=200 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_WATER, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT8(200, r.cmd.outlet);
+}
+
+/* An outlet that does NOT fit outlet's own uint8_t field is a different case from the two
+   above and must be rejected outright here, not truncated by the (uint8_t) cast: 256 cast
+   to uint8_t is 0, which is a LEGAL-looking outlet, not the obviously-bogus field it was. */
+static void test_response_an_outlet_too_wide_for_the_field_yields_no_command(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=256 ml=250 cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
+}
+
+/* "ml=250x" must not be read as ml=250 with a stray trailing character ignored -- that
+   would be exactly the "partial" acceptance rule 1 forbids. field_u32's trailing-character
+   check makes the whole field absent instead. */
+static void test_response_a_trailing_non_digit_does_not_truncate_to_a_smaller_number(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=3 ml=250x cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+}
+
+/* Butler only ever sends stop=1. stop=0 must not silently fall through as a water command
+   either (there is no water= on the line) -- it is simply nothing. */
+static void test_response_stop_zero_is_neither_stop_nor_water(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 stop=0\n";
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+}
+
+/* Two cmd= tokens on ONE line: field_u32 returns the FIRST match it finds scanning left to
+   right, so the first id wins deterministically and the second is inert, exactly like any
+   other unrecognised token on the line -- never a double-parse, never the larger of the two. */
+static void test_response_two_cmd_fields_on_one_line_the_first_wins(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 cmd=99 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL_UINT32(17, r.cmd.id);
+}
+
+/* A replayed id on one line does not abort the whole parse -- it disqualifies only that
+   line, and the loop tries the next one. This is what makes the replay guard survive a body
+   that (through some future bug, or a poisoned AT session's leftover bytes) carries a stale
+   command ahead of a fresh one: the stale line is skipped, never re-executed, and the fresh
+   one is still reachable in the SAME call. */
+static void test_response_skips_a_replayed_line_and_accepts_a_fresh_one_after_it(void) {
+  response_t r;
+  const char *first = "next=60\ncmd=17 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(first, (uint16_t)strlen(first), &r));
+  TEST_ASSERT_EQUAL_UINT32(17, g_nv.cmd_high_water);
+
+  const char *both = "next=60\ncmd=17 water=3 ml=250 cap_s=30\ncmd=18 water=2 ml=100 cap_s=10\n";
+  TEST_ASSERT_TRUE(response_parse(both, (uint16_t)strlen(both), &r));
+  TEST_ASSERT_EQUAL_UINT32(18, r.cmd.id);
+  TEST_ASSERT_EQUAL_UINT8(2, r.cmd.outlet);
+  TEST_ASSERT_EQUAL_UINT32(18, g_nv.cmd_high_water);
+}
+
+/* The overflow-wrap hazard field_u32's exact per-digit check exists to close: with a
+   rounded-down single-threshold guard, "water=4294967297" (2^32 + 1) wraps modulo 2^32 to
+   outlet=1 and is SILENTLY ACCEPTED as a legitimate small outlet -- a malformed field
+   masquerading as a valid command instead of yielding no command at all. */
+static void test_response_an_overflowing_numeric_field_is_rejected_not_wrapped(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=4294967297 ml=250 cap_s=30\n";
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
+}
+
+/* The exact representable boundary (2^32 - 1, UINT32_MAX) is legal for a uint32_t field and
+   must still parse: field_u32's per-digit overflow guard must reject everything ABOVE the
+   boundary without also rejecting the boundary itself. cmd.id has no narrower width check
+   (unlike outlet/ml/cap_s), so it is the field that isolates this from the width-truncation
+   rule proved separately above. */
+static void test_response_the_exact_uint32_boundary_still_parses(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=4294967295 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL_UINT32(4294967295u, r.cmd.id);
+  TEST_ASSERT_EQUAL_UINT32(4294967295u, g_nv.cmd_high_water);
+}
+
+/* Requirement 3: the backend's cap_s and the firmware's PB_DOSE_CAP_MS_MAX are two different
+   ceilings with two different owners. response_parse decides nothing (requirement 4) -- it
+   carries cap_s straight through, however large, and leaves the clamp to dose_run() (task 17,
+   safety.cpp:222), which the caller reaches only after this struct is handed to exec_pending().
+   A cap_s of 5000 s is nowhere near butler's own MAX_CAP_S=60, but that is exactly the point:
+   a hostile or buggy backend cannot WIDEN the firmware's cap by asking for a bigger one, and
+   this function proves that not by narrowing it here (there would then be two clamps to keep
+   in sync) but by not touching it at all. */
+static void test_response_carries_cap_s_through_unclamped(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=3 ml=250 cap_s=5000\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL_UINT16(5000, r.cmd.cap_s);
+  TEST_ASSERT_TRUE_MESSAGE(5000u * 1000u > (uint32_t)PB_DOSE_CAP_MS_MAX,
+                            "fixture must exceed the firmware's own cap to prove nothing here "
+                            "narrows it");
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_report_carries_c_t_and_the_valid_channels);
@@ -500,5 +732,25 @@ int main(void) {
   RUN_TEST(test_response_parses_a_water_command);
   RUN_TEST(test_response_parses_a_stop_command);
   RUN_TEST(test_response_ignores_unknown_keys);
+  RUN_TEST(test_response_rejects_command_id_zero);
+  RUN_TEST(test_response_rejects_a_repeated_or_lower_command_id);
+  RUN_TEST(test_response_rejects_water_without_ml_or_without_cap_s);
+  RUN_TEST(test_response_rejects_ml_zero);
+  RUN_TEST(test_response_truncated_body_yields_no_command);
+  RUN_TEST(test_response_next_out_of_range_keeps_the_previous_interval);
+  RUN_TEST(test_response_empty_or_null_body_yields_no_command);
+  RUN_TEST(test_response_body_with_no_next_line_still_parses_the_command);
+  RUN_TEST(test_response_cmd_with_no_water_or_stop_yields_no_command);
+  RUN_TEST(test_response_rejects_negative_or_non_numeric_ml);
+  RUN_TEST(test_response_water_zero_is_accepted_structurally);
+  RUN_TEST(test_response_an_outlet_above_pb_outlets_is_accepted_structurally);
+  RUN_TEST(test_response_an_outlet_too_wide_for_the_field_yields_no_command);
+  RUN_TEST(test_response_a_trailing_non_digit_does_not_truncate_to_a_smaller_number);
+  RUN_TEST(test_response_stop_zero_is_neither_stop_nor_water);
+  RUN_TEST(test_response_two_cmd_fields_on_one_line_the_first_wins);
+  RUN_TEST(test_response_skips_a_replayed_line_and_accepts_a_fresh_one_after_it);
+  RUN_TEST(test_response_an_overflowing_numeric_field_is_rejected_not_wrapped);
+  RUN_TEST(test_response_the_exact_uint32_boundary_still_parses);
+  RUN_TEST(test_response_carries_cap_s_through_unclamped);
   return UNITY_END();
 }
