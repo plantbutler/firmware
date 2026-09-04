@@ -23,7 +23,10 @@ static ui_state_t base_state(void) {
   ui_state_t s;
   memset(&s, 0, sizeof s);
   strcpy(s.build, "bench");
-  strcpy(s.controller, "bench1");
+  /* What ui_fill_() now writes: PB_CONTROLLER is an integer, printed. The
+     fixture used to say "bench1" independently of the macro, so it kept
+     passing while asserting a shape that can no longer occur. */
+  strcpy(s.controller, "0");
   strcpy(s.ip, "192.168.1.42");
   s.uptime_min = 83; s.pos_known = false; s.screw_pulses = 1290;
   s.float_ok = true; s.pump_on = false; s.parked = true;
@@ -43,7 +46,7 @@ static void test_ui_render_fills_eight_rows_of_sixteen_characters(void) {
     TEST_ASSERT_EQUAL_CHAR('\0', rows[r][16]);      /* terminated AT index 16 */
     TEST_ASSERT_EQUAL_UINT(16, strlen(rows[r]));    /* padded, so no stale glyphs remain */
   }
-  TEST_ASSERT_EQUAL_STRING("PB bench1  1h23m", rows[0]);
+  TEST_ASSERT_EQUAL_STRING("PB 0  1h23m     ", rows[0]);
 }
 
 static void test_ui_render_lcd_shows_the_contradiction_banner(void) {

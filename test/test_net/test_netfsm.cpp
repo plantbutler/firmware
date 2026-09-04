@@ -125,9 +125,10 @@ static void test_http_post_carries_host_token_and_content_length(void) {
   const char *tx = (const char *)link_fake_sent(&n);
   TEST_ASSERT_TRUE(n > 0);
   TEST_ASSERT_TRUE(strstr(tx, "POST /report HTTP/1.1\r\n") == tx);
-  /* HOST_NAME and BUTLER_TOKEN are `const char[]` OBJECTS in secrets.h, not string-literal
-     macros the way PB_CONTROLLER is, so `"Host: " HOST_NAME` would not compile. Build the
-     needles instead; the c= assertion below juxtaposes because PB_CONTROLLER really is one. */
+  /* HOST_NAME and BUTLER_TOKEN are `const char[]` OBJECTS in secrets.h, so
+     `"Host: " HOST_NAME` would not compile. Build the needles instead. PB_CONTROLLER used
+     to be a string-literal macro and the c= needle juxtaposed it; it is an integer now, so
+     that one is built the same way as the rest. */
   char want[128];
   snprintf(want, sizeof want, "\r\nHost: %s\r\n", HOST_NAME);
   TEST_ASSERT_NOT_NULL(strstr(tx, want));
@@ -135,7 +136,8 @@ static void test_http_post_carries_host_token_and_content_length(void) {
   TEST_ASSERT_NOT_NULL(strstr(tx, want));
   TEST_ASSERT_NOT_NULL(strstr(tx, "\r\nContent-Type: text/plain\r\n"));
   TEST_ASSERT_NOT_NULL(strstr(tx, "\r\nConnection: close\r\n"));
-  TEST_ASSERT_NOT_NULL(strstr(tx, "\r\n\r\nc=" PB_CONTROLLER " t="));
+  snprintf(want, sizeof want, "\r\n\r\nc=%u t=", (unsigned)PB_CONTROLLER);
+  TEST_ASSERT_NOT_NULL(strstr(tx, want));
 }
 
 static void test_report_content_length_matches_the_bytes_actually_written(void) {
