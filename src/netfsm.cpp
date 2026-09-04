@@ -79,9 +79,12 @@ bool net_take_command(cmd_t *out) {
 void net_begin(void) {
   link_begin(PB_NET_STEP_MS);
   g_state = NET_DOWN; g_status = 0; g_next_s = 60; g_ok = 0; g_failed = 0;
-  g_backoff_i = 0; g_wait_until = 0; g_deadline = 0;
+  g_backoff_i = 0; g_deadline = 0;
+  g_wait_until = hal_millis();   /* NOT 0: the wait is a subtraction, so a zero sentinel
+                                    would read as "not yet" for a clock past 2^31. */
   g_last_report_ms = hal_millis(); g_first_report_due = true;
   g_body_len = 0; g_tx_len = 0; g_rx_len = 0; g_have_cmd = false;
+  g_disabled = NULL;    /* a latch left standing here would make net_poll() a silent no-op */
 }
 
 /* Every error exit routes THROUGH NET_SOCK_CLOSE via this one function, and it does NOT call
@@ -161,7 +164,7 @@ void net_poll(bool dosing) {
 
   switch (g_state) {
     case NET_DOWN:
-      if (hal_millis() < g_wait_until) return;
+      if ((int32_t)(hal_millis() - g_wait_until) < 0) return;
       g_state = NET_JOIN_ISSUE;
       return;
 
@@ -176,7 +179,7 @@ void net_poll(bool dosing) {
       modem_ran_();
       link_state_t s = link_state();            /* 1 AT */
       if (s == LINK_UP) { g_backoff_i = 0; g_state = NET_IDLE; return; }
-      if (hal_millis() >= g_deadline) link_down();
+      if ((int32_t)(hal_millis() - g_deadline) >= 0) link_down();
       return;
     }
 
@@ -235,7 +238,7 @@ void net_poll(bool dosing) {
       if (r > 0) g_rx_len = (uint16_t)(g_rx_len + r);
       const char *body; uint16_t blen;
       if (rx_complete(&body, &blen)) { g_state = NET_CLOSE; return; }
-      if (r < 0 || hal_millis() >= g_deadline) { finish(0, false); return; }
+      if (r < 0 || (int32_t)(hal_millis() - g_deadline) >= 0) { finish(0, false); return; }
       return;
     }
 

@@ -317,6 +317,87 @@ static void test_poll_is_a_noop_while_the_pump_is_asserted(void) {
   TEST_ASSERT_EQUAL(before, g_state_in_dose);  /* and not one state transition either */
 }
 
+static void test_net_begin_clears_a_standing_disable_latch(void) {
+  net_disable("heap");
+  TEST_ASSERT_NOT_NULL(net_disabled());
+  net_begin();
+  /* Without this every later case in the file would poll a dead FSM and pass on a no-op.
+     g_disabled is the one static net_begin() did not clear, and net_disable() is the only
+     writer, so nothing before task 25 could have caught it. */
+  TEST_ASSERT_NULL(net_disabled());
+  net_poll(false);
+  TEST_ASSERT_NOT_EQUAL(NET_DOWN, net_state());   /* it actually runs again */
+}
+
+static void test_a_join_deadline_is_not_expired_early_by_the_clock_rollover(void) {
+  /* Armed BEFORE net_begin(): every timestamp in the FSM is relative to the one before it, and
+     a board 49.7 days up has all of them up here together. */
+  sim_set_clock_ms(0xFFFFF000u);
+  net_begin();
+  link_fake_drop_link();
+
+  net_poll(false);                             /* NET_DOWN -> NET_JOIN_ISSUE */
+  net_poll(false);                             /* issues the join; the 5 s deadline WRAPS */
+  TEST_ASSERT_EQUAL(NET_JOIN_WAIT, net_state());
+
+  /* An unsigned `hal_millis() >= g_deadline` compares a pre-wrap clock against a post-wrap
+     deadline and calls it expired on the first pass -- abandoning a join that had 5 s to run. */
+  link_fake_timeout_next();
+  pb_advance(100);
+  net_poll(false);
+  TEST_ASSERT_EQUAL(NET_JOIN_WAIT, net_state());
+}
+
+static void test_a_recv_deadline_is_not_expired_early_by_the_clock_rollover(void) {
+  sim_set_clock_ms(0xF0000000u);
+  sensors_begin();
+  net_begin();
+  for (int i = 0; i < 24 && net_state() != NET_SEND; ++i) net_poll(false);
+  TEST_ASSERT_EQUAL(NET_SEND, net_state());
+
+  /* Jump to just under the wrap BEFORE the RECV deadline is armed -- ~3.1 days, inside the
+     idiom's 2^31 validity. Arming it after the jump is what makes it straddle the wrap. */
+  sim_set_clock_ms(0xFFFFF830u);
+  net_poll(false);                             /* NET_SEND -> NET_RECV, deadline WRAPS */
+  TEST_ASSERT_EQUAL(NET_RECV, net_state());
+
+  /* Nothing is queued, so sock_read() returns 0 and only the deadline can end this pass. An
+     unsigned compare calls the wrapped deadline expired at once and discards a report that
+     still had 5 s to arrive. */
+  pb_advance(100);
+  net_poll(false);
+  TEST_ASSERT_EQUAL(NET_RECV, net_state());
+}
+
+static void test_a_backoff_wait_still_waits_across_the_clock_rollover(void) {
+  sim_set_clock_ms(0xFFFF0000u);
+  net_begin();
+  link_fake_drop_link();
+
+  net_poll(false);                             /* NET_DOWN -> NET_JOIN_ISSUE */
+  net_poll(false);                             /* issues the join, arms the deadline pre-wrap */
+  TEST_ASSERT_EQUAL(NET_JOIN_WAIT, net_state());
+
+  /* Jump to just under the wrap -- well inside the idiom's 2^31 validity -- so the join
+     deadline is genuinely past and link_down() arms its 2 s backoff across the wrap. The exact
+     value matters: the timed-out status query below advances the fake clock by PB_NET_STEP_MS,
+     and link_down() has to run while hal_millis() is STILL below the wrap or the backoff it
+     arms never straddles it and this test proves nothing. 0xFFFFF830 leaves ~800 ms to spare. */
+  sim_set_clock_ms(0xFFFFF830u);
+  link_fake_timeout_next();
+  net_poll(false);
+  TEST_ASSERT_EQUAL(NET_DOWN, net_state());
+
+  /* An unsigned `hal_millis() < g_wait_until` reads the wrapped deadline as already past and
+     re-joins at once, hammering the modem exactly when the link is worst. */
+  net_poll(false);
+  TEST_ASSERT_EQUAL(NET_DOWN, net_state());
+
+  pb_advance(2500);                            /* now the 2 s backoff really has elapsed */
+  net_poll(false);
+  TEST_ASSERT_EQUAL(NET_JOIN_ISSUE, net_state());
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -334,5 +415,9 @@ int main(void) {
   RUN_TEST(test_response_is_never_parsed_from_a_four_hundred_body);
   RUN_TEST(test_stale_bytes_in_the_rx_buffer_cannot_become_a_command);
   RUN_TEST(test_poll_is_a_noop_while_the_pump_is_asserted);
+  RUN_TEST(test_net_begin_clears_a_standing_disable_latch);
+  RUN_TEST(test_a_join_deadline_is_not_expired_early_by_the_clock_rollover);
+  RUN_TEST(test_a_backoff_wait_still_waits_across_the_clock_rollover);
+  RUN_TEST(test_a_recv_deadline_is_not_expired_early_by_the_clock_rollover);
   return UNITY_END();
 }
