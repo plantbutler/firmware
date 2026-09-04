@@ -104,6 +104,13 @@ uint16_t report_build(char *buf, uint16_t cap) {
     ok = ok && put_ch(buf, cap, &n, 200u + i, v);
   }
 
+  /* §2.10, §4.1: the DEBOUNCED tank verdict, ANDed with !contra, forced to 0 above
+     PB_FLOAT_FLAP_LIMIT consecutive DOSE_REFUSED_FLOAT results. Never 2, never negative:
+     _int_in(v,"float",0,2) is half-open and ASCII-digits-only. */
+  const bool fl = safety_float_ok_debounced() && !safety_contra() && !safety_float_flap();
+  ok = ok && put_u(buf, cap, &n, " float=%lu", fl ? 1u : 0u);
+  ok = ok && put_s(buf, cap, &n, " err=%s", stuck ? "stuck" : "none");
+
   ok = ok && put_s(buf, cap, &n, "%s", "\n");
   if (!ok) { ++g_txcap_drops; safety_set_err("txcap"); return 0; }
   /* A truncation set err=txcap, and nothing else in the program ever clears it. One 384-byte

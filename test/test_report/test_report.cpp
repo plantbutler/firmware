@@ -72,10 +72,68 @@ static void test_report_omits_a_channel_whose_read_failed_rather_than_sending_ze
   TEST_ASSERT_FALSE(has_tok("ch2=0"));
 }
 
+static void test_report_omits_the_wired_channels_and_says_stuck_when_the_canary_matches(void) {
+  for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch) sim_set_channel(ch, 7777);
+  sim_set_channel(PB_CANARY_CHANNEL, 7777);      /* unpowered mux / floating EN / broken S-line */
+  sim_set_mux_stuck(true);
+  /* FALSE, not TRUE: task 7's contract is that every failure returns false, and the canary
+     matching every wired channel is one. The report must still be LEGAL on a false sweep -
+     that is the whole point of the diagnostics - which is what the assertions below check. */
+  TEST_ASSERT_FALSE(sensors_sweep());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_FALSE(has_key("ch0="));
+  TEST_ASSERT_FALSE(has_key("ch4="));
+  TEST_ASSERT_TRUE(has_tok("err=stuck"));
+  TEST_ASSERT_TRUE(has_key("ch200="));
+}
+
+static void test_report_float_is_the_debounced_tank_verdict_anded_with_not_contra(void) {
+  fresh_sweep();
+  sim_set_float(true);
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("float=1"));
+  sim_set_float(false);
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("float=0"));
+}
+
+static void test_report_float_is_only_ever_zero_or_one(void) {
+  fresh_sweep();
+  for (int i = 0; i < 6; ++i) {                  /* a float flapping at the waterline */
+    sim_set_float(i % 2 == 0);
+    TEST_ASSERT_TRUE(build() > 0);
+    TEST_ASSERT_TRUE(has_tok("float=0") || has_tok("float=1"));
+    TEST_ASSERT_FALSE(has_tok("float=2"));       /* _int_in(v,"float",0,2) is HALF-open */
+    TEST_ASSERT_FALSE(has_tok("float=-1"));
+  }
+}
+
+static void test_repeated_float_refusals_drive_float_to_zero_on_the_wire(void) {
+  fresh_sweep();
+  sim_set_float(true);
+  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT + 1; ++i) safety_float_refusal_count(true);
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("float=0"));          /* even though the tank samples OK */
+}
+
+static void test_a_granted_dose_clears_the_float_refusal_counter(void) {
+  fresh_sweep();
+  sim_set_float(true);
+  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT + 1; ++i) safety_float_refusal_count(true);
+  safety_float_refusal_count(false);             /* any granted dose clears it */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("float=1"));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_report_carries_c_t_and_the_valid_channels);
   RUN_TEST(test_report_always_carries_at_least_one_diagnostic_channel);
   RUN_TEST(test_report_omits_a_channel_whose_read_failed_rather_than_sending_zero);
+  RUN_TEST(test_report_omits_the_wired_channels_and_says_stuck_when_the_canary_matches);
+  RUN_TEST(test_report_float_is_the_debounced_tank_verdict_anded_with_not_contra);
+  RUN_TEST(test_report_float_is_only_ever_zero_or_one);
+  RUN_TEST(test_repeated_float_refusals_drive_float_to_zero_on_the_wire);
+  RUN_TEST(test_a_granted_dose_clears_the_float_refusal_counter);
   return UNITY_END();
 }
