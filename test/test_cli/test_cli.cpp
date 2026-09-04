@@ -362,6 +362,97 @@ static void test_clear_requires_both_literal_tokens(void) {
   TEST_ASSERT_TRUE(cli_dispatch("clear contra"));
 }
 
+static void test_goto_rejects_zero_and_six(void) {
+#if PB_BRINGUP
+  pb_test_setup();
+  char out[256];
+  const char *bad[] = { "goto 0", "goto 6", "goto x" };
+  for (unsigned i = 0; i < 3u; ++i) {
+    (void)sim_serial_tx(out, sizeof out);
+    TEST_ASSERT_TRUE(cli_dispatch(bad[i]));            /* the command exists... */
+    size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "1..5"), bad[i]);   /* ...and says the range */
+  }
+#else
+  TEST_IGNORE_MESSAGE("bench build: goto is not a command");
+#endif
+}
+
+static void test_pump_without_an_argument_is_refused(void) {
+#if PB_BRINGUP
+  pb_test_setup();
+  char out[256];
+  (void)sim_serial_tx(out, sizeof out);
+  TEST_ASSERT_TRUE(cli_dispatch("pump"));
+  size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "usage"), "a bare `pump` must never assert D6");
+  TEST_ASSERT_FALSE(sim_pump_is_on());
+#else
+  TEST_IGNORE_MESSAGE("bench build: pump is not a command");
+#endif
+}
+
+static void test_pump_ms_is_clamped_to_the_hard_cap(void) {
+#if PB_BRINGUP
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true); sim_set_flow_ml_s(30);
+  TEST_ASSERT_TRUE(cli_dispatch("pump 600000"));                  /* ten minutes typed */
+  TEST_ASSERT_LESS_OR_EQUAL_UINT32(PB_DOSE_CAP_MS_MAX + 200u, sim_pump_on_ms());
+#else
+  TEST_IGNORE_MESSAGE("bench build");
+#endif
+}
+
+/* `" hanging"` contains `" hang"`, so a bare strstr passes this case wrongly - which is
+   exactly what the case is for. §6's own words are "the literal third token". */
+static void test_pump_hang_requires_the_literal_third_token(void) {
+#if PB_BRINGUP
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true); sim_set_flow_ml_s(30);
+  uint32_t f0 = sim_feeds();
+  TEST_ASSERT_TRUE(cli_dispatch("pump 500 hanging"));
+  TEST_ASSERT_GREATER_THAN_UINT32(f0, sim_feeds());   /* the dog was fed throughout */
+#else
+  TEST_IGNORE_MESSAGE("bench build");
+#endif
+}
+
+/* §6. `pump 60000 prime hang` was a single typed line that removed all three of DECISIONS
+   #10's mandatory measures at once: it asserted D6, suppressed the no-flow abort and
+   starved the watchdog. Over an unauthenticated USB CDC line a serial-monitor reconnect,
+   a `cat` of the wrong file into /dev/cu.*, or an autocompleting terminal is enough.
+   Gating on the spelling of a token is not a gate; a different binary is. */
+static void test_bringup_commands_are_absent_from_the_bench_build(void) {
+  pb_test_setup();
+#if PB_BRINGUP
+  TEST_ASSERT_TRUE(cli_dispatch("servo 1600 200"));
+  TEST_ASSERT_TRUE(cli_dispatch("home"));
+  TEST_ASSERT_TRUE(cli_dispatch("goto 3"));
+  TEST_ASSERT_TRUE(cli_dispatch("pump"));          /* exists; refuses without an argument */
+  TEST_ASSERT_TRUE(cli_dispatch("calib"));
+  TEST_ASSERT_TRUE(cli_dispatch("cal 5880"));
+  TEST_ASSERT_TRUE(cli_dispatch("noinit pattern"));
+#else
+  /* Not refused - NOT A COMMAND. `? unknown; type help` is the only correct answer, and it
+     is what bring-up 7e types at the bench binary to prove which binary is flashed. */
+  TEST_ASSERT_FALSE(cli_dispatch("servo 1600 200"));
+  TEST_ASSERT_FALSE(cli_dispatch("home"));
+  TEST_ASSERT_FALSE(cli_dispatch("goto 3"));
+  TEST_ASSERT_FALSE(cli_dispatch("pump 2000"));
+  TEST_ASSERT_FALSE(cli_dispatch("calib"));
+  TEST_ASSERT_FALSE(cli_dispatch("cal 5880"));
+  TEST_ASSERT_FALSE(cli_dispatch("noinit pattern"));
+  /* and the four that ship in BOTH binaries, asserted here so nobody moves them inside
+     the #if: an unattended board must still be stoppable, dry-able and releasable. */
+  TEST_ASSERT_TRUE(cli_dispatch("stop"));
+  TEST_ASSERT_TRUE(cli_dispatch("dry on"));
+  TEST_ASSERT_TRUE(cli_dispatch("dry off"));
+  TEST_ASSERT_TRUE(cli_dispatch("clear contra"));
+#endif
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_ui_render_fills_eight_rows_of_sixteen_characters);
@@ -381,5 +472,10 @@ int main(void) {
   RUN_TEST(test_dry_on_mid_dose_raises_the_stop_request_and_sets_the_latch);
   RUN_TEST(test_a_near_miss_token_does_not_raise_the_stop_request);
   RUN_TEST(test_clear_requires_both_literal_tokens);
+  RUN_TEST(test_goto_rejects_zero_and_six);
+  RUN_TEST(test_pump_without_an_argument_is_refused);
+  RUN_TEST(test_pump_ms_is_clamped_to_the_hard_cap);
+  RUN_TEST(test_pump_hang_requires_the_literal_third_token);
+  RUN_TEST(test_bringup_commands_are_absent_from_the_bench_build);
   return UNITY_END();
 }

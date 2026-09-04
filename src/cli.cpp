@@ -56,6 +56,26 @@ static bool parse_u32_(const char *s, uint32_t *out) {
   return true;
 }
 
+/* parse_u32_()'s bounded sibling: parse_u32_() requires a NUL terminator, and a
+   space-separated argument on a console line ends at a space instead. Digit-only, exactly
+   like parse_u32_() -- a strtol here would silently accept `servo 0x600 200`. */
+static bool parse_u32_range_(const char *begin, const char *end, uint32_t *out) {
+  uint32_t v = 0;
+  if (begin >= end || *begin < '0' || *begin > '9') return false;
+  for (const char *s = begin; s < end; ++s) {
+    if (*s < '0' || *s > '9') return false;
+    v = v * 10u + (uint32_t)(*s - '0');
+  }
+  *out = v;
+  return true;
+}
+
+/* Pointer to the first space or NUL in s -- the end of one console token. */
+static const char *token_end_(const char *s) {
+  while (*s != '\0' && *s != ' ') ++s;
+  return s;
+}
+
 static void note_memory_(void) {
   uint32_t a = hal_heap_arena(), h = hal_stack_hwm();
   if (a < g_arena_min) g_arena_min = a;
@@ -236,6 +256,87 @@ void cli_poll(void) {
   }
 }
 
+#if PB_BRINGUP
+/* cart.h is ALREADY included at the top of this file (task 14 step 10) -- cli_print_status()
+   calls the cart in both binaries, so the include cannot live in here. Do not add a second
+   one: this block is bringup-only and the cart is not. */
+
+/* THE ONE CALL SITE OF THE DOSING ENTRY POINT IN THIS FILE -- §9 counts exactly one in
+   cli.cpp, and this comment may not spell the token it counts.
+   `pump` and `calib` both come through here, and so does the summary line. */
+static void cli_run_dose_(uint32_t ms, bool long_prime, bool hang) {
+  dose_req_t q = {0};
+  q.by_time    = true;
+  q.need_pos   = false;                    /* bring-up 4a/5a/5b run before the cart is
+                                              calibrated; a pump that demanded a position
+                                              would make them unrunnable */
+  q.cap_ms     = ms > PB_DOSE_CAP_MS_MAX ? PB_DOSE_CAP_MS_MAX : ms;
+  q.long_prime = long_prime;
+  q.hang       = hang;
+  (void)dose_run(&q);
+  cli_print_dose_summary();
+}
+
+/* spec §6. Every command here is compiled out of the binary that runs unattended, and
+   make check proves it on the PREPROCESSED source of this file (task 30), not on this #if. */
+static bool cli_dispatch_bringup_(const char *line) {
+  if (strncmp(line, "servo ", 6) == 0) {
+    const char *sp = strchr(line + 6, ' ');
+    uint32_t us = 0u, ms = 0u;
+    if (!sp || !parse_u32_range_(line + 6, sp, &us) || !parse_u32_(sp + 1, &ms) ||
+        us < 1000u || us > 2000u || ms == 0u) {
+      hal_serial_write("usage: servo <1000-2000> <ms>\n");
+      return true;
+    }
+    if (ms > PB_SERVO_CAP_MS) ms = PB_SERVO_CAP_MS;  /* a typo may not run the screw forever */
+    cart_jog((int16_t)us, ms);
+    hal_serial_write("servo done\n");
+    return true;
+  }
+  if (strcmp(line, "home") == 0) {
+    if (cart_home()) hal_serial_write("home ok\n");                 /* ONE traverse */
+    else { hal_serial_write("home FAILED: ");
+           hal_serial_write(cart_err()); hal_serial_write("\n"); }
+    return true;
+  }
+  if (strncmp(line, "goto ", 5) == 0) {
+    uint32_t o = 0u;
+    if (!parse_u32_(line + 5, &o) || o < 1u || o > PB_OUTLETS) {
+      hal_serial_write("goto: outlet must be 1..5\n");              /* the range, by name */
+      return true;
+    }
+    if (cart_goto((uint8_t)o)) hal_serial_write("goto ok\n");
+    else { hal_serial_write("goto FAILED: ");
+           hal_serial_write(cart_err()); hal_serial_write("\n"); }
+    return true;
+  }
+
+  if (strncmp(line, "pump", 4) == 0) {
+    uint32_t ms = 0u;
+    const char *arg = line + 4;
+    if (*arg != ' ' || !parse_u32_range_(arg + 1, token_end_(arg + 1), &ms) || ms == 0u) {
+      hal_serial_write("usage: pump <ms> [prime] [hang]\n");
+      return true;
+    }
+    bool prime = false, hang = false;
+    for (const char *t = arg + 1; *t != '\0'; ) {      /* WHOLE tokens: `hanging` is not
+                                                          `hang`, and a substring match
+                                                          would hang on a word nobody typed */
+      while (*t == ' ') ++t;
+      const char *e = t; while (*e != '\0' && *e != ' ') ++e;
+      size_t n = (size_t)(e - t);
+      if (n == 5u && strncmp(t, "prime", 5) == 0) prime = true;
+      if (n == 4u && strncmp(t, "hang",  4) == 0) hang  = true;
+      t = e;
+    }
+    cli_run_dose_(ms, prime, hang);
+    return true;
+  }
+  if (strcmp(line, "calib") == 0) { cli_run_dose_(10000u, true, false); return true; }  /* 7b */
+  return false;                                       /* step 10 adds cal and noinit pattern */
+}
+#endif /* PB_BRINGUP */
+
 bool cli_dispatch(const char *line) {
   if (strcmp(line, "i2c")    == 0) { cmd_i2c_();    return true; }
   if (strncmp(line, "mux ", 4) == 0) return cmd_mux_(line + 4);
@@ -271,8 +372,32 @@ bool cli_dispatch(const char *line) {
     hal_serial_write("stop: no dose running\n");
     return true;
   }
+#if PB_BRINGUP
+  if (cli_dispatch_bringup_(line)) return true;
+#endif
   hal_serial_write("? unknown; type help\n");
   return false;
+}
+
+/* Printed at the end of every dose, from every path (spec §6's pitch deliverable). Outside
+   #if PB_BRINGUP: exec.cpp (task 26) calls this same function for the backend's doses in
+   the bench build, so the printer itself ships in both binaries even though only the
+   bring-up console's pump/calib reach it today. */
+void cli_print_dose_summary(void) {
+  static char line[PB_LINE_CAP];
+  uint32_t ms  = dose_last_ms();
+  uint32_t ml  = dose_flow_ml();
+  uint32_t t10 = ms ? (ml * 10000u) / ms : 0u;      /* ml/s x 10, in integer tenths */
+  /* §6 prints r=ok for a successful dose while err_of(DOSE_OK) is the wire's "none".
+     One conditional, here: `ok` must NOT be added to err_of()'s enum, which is tested
+     against butler.py's own parser. */
+  const char *r = (dose_last_result() == DOSE_OK) ? "ok" : err_of(dose_last_result());
+  snprintf(line, sizeof line,
+           "dose outlet=%lu ms=%lu pulses=%lu ml=%lu mls=%lu.%lu r=%s\n",
+           (unsigned long)dose_last_outlet(), (unsigned long)ms,
+           (unsigned long)dose_last_pulses(), (unsigned long)ml,
+           (unsigned long)(t10 / 10u), (unsigned long)(t10 % 10u), r);
+  hal_serial_write(line);
 }
 
 void cli_print_status(void) {
@@ -368,8 +493,9 @@ void cli_print_status(void) {
 
   /* §2.11: the boot banner and `status` both print dry=. This is safety_dry()'s verdict,
      not a re-read of g_nv.dry_latched -- the two agree today, but this line is what the
-     operator and bring-up 6/7c actually read, so it goes through the same accessor
-     dose_run() (task 17) will. */
+     operator and bring-up 6/7c actually read, so it goes through the same accessor the
+     dosing entry point's own ladder does. (Not spelled literally: §9's count of that call
+     in this file must stay exactly one.) */
   cli_printf_u32("dry=%lu\n", (uint32_t)(safety_dry() ? 1u : 0u));
 
   /* §2.7. The loudest fact this board can report about itself: two independent sensors

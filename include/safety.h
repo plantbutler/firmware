@@ -84,7 +84,13 @@ typedef enum { DOSE_OK = 0, DOSE_REFUSED_WDT, DOSE_REFUSED_DRY, DOSE_REFUSED_CON
                DOSE_RESULT_COUNT } dose_result_t;
 
 typedef struct { uint8_t outlet; uint16_t ml; bool by_time; uint32_t cap_ms;
-                 bool need_pos; bool long_prime; } dose_req_t;
+                 bool need_pos; bool long_prime;
+                 bool hang;   /* bring-up 7c: run the dose PB_HANG_MS, then STOP FEEDING. The
+                     field is UNCONDITIONAL - a #if PB_BRINGUP here would break §6's safety.o
+                     hash equality between uno_r4_wifi and uno_r4_wifi_bringup, which is what
+                     lets 7c prove the watchdog on one binary and mean it about the other.
+                     Only cli.cpp's #if PB_BRINGUP block ever sets it true. */
+               } dose_req_t;
 /* dose_req_t.outlet is NEVER a sentinel: water=0 is a legal backend command
    (_int_in(v,"water",0,256), and butler's `outlet is None` guard does not catch 0), so 0
    arrives from the wire and is refused here as well as by task 26's range check. There is

@@ -9,6 +9,12 @@ void cli_poll(void);
 bool cli_dispatch(const char *line);
 void cli_print_status(void);
 void cli_printf_u32(const char *fmt, uint32_t v);
+/* Printed at the end of EVERY dose, from EVERY path (spec §6's pitch deliverable) --
+   cli.cpp's own pump/calib helper calls it, and task 26's exec.cpp calls it again for the
+   backend's doses in the bench build. Declared here, OUTSIDE #if PB_BRINGUP, because both
+   binaries print it; defined in src/cli.cpp, also outside the #if -- a body in this header
+   would multiply-define across cli.cpp, exec.cpp and main.cpp. */
+void cli_print_dose_summary(void);
 /* RSSI is the one signed figure `status` prints; %d is banned in report.cpp and
    netfsm.cpp only, and cli.cpp is outside that grep (task 24 step 17). */
 void cli_printf_i32(const char *fmt, int32_t v);

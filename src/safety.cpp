@@ -292,8 +292,15 @@ dose_result_t dose_run(const dose_req_t *q) {
       last_bus = now;
       if (!cart_bus_check())                           { r = DOSE_ABORT_POS;    break; }
     }
-    /* Task 20 appends the `hang` hook BELOW this line, so every abort rule above it is
-       evaluated before the dog is deliberately starved. */
+    if (q->hang && el >= PB_HANG_MS) {
+      /* bring-up 7c. D6 STAYS ASSERTED and the dog is NOT fed: the watchdog must bite, the
+         reset must drop the pump, and the honest spill is 5592 ms x the flow rate 7b
+         measured (~170 ml at 30 ml/s). Writing the pump off here would make the spill zero
+         and 7c would prove nothing. This is the only loop in the program that is meant not
+         to terminate, and it is in the one function §9's for(;;) grep exempts.
+         hal_millis() is called so the loop is not an empty body with no forward progress. */
+      for (;;) { (void)hal_millis(); }
+    }
   }
   hal_pump_write(false);          /* unconditional, ONE exit, before any bookkeeping */
 
