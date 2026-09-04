@@ -143,11 +143,20 @@ static void test_report_pos_is_unknown_while_the_dry_latch_is_set(void) {
 }
 
 static void test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated(void) {
+#if PB_PULSES_PER_GATE == 0
   fresh_sweep();
   TEST_ASSERT_EQUAL_INT(0, PB_PULSES_PER_GATE);      /* bring-up 6 has not run */
   TEST_ASSERT_FALSE(cart_pos_known());
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE(has_tok("pos=unknown"));
+#else
+  /* [env:native_cal] (task 14) builds this whole tree a second time with
+     PB_PULSES_PER_GATE=1450, the same idiom test_cart.cpp and test_dose.cpp already use
+     throughout for a case that is only meaningful on the uncalibrated arm. Found by running
+     `pio test -e native_cal -f test_report`: this case is about proving pos=unknown holds
+     WHILE the gate pitch is uncalibrated, and under native_cal it no longer is. */
+  TEST_IGNORE_MESSAGE("calibrated arm: PB_PULSES_PER_GATE != 0; see native");
+#endif
 }
 
 static void test_report_omits_flow_ml_when_there_is_no_ack(void) {

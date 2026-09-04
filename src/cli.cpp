@@ -12,6 +12,7 @@
 #include "noinit.h"
 #include "pins.h"
 #include "pulses.h"
+#include "report.h"
 #include "safety.h"
 #include "secrets.h"
 #include "sensors.h"
@@ -524,6 +525,12 @@ void cli_print_status(void) {
 #if PB_REPORT_POS_UNKNOWN
   hal_serial_write("pos: FORCED unknown (PB_REPORT_POS_UNKNOWN=1)\n");
 #endif
+
+  /* §4.2 requires the drop to be loud: a truncated body is a DROPPED report, not a 400, and
+     the console is the only place that failure is otherwise visible at all. */
+  cli_printf_u32("report: last_body=%lu bytes\n", (uint32_t)report_last_len());
+  cli_printf_u32("report: cap=%lu bytes\n", (uint32_t)PB_BODY_CAP);
+  cli_printf_u32("report: DROPPED on truncation (err=txcap) x%lu\n", report_txcap_drops());
 
   snprintf(b, sizeof b,
            "arena=%lu (min %lu max %lu) ordblks=%lu break=0x%lx stack_hwm=%lu (max %lu) "
