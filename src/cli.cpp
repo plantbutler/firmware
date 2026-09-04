@@ -9,6 +9,8 @@
 #include "cli.h"
 #include "config.h"
 #include "hal.h"
+#include "link.h"
+#include "netfsm.h"
 #include "noinit.h"
 #include "pins.h"
 #include "pulses.h"
@@ -536,6 +538,16 @@ void cli_print_status(void) {
      refuses EVERY command as a replay until a COLD boot (power cycle, not RESET). Without this
      line that is silent and unexplainable. Spec §4.3, §16.5.9. */
   cli_printf_u32("cmd_high_water=%lu (recovery: cold boot)\n", g_nv.cmd_high_water);
+
+  cli_printf_u32("link=%lu\n", (uint32_t)link_state());       /* 0 down, 1 joining, 2 up */
+  cli_printf_i32("rssi=%ld dBm\n", (int32_t)link_rssi());     /* task 11's signed printer */
+  hal_serial_write("ip="); hal_serial_write(link_ip()); hal_serial_write("\n");
+  cli_printf_u32("http_last=%lu\n", (uint32_t)net_last_status());
+  cli_printf_u32("reports_ok=%lu\n", net_reports_ok());
+  cli_printf_u32("reports_failed=%lu\n", net_reports_failed());
+  cli_printf_u32("modem_ran=%lu\n", (uint32_t)(net_modem_ran_this_pass() ? 1u : 0u));
+  if (net_disabled()) { hal_serial_write("net=DISABLED ("); hal_serial_write(net_disabled());
+                        hal_serial_write(")\n"); }
 
   snprintf(b, sizeof b,
            "arena=%lu (min %lu max %lu) ordblks=%lu break=0x%lx stack_hwm=%lu (max %lu) "
