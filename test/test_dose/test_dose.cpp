@@ -16,12 +16,11 @@ void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
 
 /* Which arms of dose_result_t this BUILD can actually drive dose_run() to, counted rather
-   than guessed. 14 here: DOSE_REFUSED_CONTRA (task 19's latch) and the four DOSE_ABORT_*
-   results that task 18's mid-dose rules produce (NOFLOW, NOISE, FLOAT, POS) do not exist
-   yet -- the breaks that would produce them are not in the loop. 19 - 5 = 14. Each later
-   task raises this as it makes another arm reachable: 18 after task 18 step 9, 19 after
-   task 19 step 8. */
-#define PB_DRIVABLE_RESULTS 14
+   than guessed. 18 here, after task 18: DOSE_ABORT_NOFLOW, DOSE_ABORT_NOISE, DOSE_ABORT_
+   FLOAT and DOSE_ABORT_POS are all reachable now that the loop carries the prime/stall,
+   rate/plausibility, mid-dose float and PB_POS_RECHECK_MS bus rules. Only DOSE_REFUSED_
+   CONTRA (task 19's latch) is still unreachable. 19 - 1 = 18. Task 19 raises this to 19. */
+#define PB_DRIVABLE_RESULTS 18
 
 static void test_the_native_runner_links_and_runs(void) {
   /* PB_CONTROLLER comes from [env:native]'s build_flags, so this also proves the flag
@@ -560,14 +559,52 @@ static bool pb_drive_dose_to_result(dose_result_t want) {
       (void)dose_run(&q);
       return true;
     }
-    case DOSE_ABORT_NOFLOW:
-      return false;   /* task 18's prime/stall rules: the break does not exist yet */
-    case DOSE_ABORT_NOISE:
-      return false;   /* task 18's in-dose rate/plausibility rules */
-    case DOSE_ABORT_FLOAT:
-      return false;   /* task 18's mid-dose float check */
-    case DOSE_ABORT_POS:
-      return false;   /* task 18's PB_POS_RECHECK_MS live bus check */
+    case DOSE_ABORT_NOFLOW: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_set_float(true);
+      sim_set_flow_ml_s(0u);                             /* the pump runs; nothing ever moves */
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_ABORT_NOISE: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_set_float(true);
+      sim_flow_storm_at_pump_on(2000u);       /* a storm that begins WITH the pump */
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_ABORT_FLOAT: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_set_float(true);
+      sim_set_flow_ml_s(30u);
+      sim_set_float_at_ms(500u, false);       /* drops mid-dose, well inside the prime window */
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+      (void)dose_run(&q);
+      return true;
+    }
+    case DOSE_ABORT_POS: {
+      pb_advance(PB_BOOT_GAP_MS + 1u);
+      pulses_begin();
+      (void)sensors_begin();
+      sim_set_float(true);
+      sim_set_flow_ml_s(30u);
+      sim_set_i2c_fail(true);                 /* bites INSIDE the loop, at the live bus check --
+                                                  the pre-dose ladder reads the cached healthy
+                                                  flag, not a live transfer, so this dose starts */
+      dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+      (void)dose_run(&q);
+      sim_set_i2c_fail(false);
+      (void)sensors_begin();                  /* leave the bus healthy for whatever runs next */
+      return true;
+    }
     case DOSE_ABORT_STOP: {
       pb_advance(PB_BOOT_GAP_MS + 1u);
       pulses_begin();
