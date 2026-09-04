@@ -10,6 +10,7 @@
 #include "pulses.h"
 #include "safety.h"
 #include "report.h"
+#include "cart.h"
 
 static char g_buf[PB_BODY_CAP];
 
@@ -125,6 +126,30 @@ static void test_a_granted_dose_clears_the_float_refusal_counter(void) {
   TEST_ASSERT_TRUE(has_tok("float=1"));
 }
 
+static void test_report_pos_is_unknown_while_the_going_live_flag_is_set(void) {
+  fresh_sweep();
+  TEST_ASSERT_EQUAL_INT(1, PB_REPORT_POS_UNKNOWN);   /* ships defined — §4.6 */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("pos=unknown"));
+  TEST_ASSERT_FALSE(has_tok("pos=ok"));
+}
+
+static void test_report_pos_is_unknown_while_the_dry_latch_is_set(void) {
+  fresh_sweep();
+  safety_dry_set(true);
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("pos=unknown"));
+  safety_dry_set(false);
+}
+
+static void test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated(void) {
+  fresh_sweep();
+  TEST_ASSERT_EQUAL_INT(0, PB_PULSES_PER_GATE);      /* bring-up 6 has not run */
+  TEST_ASSERT_FALSE(cart_pos_known());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("pos=unknown"));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_report_carries_c_t_and_the_valid_channels);
@@ -135,5 +160,8 @@ int main(void) {
   RUN_TEST(test_report_float_is_only_ever_zero_or_one);
   RUN_TEST(test_repeated_float_refusals_drive_float_to_zero_on_the_wire);
   RUN_TEST(test_a_granted_dose_clears_the_float_refusal_counter);
+  RUN_TEST(test_report_pos_is_unknown_while_the_going_live_flag_is_set);
+  RUN_TEST(test_report_pos_is_unknown_while_the_dry_latch_is_set);
+  RUN_TEST(test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated);
   return UNITY_END();
 }

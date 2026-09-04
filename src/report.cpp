@@ -109,6 +109,19 @@ uint16_t report_build(char *buf, uint16_t cap) {
      _int_in(v,"float",0,2) is half-open and ASCII-digits-only. */
   const bool fl = safety_float_ok_debounced() && !safety_contra() && !safety_float_flap();
   ok = ok && put_u(buf, cap, &n, " float=%lu", fl ? 1u : 0u);
+
+  /* §4.1, §2.10, §4.6: unknown UNCONDITIONALLY while the going-live flag is defined AND
+     unconditionally while the dry latch is set (otherwise water_rules queues doses the board
+     will refuse and ack, paging HIGH once per cooldown, forever). Otherwise ok only when the
+     gate pitch is calibrated, a home has been seen since boot, and the last expander read
+     succeeded. */
+#if PB_REPORT_POS_UNKNOWN
+  const bool pos_ok = false;
+#else
+  const bool pos_ok = !safety_dry() && cart_pos_known() && sensors_i2c_healthy();
+#endif
+  ok = ok && put_s(buf, cap, &n, " pos=%s", pos_ok ? "ok" : "unknown");
+
   ok = ok && put_s(buf, cap, &n, " err=%s", stuck ? "stuck" : "none");
 
   ok = ok && put_s(buf, cap, &n, "%s", "\n");
