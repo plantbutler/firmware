@@ -75,6 +75,7 @@ bool report_heap_ok(void) {
 }
 
 uint16_t report_build(char *buf, uint16_t cap) {
+  if (!report_may_build()) return 0;    /* err=recv must never reach the wire (§4.3) */
   uint16_t n = 0;
   bool ok = true;
   (void)report_heap_ok();      /* §12 item 0's per-report half. It does not abort the body:
@@ -122,7 +123,20 @@ uint16_t report_build(char *buf, uint16_t cap) {
 #endif
   ok = ok && put_s(buf, cap, &n, " pos=%s", pos_ok ? "ok" : "unknown");
 
-  ok = ok && put_s(buf, cap, &n, " err=%s", stuck ? "stuck" : "none");
+  const char *err;
+  if (g_ack_set) {
+    ok = ok && put_u(buf, cap, &n, " ack=%lu", g_ack.id);
+    ok = ok && put_u(buf, cap, &n, " flow_ml=%lu", (uint32_t)g_ack.flow_ml);
+    err = g_ack.err;
+  } else {
+    /* §1: pulses with the pump off raise ch205 and err=leak, and they never block a dose.
+       This is that token's ONLY producer in the program: pulses_leak_poll() (driven from
+       loop(), task 12 step 4) advances the count, and this line puts it on the wire. Below
+       `stuck`, because a mux that is lying about every channel is the larger fact. */
+    err = stuck ? "stuck" : (pulses_leak_seen() ? "leak" : safety_last_err());
+  }
+  if (!err || !*err) err = "none";
+  ok = ok && put_s(buf, cap, &n, " err=%s", err);
 
   ok = ok && put_s(buf, cap, &n, "%s", "\n");
   if (!ok) { ++g_txcap_drops; safety_set_err("txcap"); return 0; }
@@ -135,7 +149,18 @@ uint16_t report_build(char *buf, uint16_t cap) {
   return n;
 }
 
-void report_set_ack(uint32_t, uint16_t, const char *) {}
-void report_clear_ack(void) {}
-bool report_ack_is_recv(void) { return false; }
-bool report_may_build(void) { return true; }
+/* butler's ack UPDATE writes flow_ml = ? unconditionally (butler.py:830), so an ack= without a
+   flow_ml= stores NULL, charges the pot the FULL ml against its daily cap (COALESCE(flow_ml, ml),
+   :745-751) and skips the 2*flow_ml < ml branch entirely. Structurally one pair, both ways. */
+void report_set_ack(uint32_t id, uint16_t flow_ml, const char *err) {
+  g_ack.id = id; g_ack.flow_ml = flow_ml; g_ack.err = err;
+  g_ack_set = (id != 0);                 /* ack=0 400s the whole report; never emit it */
+}
+void report_clear_ack(void) { g_ack_set = false; g_ack.id = 0; g_ack.flow_ml = 0; g_ack.err = 0; }
+bool report_ack_is_recv(void) {
+  return g_ack_set && g_ack.err && strcmp(g_ack.err, "recv") == 0;
+}
+/* §4.3: no report may be built while a command is pending and the ack slot still reads "recv".
+   Without this the placeholder reaches the wire, butler marks the command acked with flow_ml=0,
+   pages HIGH, sets the pot's cooldown and charges 0 ml — and THEN the board runs the dose. */
+bool report_may_build(void) { return !report_ack_is_recv(); }

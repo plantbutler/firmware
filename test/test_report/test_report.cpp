@@ -150,6 +150,38 @@ static void test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated(void)
   TEST_ASSERT_TRUE(has_tok("pos=unknown"));
 }
 
+static void test_report_omits_flow_ml_when_there_is_no_ack(void) {
+  fresh_sweep();
+  report_clear_ack();
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_FALSE(has_key("ack="));
+  TEST_ASSERT_FALSE(has_key("flow_ml="));
+}
+
+static void test_report_never_emits_ack_without_flow_ml(void) {
+  fresh_sweep();
+  report_set_ack(17, 0, "float");        /* a refusal: flow_ml is 0, and MUST be present */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("ack=17"));
+  TEST_ASSERT_TRUE(has_tok("flow_ml=0"));
+  TEST_ASSERT_TRUE(has_tok("err=float"));
+}
+
+static void test_report_never_emits_ack_zero(void) {
+  fresh_sweep();
+  report_set_ack(0, 0, "none");          /* ack is _int_in(v,"ack",1,2**63): 0 400s the report */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_FALSE(has_key("ack="));
+}
+
+static void test_report_ack_id_survives_above_sixty_five_thousand(void) {
+  fresh_sweep();
+  report_set_ack(4294967295u, 1000, "none");
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE(has_tok("ack=4294967295"));
+  TEST_ASSERT_TRUE(has_tok("flow_ml=1000"));
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_report_carries_c_t_and_the_valid_channels);
@@ -163,5 +195,9 @@ int main(void) {
   RUN_TEST(test_report_pos_is_unknown_while_the_going_live_flag_is_set);
   RUN_TEST(test_report_pos_is_unknown_while_the_dry_latch_is_set);
   RUN_TEST(test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated);
+  RUN_TEST(test_report_omits_flow_ml_when_there_is_no_ack);
+  RUN_TEST(test_report_never_emits_ack_without_flow_ml);
+  RUN_TEST(test_report_never_emits_ack_zero);
+  RUN_TEST(test_report_ack_id_survives_above_sixty_five_thousand);
   return UNITY_END();
 }
