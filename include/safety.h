@@ -1,6 +1,8 @@
 /* include/safety.h — D6's whole story. READ THIS FILE FIRST.
-   Includes neither link.h, Network.h nor WiFiS3.h: this layer *cannot* make a network
-   call, and tools/check.sh greps for it (§3, §9). */
+   Includes neither link.h, Network.h, netfsm.h nor WiFiS3.h: this layer *cannot* make a
+   network call, and tools/check.sh greps for all four (§3, §9; netfsm.h added task 30 --
+   it is the seam's own state machine, and a route to net_poll()/net_disable() just as
+   real as reaching link.h directly). */
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>

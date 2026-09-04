@@ -124,4 +124,4 @@ bool        link_fake_saw_available(void);
 bool        link_fake_saw_connected(void);
 uint16_t    link_fake_reset_count(void);
 const uint8_t *link_fake_sent(uint16_t *len);
-uint16_t    link_fake_write_count(void);    /* sock_write() calls since link_fake_reset() */
+uint16_t    link_fake_write_count(void);    /* sock_write calls since link_fake_reset() */

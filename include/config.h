@@ -30,9 +30,9 @@
 
 /* ---- the network. MODEM_TIMEOUT default is 10000 (Modem.h:12), nearly twice the
    WDT window. The worst net_poll() pass is CONNECT = 2 AT commands (_BEGINCLIENT +
-   _CLIENTCONNECT), which holds ONLY because (a) sock_close() always ran in a PRIOR
+   _CLIENTCONNECT), which holds ONLY because (a) sock_close always ran in a PRIOR
    pass and left _sock == -1 (WiFiClient.cpp:31,217), (b) every error exit routes
-   through the SOCK_CLOSE state instead of closing inline, and (c) sock_read() is a
+   through the SOCK_CLOSE state instead of closing inline, and (c) sock_read is a
    bare client.read() -- no available(), no connected(). See §3's per-pass table.
    2 * 1200 = 2400 < 5592, and 2400 + SLACK = 4400 is what setup() asserts. ---- */
 #define PB_NET_STEP_MS        1200

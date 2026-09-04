@@ -2,7 +2,7 @@
    and the two-AT budget. Spec §3.
    ONE bounded link/socket step per net_poll(), AT MOST 2 AT commands, each with its own
    deadline. Worst pass is CONNECT = _BEGINCLIENT + _CLIENTCONNECT = 2 * PB_NET_STEP_MS =
-   2400 ms against a granted 5592 ms — and that holds ONLY because sock_close() ran in a PRIOR
+   2400 ms against a granted 5592 ms — and that holds ONLY because sock_close ran in a PRIOR
    pass and left _sock == -1, and because every error exit routes through NET_SOCK_CLOSE
    instead of closing inline. Spec §3's per-pass AT table. */
 #pragma once
