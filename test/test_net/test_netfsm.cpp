@@ -743,6 +743,40 @@ static void test_link_drop_returns_to_joining_with_exponential_backoff(void) {
   TEST_ASSERT_TRUE(seen[2] > seen[1]);
 }
 
+static void test_a_poisoned_close_does_not_leave_starvation_armed_for_the_next_report(void) {
+  sensors_begin();
+  net_begin();
+
+  /* Arm g_connect_starved: sock_open() fails cleanly (no timeout) on the first attempt AND on
+     the retry, which is the only way NET_CONNECT sets it. */
+  link_fake_fail_open(true);
+  int guard = 0;
+  while (net_reports_failed() < 2u && guard++ < 200) net_poll(false);
+  TEST_ASSERT_EQUAL_UINT32(2u, net_reports_failed());   /* the open AND its retry both failed */
+  TEST_ASSERT_EQUAL(NET_SOCK_CLOSE, net_state());       /* and the socket is still allocated */
+
+  /* Now poison the very NET_SOCK_CLOSE pass that would have CONSUMED the flag. The timeout
+     check sits above the consumer and returns early, so g_connect_starved survives the pass.
+     NET_JOIN_WAIT's LINK_UP exit then goes straight to NET_IDLE without ever touching it --
+     which is why NET_IDLE's own reset is the only thing that clears it. */
+  link_fake_timeout_next();
+  net_poll(false);
+  TEST_ASSERT_EQUAL(NET_DOWN, net_state());
+
+  /* A clean, fully successful report from here must end parked in NET_IDLE. With NET_IDLE's
+     g_connect_starved reset deleted, the stale flag fires in the NEXT report's SOCK_CLOSE pass
+     and calls link_down() on a link that never misbehaved -- the board drops a working
+     connection once per report, forever. */
+  link_fake_fail_open(false);
+  link_fake_queue_response(k200, strlen(k200));
+  int g2 = 0;
+  while (net_reports_ok() == 0u && g2++ < 300) pb_net_passes(1, 1000u);
+  /* With NET_IDLE's g_connect_starved reset deleted, this never becomes true: the stale flag
+     fires in every subsequent SOCK_CLOSE pass, link_down()s a link that never misbehaved, and
+     the board can no longer complete a report at all. */
+  TEST_ASSERT_EQUAL_UINT32(1u, net_reports_ok());
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_sock_close_is_idempotent_and_leaves_the_socket_unallocated);
@@ -778,6 +812,7 @@ int main(void) {
   RUN_TEST(test_a_modem_timeout_in_send_poisons_the_link);
   RUN_TEST(test_a_modem_timeout_in_recv_poisons_the_link);
   RUN_TEST(test_each_report_gets_its_own_single_retry);
+  RUN_TEST(test_a_poisoned_close_does_not_leave_starvation_armed_for_the_next_report);
   RUN_TEST(test_was_timeout_boundary_is_inclusive);
   RUN_TEST(test_link_drop_returns_to_joining_with_exponential_backoff);
   return UNITY_END();
