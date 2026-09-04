@@ -23,3 +23,13 @@ bool     report_may_build(void);
 uint16_t report_last_len(void);      /* addition: `status` prints it */
 uint32_t report_txcap_drops(void);   /* addition: §4.2 asks status to say so LOUDLY */
 bool     report_heap_ok(void);       /* addition: spec §12 item 0's per-report break check */
+
+typedef enum { CMD_NONE, CMD_WATER, CMD_STOP } cmd_kind_t;
+typedef struct { uint32_t id; cmd_kind_t kind; uint8_t outlet; uint16_t ml; uint16_t cap_s; } cmd_t;
+typedef struct { uint16_t next_s; cmd_t cmd; } response_t;
+
+/* Parses a 200 body ONLY. Butler's 400 body echoes the board's own tokens
+   (f"{key}= out of range: {value}"), so a 4xx body parsed here could water a plant.
+   *out is always fully written; the return value means "a command was accepted".
+   out->next_s == 0 means "keep the previous interval". Spec §4.5. */
+bool response_parse(const char *body, uint16_t len, response_t *out);

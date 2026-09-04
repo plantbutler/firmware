@@ -11,6 +11,7 @@
 #include "safety.h"
 #include "report.h"
 #include "cart.h"
+#include "noinit.h"
 
 static char g_buf[PB_BODY_CAP];
 
@@ -427,6 +428,44 @@ static void test_report_matches_the_fake_device_shape(void) {
   TEST_ASSERT_EQUAL_STRING(golden, spine);
 }
 
+/* ---- response_parse() — the half of the wire where a fault becomes water (spec §4.5) ---- */
+
+static void test_response_parses_next_only(void) {
+  response_t r;
+  const char *b = "next=60\n";
+  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL_UINT16(60, r.next_s);
+  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
+}
+
+static void test_response_parses_a_water_command(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=17 water=3 ml=250 cap_s=30\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL_UINT16(60, r.next_s);
+  TEST_ASSERT_EQUAL(CMD_WATER, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(17, r.cmd.id);
+  TEST_ASSERT_EQUAL_UINT8(3, r.cmd.outlet);
+  TEST_ASSERT_EQUAL_UINT16(250, r.cmd.ml);
+  TEST_ASSERT_EQUAL_UINT16(30, r.cmd.cap_s);
+}
+
+static void test_response_parses_a_stop_command(void) {
+  response_t r;
+  const char *b = "next=60\ncmd=18 stop=1\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_STOP, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT32(18, r.cmd.id);
+}
+
+static void test_response_ignores_unknown_keys(void) {
+  response_t r;
+  const char *b = "next=60 note=hello\ncmd=19 water=2 ml=100 cap_s=10 spare=7\n";
+  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
+  TEST_ASSERT_EQUAL(CMD_WATER, r.cmd.kind);
+  TEST_ASSERT_EQUAL_UINT16(100, r.cmd.ml);
+}
+
 int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_report_carries_c_t_and_the_valid_channels);
@@ -457,5 +496,9 @@ int main(void) {
   RUN_TEST(test_a_break_inside_the_stack_margin_latches_err_heap);
   RUN_TEST(test_report_fits_the_buffer_at_maximum_field_widths);
   RUN_TEST(test_report_matches_the_fake_device_shape);
+  RUN_TEST(test_response_parses_next_only);
+  RUN_TEST(test_response_parses_a_water_command);
+  RUN_TEST(test_response_parses_a_stop_command);
+  RUN_TEST(test_response_ignores_unknown_keys);
   return UNITY_END();
 }
