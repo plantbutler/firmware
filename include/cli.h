@@ -30,3 +30,12 @@ bool cli_stop_requested(void);
    ring and this file's pushback together (§2.8, §15.3): bytes typed during a dose are
    DISCARDED, never queued into a command after it. */
 void cli_stop_clear(void);
+
+#if PB_BRINGUP && defined(PB_NATIVE)
+/* Host-suite seam, same shape as safety.h's: `pump`'s [prime] [hang] flag parser is a
+   pure string inspection with no side effect, forwarded here so a host case can prove
+   the literal-token requirement (spec §6) directly -- without ever setting hang=true on
+   a dose_req_t and reaching the loop that deliberately starves the watchdog, which would
+   hang the suite by construction. Only exists where the bring-up console itself does. */
+void cli_pump_flags_for_test_(const char *args, bool *prime, bool *hang);
+#endif

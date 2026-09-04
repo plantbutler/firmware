@@ -8,6 +8,7 @@
 #include "cli.h"
 #include "config.h"
 #include "hal.h"
+#include "noinit.h"
 #include "safety.h"
 #include "sim.h"
 #include "ui.h"
@@ -404,6 +405,34 @@ static void test_pump_ms_is_clamped_to_the_hard_cap(void) {
 #endif
 }
 
+/* Direct proof of the literal-token requirement, over the pure parser rather than through
+   dose_run(). test_pump_hang_requires_the_literal_third_token below (verbatim from the
+   task) cannot actually discriminate a substring-matching regression on ITS OWN input:
+   `pump 500 hanging` has cap_ms=500 < PB_HANG_MS=3000, so the loop always exits via
+   DOSE_ABORT_CAP before el ever reaches the point where a wrongly-true hang flag would be
+   observed, and no larger cap_ms can be used in a host case without risking an ACTUAL
+   infinite hang the moment the flag is wrongly true (§6's own hang loop never returns; no
+   host case may ever set hang=true). Proven here instead by calling the parser directly:
+   no dose_run(), no loop, no possible hang -- so the case can safely assert on the boolean
+   the parser produced rather than on a side effect three abort-rules removed from it. */
+static void test_pump_flag_parser_requires_whole_tokens(void) {
+#if PB_BRINGUP
+  bool prime, hang;
+  cli_pump_flags_for_test_("hanging", &prime, &hang);
+  TEST_ASSERT_FALSE_MESSAGE(hang, "hanging");
+  cli_pump_flags_for_test_("primed", &prime, &hang);
+  TEST_ASSERT_FALSE_MESSAGE(prime, "primed");
+  cli_pump_flags_for_test_("hang", &prime, &hang);
+  TEST_ASSERT_TRUE_MESSAGE(hang, "hang");
+  cli_pump_flags_for_test_("prime", &prime, &hang);
+  TEST_ASSERT_TRUE_MESSAGE(prime, "prime");
+  cli_pump_flags_for_test_("prime hang", &prime, &hang);
+  TEST_ASSERT_TRUE(prime); TEST_ASSERT_TRUE(hang);
+#else
+  TEST_IGNORE_MESSAGE("bench build");
+#endif
+}
+
 /* `" hanging"` contains `" hang"`, so a bare strstr passes this case wrongly - which is
    exactly what the case is for. §6's own words are "the literal third token". */
 static void test_pump_hang_requires_the_literal_third_token(void) {
@@ -437,6 +466,63 @@ static void test_cal_rejects_zero_and_absurd_values(void) {
 #else
   TEST_IGNORE_MESSAGE("bench build");
 #endif
+}
+
+/* §6's own conditional, proven directly: "one conditional, in one place" -- r=ok for
+   DOSE_OK, the real token otherwise, and NEVER err_of(DOSE_OK)'s wire token "none". No
+   #if PB_BRINGUP here: cli_print_dose_summary() ships in both binaries (exec.cpp, task
+   26, calls it for the backend's own doses in the bench build), and neither arm of this
+   case goes through the console at all -- `pump`/`calib` are always by_time=true and can
+   structurally never reach DOSE_OK (target stays 0), so the ONLY way to exercise the
+   printer's r=ok branch on this drop is the same direct dose_run() call task 17's own
+   suite already uses for a metered dose. */
+/* Bring-up 7c' reads g_nv.pattern and its checksum back out of `status` after a forced
+   reset -- the whole point being that the WRITE actually happened before the reset, not
+   merely that the command was recognised. TEST_ASSERT_TRUE(cli_dispatch(...)) alone (the
+   absence test's own assertion) cannot tell "wrote the pattern" from "did nothing and
+   returned true", so this proves the write directly. */
+static void test_noinit_pattern_writes_the_known_word_and_recomputes_the_checksum(void) {
+#if PB_BRINGUP
+  pb_test_setup();
+  g_nv.pattern = 0u;
+  noinit_commit();
+  TEST_ASSERT_TRUE(cli_dispatch("noinit pattern"));
+  TEST_ASSERT_EQUAL_HEX32(0xC0FFEE01u, g_nv.pattern);
+  TEST_ASSERT_EQUAL_HEX32_MESSAGE(noinit_sum(&g_nv), g_nv.sum,
+      "the checksum must be recomputed on this write too, or a warm reset reads the "
+      "pattern back as a corrupt struct and 7c' would prove nothing");
+#else
+  TEST_IGNORE_MESSAGE("bench build");
+#endif
+}
+
+static void test_dose_summary_line_prints_r_ok_only_for_a_successful_dose(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true);
+  sim_set_flow_ml_s(85u);
+  dose_req_t q = {0};
+  q.ml = (uint16_t)PB_DOSE_RIG_MAX_ML;
+  q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  q.long_prime = true;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q), "arrange: a granted dose reaching target");
+  char out[512];
+  (void)sim_serial_tx(out, sizeof out);
+  cli_print_dose_summary();
+  size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, " r=ok"), out);
+  TEST_ASSERT_NULL_MESSAGE(strstr(out, " r=none"), out);   /* err_of(DOSE_OK) is "none" on
+                                                               the wire; the SUMMARY must say ok */
+
+  /* And the negative: a refused dose prints its real token, never "ok". */
+  pb_advance(PB_DOSE_MIN_GAP_MS + 1u);      /* clear the 10 s cooldown between callers */
+  sim_set_float(false);
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_FLOAT, dose_run(&q), "arrange: a float refusal");
+  (void)sim_serial_tx(out, sizeof out);
+  cli_print_dose_summary();
+  n = sim_serial_tx(out, sizeof out); out[n] = '\0';
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, " r=float"), out);
+  TEST_ASSERT_NULL_MESSAGE(strstr(out, " r=ok"), out);
 }
 
 static void test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls(void) {
@@ -521,8 +607,11 @@ int main(void) {
   RUN_TEST(test_goto_rejects_zero_and_six);
   RUN_TEST(test_pump_without_an_argument_is_refused);
   RUN_TEST(test_pump_ms_is_clamped_to_the_hard_cap);
+  RUN_TEST(test_pump_flag_parser_requires_whole_tokens);
   RUN_TEST(test_pump_hang_requires_the_literal_third_token);
   RUN_TEST(test_cal_rejects_zero_and_absurd_values);
+  RUN_TEST(test_noinit_pattern_writes_the_known_word_and_recomputes_the_checksum);
+  RUN_TEST(test_dose_summary_line_prints_r_ok_only_for_a_successful_dose);
   RUN_TEST(test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls);
   RUN_TEST(test_bringup_commands_are_absent_from_the_bench_build);
   return UNITY_END();

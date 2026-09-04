@@ -261,6 +261,33 @@ void cli_poll(void) {
    calls the cart in both binaries, so the include cannot live in here. Do not add a second
    one: this block is bringup-only and the cart is not. */
 
+/* WHOLE-TOKEN parse of `pump`'s [prime] [hang] flags, over the text AFTER the ms argument:
+   `hanging` is not `hang`, and a substring match would starve the watchdog on a word
+   nobody typed. Pure string inspection, no side effect and no call into dose_run() -- so
+   the literal-token requirement can be proven directly by a host case, without ever
+   letting hang=true reach the loop that deliberately starves the dog (a host case that
+   did THAT would hang the suite by construction: see safety.cpp's hang hook). */
+static void cli_pump_flags_(const char *args, bool *prime, bool *hang) {
+  *prime = false; *hang = false;
+  for (const char *t = args; *t != '\0'; ) {
+    while (*t == ' ') ++t;
+    const char *e = t; while (*e != '\0' && *e != ' ') ++e;
+    size_t n = (size_t)(e - t);
+    if (n == 5u && strncmp(t, "prime", 5) == 0) *prime = true;
+    if (n == 4u && strncmp(t, "hang",  4) == 0) *hang  = true;
+    t = e;
+  }
+}
+
+#ifdef PB_NATIVE
+/* Host-suite seam. cli_pump_flags_() is static and would otherwise be unreachable from
+   test_cli.cpp -- this is a thin, side-effect-free forward so the literal-token case can
+   call the REAL parser rather than a second, hand-copied one that could drift from it. */
+void cli_pump_flags_for_test_(const char *args, bool *prime, bool *hang) {
+  cli_pump_flags_(args, prime, hang);
+}
+#endif
+
 /* THE ONE CALL SITE OF THE DOSING ENTRY POINT IN THIS FILE -- §9 counts exactly one in
    cli.cpp, and this comment may not spell the token it counts.
    `pump` and `calib` both come through here, and so does the summary line. */
@@ -319,16 +346,7 @@ static bool cli_dispatch_bringup_(const char *line) {
       return true;
     }
     bool prime = false, hang = false;
-    for (const char *t = arg + 1; *t != '\0'; ) {      /* WHOLE tokens: `hanging` is not
-                                                          `hang`, and a substring match
-                                                          would hang on a word nobody typed */
-      while (*t == ' ') ++t;
-      const char *e = t; while (*e != '\0' && *e != ' ') ++e;
-      size_t n = (size_t)(e - t);
-      if (n == 5u && strncmp(t, "prime", 5) == 0) prime = true;
-      if (n == 4u && strncmp(t, "hang",  4) == 0) hang  = true;
-      t = e;
-    }
+    cli_pump_flags_(arg + 1, &prime, &hang);
     cli_run_dose_(ms, prime, hang);
     return true;
   }
