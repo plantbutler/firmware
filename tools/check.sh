@@ -683,10 +683,12 @@ fi
 
 # EXIT 2, NOT 0, and never the words "all invariants hold". A skip is not a violation --
 # nothing here is known to be broken -- but a gate that could not run part of itself has
-# not passed, and saying so was the whole defect: with .pio absent, five invariants went
-# unrun (all three lib/Network build checks and the safety.o/hal_uno.o pair, which is
+# not passed, and saying so was the whole defect: with .pio absent, SEVEN invariants went
+# unrun -- all three lib/Network build checks and the safety.o/hal_uno.o pair, which is
 # exactly the set that exists because a source file went uncompiled into every binary for
-# five tasks) and this script still printed "all invariants hold" and exited 0. A CI job on
+# five tasks, plus the sim env's own pair -- and this script still printed "all invariants
+# hold" and exited 0. (Seven, measured, not the five this fix was first written against:
+# the header's count above and AGENTS.md were corrected and this sentence was not.) A CI job on
 # a fresh clone therefore reported a materially weaker gate as a green one, and only a human
 # reading the script ever found out. 2 rather than 1 so the two states stay distinguishable
 # to anything that reads the code: 1 means an invariant is BROKEN, 2 means an invariant was
