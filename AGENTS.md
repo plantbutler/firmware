@@ -37,9 +37,17 @@ on the board and `src/hal_sim.cpp` on the host. `include/link.h` is seam 2: ten 
 primitives, implemented by `lib/Network/src/link_wifi.cpp` and `src/link_fake.cpp`.
 Implementations are selected by `build_src_filter`, never by a runtime flag.
 
-**`src/hal_uno.cpp` is the only file in the tree with an Arduino header, a pin number, an
-ISR or a write to D6.** `lib/Network/src/link_wifi.cpp` is the only one that names WiFiS3;
-`lib/Screen` the only one that names the LCD or u8x8 libraries.
+These four clauses no longer share one answer, so they are kept separate rather than
+folded into one sentence about `hal_uno.cpp` alone. **Only `src/hal_uno.cpp` arms an ISR
+or writes D6** -- that half is still true without qualification. **The Arduino header has
+four homes**: `src/hal_uno.cpp`, `src/sim_console.cpp`, `lib/Network` and `lib/Screen`.
+**A pin number has two**: `src/hal_uno.cpp` (the real board) and `src/sim_console.cpp`,
+which calls `pinMode(LED_BUILTIN, OUTPUT)` and `digitalWrite(LED_BUILTIN, ...)` directly
+-- the sim binary's `build_src_filter` excludes `hal_uno.cpp` entirely, so a real LED
+write has nowhere else in that binary to live, and `hal_sim.cpp`'s own `hal_pin_write()`
+only appends to the fake rig's event trace rather than touching real GPIO. `lib/Network/
+src/link_wifi.cpp` is the only file that names WiFiS3; `lib/Screen` the only one that
+names the LCD or u8x8 libraries.
 
 ## tools/check.sh
 
