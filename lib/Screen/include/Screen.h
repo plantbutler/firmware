@@ -13,7 +13,11 @@ enum class ScreenType { Oled, Lcd };
 class Screen {
 private:
   ScreenType type;
-  LiquidCrystal_I2C lcd;
+  /* The backpack answers at 0x27 or 0x3F depending on its solder jumpers, and the library
+     takes the address in its constructor: two driver objects, and probe() points `lcd` at
+     the one whose address answered. Neither touches the bus until begin(). */
+  LiquidCrystal_I2C lcd_a, lcd_b;
+  LiquidCrystal_I2C *lcd;
   bool present_;
 
   /* Feeds the watchdog, then judges the unit that just returned (it started at

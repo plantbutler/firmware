@@ -87,7 +87,7 @@ static void note_memory_(void) {
   if (h > g_hwm_max)   g_hwm_max = h;
 }
 
-static void cmd_i2c_(void) {                       /* bring-up 1: expect 0x20, 0x27, 0x3C */
+static void cmd_i2c_(void) {          /* bring-up 1: expect 0x20, 0x3C, and the LCD at 0x27 or 0x3F */
   char scan[96];
   sensors_scan(scan, sizeof scan);
   hal_serial_write("i2c: ");
@@ -140,14 +140,32 @@ static void cmd_flow_(void) {
   hal_serial_write(b);
 }
 
+/* Every command this binary has, and only those: cad/wiring's table promises "one screen:
+   the commands this binary has", and a help that hid `dry off` was a help that left an
+   operator latched after a mid-dose reset with no word for the way back. The bring-up
+   block is compiled out of the bench binary exactly as the commands themselves are.
+   test_help_names_every_command_this_binary_has holds the two lists to the dispatcher. */
 static void cmd_help_(void) {
   hal_serial_write(
-    "i2c              scan the bus (expect 0x20 0x27 0x3C)\n"
+    "i2c              scan the bus (expect 0x20 0x3C, and the LCD at 0x27 or 0x3F)\n"
     "mux <0-15>|all   select, settle, read twice, print the second (14-bit raw)\n"
     "hall             stream screw/home/float at 5 Hz; any key stops it\n"
     "flow             pulses/second and total since reset\n"
     "status           everything this board knows about itself\n"
+    "stop             cut a dose in progress\n"
+    "dry on|off       the dry latch: on refuses every dose, off is the only way back\n"
+    "clear contra     release the contradiction latch (float said OK, meter saw nothing)\n"
     "help             this\n");
+#if PB_BRINGUP
+  hal_serial_write(
+    "servo <1000-2000> <ms>     drive the servo at that pulse width for <= cap ms, then stop\n"
+    "home                       run toward home until HALL_HOME, bounded, zero the count\n"
+    "goto <1-5>                 step to the outlet counting screw pulses, bounded\n"
+    "pump <ms> [prime] [hang]   assert D6 for <= cap ms; prime widens the no-flow window\n"
+    "calib                      one fixed 10 s primed dose into a jug (bring-up 7b)\n"
+    "cal <pulses per litre>     set the meter calibration, 1000..20000 (7b's number)\n"
+    "noinit pattern             write the canary, then `pump 3000 hang` (bring-up 7c')\n");
+#endif
 }
 
 void cli_begin(void) {

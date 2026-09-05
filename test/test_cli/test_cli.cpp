@@ -194,6 +194,32 @@ static void test_an_overlong_line_is_dropped_whole_not_truncated_into_a_command(
   TEST_ASSERT_NULL(strstr(out, "flow hz="));       /* the prefix did NOT become a command */
 }
 
+/* cad/wiring's table promises `help` prints "the commands this binary has". It printed six
+   and hid `dry off` -- the one command an operator latched by a mid-dose reset needs. Every
+   word the dispatcher accepts must appear, each in the column layout cmd_help_ uses (the
+   needle is the word plus the padding that follows it, so "home" cannot pass on HALL_HOME);
+   the bring-up ones only in the bring-up binary, which [env:native] is (PB_BRINGUP=1). */
+static void test_help_names_every_command_this_binary_has(void) {
+  pb_test_setup();
+  char out[2048];
+  size_t n = feed("help\n", out, sizeof out);
+  out[n] = '\0';
+  static const char *const common[] = {
+    "i2c   ", "mux <0-15>|all", "hall   ", "flow   ", "status   ", "stop   ",
+    "dry on|off", "clear contra", "help   ",
+  };
+  for (unsigned i = 0; i < sizeof common / sizeof common[0]; ++i)
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, common[i]), common[i]);
+#if PB_BRINGUP
+  static const char *const bringup[] = {
+    "servo <1000-2000> <ms>", "home   ", "goto <1-5>", "pump <ms> [prime] [hang]",
+    "calib   ", "cal <pulses per litre>", "noinit pattern",
+  };
+  for (unsigned i = 0; i < sizeof bringup / sizeof bringup[0]; ++i)
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, bringup[i]), bringup[i]);
+#endif
+}
+
 static void test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_level(void) {
   pb_test_setup();
   char out[2048];
@@ -776,6 +802,7 @@ int main(void) {
   RUN_TEST(test_ui_poll_is_a_noop_while_the_pump_is_asserted);
   RUN_TEST(test_ui_poll_is_a_noop_in_a_pass_where_a_modem_command_ran);
   RUN_TEST(test_parses_every_bench_command);
+  RUN_TEST(test_help_names_every_command_this_binary_has);
   RUN_TEST(test_an_overlong_line_is_dropped_whole_not_truncated_into_a_command);
   RUN_TEST(test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_level);
   RUN_TEST(test_status_prints_the_correct_contra_banner_for_each_state);
