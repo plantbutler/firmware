@@ -89,53 +89,98 @@ check_files() {
 # preprocessed-console check further down already pays that cost where a console token
 # has no other truthful test, and paying it for six ordinary text greps would buy
 # accuracy none of them needs at a complexity every future reader would then have to
-# maintain. Instead, count_nc()/check_nc() drop every comment-SHAPED line before
-# grepping -- a line whose first non-blank characters are `//`, `/*` or `*`.
+# maintain.
 #
-# THE LIMIT, stated once rather than implied, and both halves confirmed by actually
-# constructing each case: this is a per-LINE filter, not a preprocessor, and it
-# recognises only a line that STARTS as a comment. Two real gaps follow from that:
-#   1. A trailing comment on a line that also carries code -- `foo(); /* dose_run( */`
-#      -- still counts, because that line is code-shaped with a comment riding on it,
-#      not comment-shaped.
-#   2. A CONTINUATION line of a multi-line block comment still counts unless it happens
-#      to start with `*`. This matters here specifically because it is NOT how this
-#      codebase writes a multi-line comment: the dominant style throughout this tree
-#      (see include/safety.h's own file-header comment, immediately above this file's
-#      own multi-line comments) opens on `/*` and then indents plain prose on every
-#      following line with no leading marker at all, closing on `*/`. A violating
-#      phrase on the SECOND line of exactly that shape is still comment-shaped to a
-#      human and still counts here.
-# Neither gap is silent, because this paragraph says so instead of the header merely
-# implying the six checks below are now comment-proof. They are comment-proof for a
-# single-line comment and for the OPENING line of a multi-line one, which is what every
-# violation actually constructed for this fix round happened to be -- narrowing the six
-# checks further, or adding a real multi-line-aware parser, is future work if a
-# continuation-line false positive is ever actually hit.
-strip_comments_() { grep -vE '^[[:space:]]*(//|/\*|\*)' "$@" 2>/dev/null; }
+# Fix round 1's first attempt dropped any LINE that started with `//`, `/*` or `*`.
+# Fix round 2 found that attempt introduced a defect worse than the one it fixed: a
+# line that STARTS with a comment but carries real code afterward --
+# `/* fixture note */ (void)dose_run(&q); /* ... */` -- was dropped WHOLE, so a genuine
+# second dose_run( call site read as ok. A false NEGATIVE, in a safety net whose entire
+# job is to fail loudly, is strictly worse than the false positive it replaced. Fix
+# round 1's own per-line filter was also blind to a CONTINUATION line of a multi-line
+# block comment that does not happen to start with `*` -- which is this codebase's own
+# dominant multi-line comment style (see this very file's comments, and
+# include/safety.h's file header) -- and that gap was not theoretical: counted across
+# this tree, such continuation lines number 22 in safety.cpp alone (the contra_latched
+# check's scope), 28 in cli.cpp, 45 across netfsm.cpp/ui.cpp/lib/Network and 42 across
+# report.cpp/netfsm.cpp -- for four of the six checks, essentially every comment in
+# scope is a candidate, because each scanned file's whole purpose is explaining the
+# boundary the check enforces.
+#
+# strip_spans_() replaces the per-line filter with a state machine: it removes `//` to
+# end of line and `/* ... */` INCLUDING ACROSS LINE BOUNDARIES, carrying whether it is
+# inside an open block comment from one line to the next, and leaves every other
+# character -- including code that leads or follows a comment on the same physical
+# line -- exactly where it was. A continuation line is now stripped by STATE (it is
+# still inside the `/*` opened on an earlier line), never by how it happens to start,
+# which fixes the star-less-continuation gap and the leading-comment-then-code gap
+# together: both were the same underlying mistake, testing a LINE'S shape instead of
+# tracking whether the SCANNER is inside a comment.
+#
+# THE REMAINING LIMIT, stated rather than implied: this scanner does not know what a
+# string literal is. A `//` or `/*` appearing inside a string would be treated as a
+# real comment opener, and a guarded token appearing after one inside the same string
+# would be missed the same way finding A's dose_run( was missed by the old filter.
+# CHECKED, not assumed: `grep -rnE '"[^"]*(//|/\*)[^"]*"' include src lib test` and a
+# separate scan for `://` were both run over the tree before this was written, and the
+# five apparent hits were manually confirmed to be TWO adjacent string literals with a
+# real comment between them (the regex's own blind spot, not the scanner's), never a
+# comment delimiter inside one literal. No such string exists in this tree today. If
+# one is ever added, this scanner would misread it the same way it would misread the
+# case above -- a real gap, narrower than the two fix round 2 closed, and worth a
+# second look the day a URL or a `/* -looking */ token ever needs to live in a string
+# these six checks scan.
+strip_spans_() {
+  awk '
+    FNR == 1 { incomment = 0 }
+    {
+      line = $0; out = ""; i = 1; n = length(line)
+      while (i <= n) {
+        if (incomment) {
+          p = index(substr(line, i), "*/")
+          if (p == 0) { i = n + 1 }
+          else { i = i + p + 1; incomment = 0 }
+        } else {
+          rest = substr(line, i)
+          pl = index(rest, "//")
+          pb = index(rest, "/*")
+          if (pl == 0 && pb == 0) { out = out substr(line, i); i = n + 1 }
+          else if (pb == 0 || (pl > 0 && pl < pb)) {
+            out = out substr(line, i, pl - 1); i = n + 1
+          } else {
+            out = out substr(line, i, pb - 1); i = i + pb + 1; incomment = 1
+          }
+        }
+      }
+      print FILENAME ":" FNR ":" out
+    }
+  ' "$@" 2>/dev/null
+}
 
-# count_nc <pattern> [grep-args-and-paths...] -- like count(), but every comment-shaped
-# LINE (strip_comments_(), above) is dropped from a file before the pattern is counted
-# against what remains. Still occurrence-based (grep -o on the survivors), for the same
-# reason count() is: two hits on one physical code line must still count as 2. The file
-# list comes from `grep -rlE '.'`, which resolves the same paths/--exclude=... args
-# count()/files() already accept into the same file set grep -r would have scanned --
-# there is no shortcut to that resolution short of asking grep to do it.
+# count_nc <pattern> [grep-args-and-paths...] -- like count(), but every file is passed
+# through strip_spans_() first, so a comment SPAN is removed and the code around it is
+# counted, never a whole line dropped on a guess about its shape. Still occurrence-based
+# (grep -o on the survivors), for the same reason count() is: two hits on one physical
+# code line must still count as 2. The file list comes from `grep -rlE '.'`, which
+# resolves the same paths/--exclude=... args count()/files() already accept into the
+# same file set grep -r would have scanned -- there is no shortcut to that resolution
+# short of asking grep to do it, and strip_spans_() needs real file names, not
+# directories, to hand to awk.
 count_nc() {
   local pat="$1"; shift
-  local f total=0
-  while IFS= read -r f; do
-    [ -z "$f" ] && continue
-    total=$((total + $(strip_comments_ "$f" | grep -ohE "$pat" 2>/dev/null | wc -l | tr -d ' ')))
-  done < <(grep -rlE '.' "$@" 2>/dev/null)
-  echo "$total"
+  local -a fl=()
+  while IFS= read -r f; do [ -n "$f" ] && fl+=("$f"); done < <(grep -rlE '.' "$@" 2>/dev/null)
+  [ "${#fl[@]}" -eq 0 ] && { echo 0; return; }
+  strip_spans_ "${fl[@]}" | sed -E 's/^[^:]+:[0-9]+://' | grep -ohE "$pat" 2>/dev/null \
+    | wc -l | tr -d ' '
 }
 
 # check_nc <want> <pattern> [grep-args-and-paths...] -- <description>
-# Same shape and the same `grep -n` failure diagnostic as check(), but counts through
-# count_nc() instead of count(). The diagnostic dump is comment-filtered too (by
-# checking the CONTENT after grep -n's own "file:line:" prefix), so a FAIL never points
-# a developer at a comment this check no longer counts.
+# Same shape as check(), but counts through count_nc() instead of count(). The failure
+# diagnostic greps strip_spans_()'s OWN "file:line:content" output (content with every
+# comment span already removed), not the raw file -- so a FAIL now shows the real code
+# that tripped it, on its real line number, even when that line also carries a comment
+# fix round 1's filter would have swallowed it whole for.
 check_nc() {
   local want="$1" pat="$2"; shift 2
   local -a gargs=()
@@ -147,9 +192,9 @@ check_nc() {
     ok "$desc ($want)"
   else
     fail "$desc: expected $want, found $got"
-    grep -rnE "$pat" "${gargs[@]}" 2>/dev/null \
-      | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*)' \
-      | sed 's/^/      /' >&2
+    local -a fl=()
+    while IFS= read -r f; do [ -n "$f" ] && fl+=("$f"); done < <(grep -rlE '.' "${gargs[@]}" 2>/dev/null)
+    strip_spans_ "${fl[@]}" | grep -E "$pat" | sed 's/^/      /' >&2
   fi
 }
 
@@ -424,9 +469,18 @@ check 0 'String|std::map|std::string|(^|[^[:alnum:]_])new([^[:alnum:]_]|$)|mallo
 # check(), not expect(): this IS a single grep's occurrence count against a literal (0),
 # exactly the shape check() exists for, and check()'s own `grep -n` diagnostic dump on a
 # mismatch (the tax task 13 fix round 1 removed project-wide) is worth keeping here too.
+#
+# THE SCAN SET IS include, src, test, lib/Manifold -- it does not reach lib/Screen or
+# lib/Network at all, so this check can neither confirm nor deny either one, and its own
+# description used to claim both anyway. Fix round 2, task 30: verified by grep before
+# writing this down. `grep -rln 'Arduino\.h' include src lib test` names exactly three
+# files -- src/hal_uno.cpp, src/sim_console.cpp, lib/Screen/include/Screen.h -- so
+# lib/Screen is a real fourth home, just one this check happens not to scan; lib/Network
+# has ZERO occurrences of Arduino in any form (it names WiFiS3.h, not Arduino.h) and was
+# never a home at all. The description below says only what this check actually covers.
 check 0 'Arduino\.h' include src test lib/Manifold \
   --exclude=hal_uno.cpp --exclude=sim_console.cpp -- \
-  "the Arduino header lives only in hal_uno.cpp, sim_console.cpp, lib/Network and lib/Screen"
+  "the Arduino header lives only in hal_uno.cpp and sim_console.cpp, of the files this check scans (lib/Screen also uses it, out of scope here; lib/Network does not use it at all)"
 check 0 'WiFi\.ping' "${SCAN[@]}" -- \
   "ping is never called (it resets the modem timeout to 10 s)"
 

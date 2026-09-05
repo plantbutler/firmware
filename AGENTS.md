@@ -40,7 +40,10 @@ Implementations are selected by `build_src_filter`, never by a runtime flag.
 These four clauses no longer share one answer, so they are kept separate rather than
 folded into one sentence about `hal_uno.cpp` alone. **Only `src/hal_uno.cpp` arms an ISR
 or writes D6** -- that half is still true without qualification. **The Arduino header has
-four homes**: `src/hal_uno.cpp`, `src/sim_console.cpp`, `lib/Network` and `lib/Screen`.
+three homes**: `src/hal_uno.cpp`, `src/sim_console.cpp` and `lib/Screen` (confirmed:
+`grep -rln 'Arduino\.h' include src lib test` names exactly these three files).
+`lib/Network` names none of it -- `lib/Network/src/link_wifi.cpp` includes `<WiFiS3.h>`,
+not `<Arduino.h>`, and nothing else in that library mentions Arduino in any form.
 **A pin number has two**: `src/hal_uno.cpp` (the real board) and `src/sim_console.cpp`,
 which calls `pinMode(LED_BUILTIN, OUTPUT)` and `digitalWrite(LED_BUILTIN, ...)` directly
 -- the sim binary's `build_src_filter` excludes `hal_uno.cpp` entirely, so a real LED
