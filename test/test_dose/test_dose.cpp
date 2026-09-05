@@ -1047,6 +1047,41 @@ void test_pump_on_time_never_exceeds_the_cap(void) {
       "D6 was asserted for longer than cap_ms");
 }
 
+/* The case above bounds D6 by the cap the CALLER asked for. This one bounds the cap itself,
+   which is a different guarantee and, until this case, an untested one: every cap_ms in this
+   file was <= PB_DOSE_CAP_MS_MAX, so `if (cap_ms > PB_DOSE_CAP_MS_MAX) cap_ms =
+   PB_DOSE_CAP_MS_MAX;` (safety.cpp) could be DELETED with all 259 cases still green.
+
+   That one line is the whole of the "hard maximum run time in the same code path that asserts
+   the pump pin", which is one of the three firmware measures standing in for the hardware
+   interlock this rig does not have. Nothing upstream narrows a cap for it: report.cpp's parser
+   deliberately lets cap_s ride to 65535 unclamped and says so, and exec.cpp multiplies it by
+   1000. So a buggy or hostile backend sending cap_s=65535 authorises a 65,535-SECOND pump run,
+   and this line is the only thing between that number and D6.
+
+   by_time, so there is no pulse target and the cap is the ONLY rule that can end the dose; real
+   flow, so neither the prime nor the stall rule can end it first; and the assertion is on
+   dose_last_ms() AND on sim_pump_on_ms(), because the second measures the pin rather than the
+   function. 65 s asked for, 60 s allowed: a value far enough over the ceiling to be
+   unmistakable and small enough that the fake clock walks it in well under a second. */
+void test_a_cap_over_the_firmware_ceiling_is_clamped_to_the_ceiling(void) {
+  pb_test_setup();
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_flow_ml_s(30u);                    /* flowing: prime and stall can never fire */
+  dose_req_t q = {0};
+  q.by_time = true;                          /* no target: only the cap can end this */
+  q.cap_ms  = PB_DOSE_CAP_MS_MAX + 5000u;    /* 65 s, over the ceiling, from a cap_s of 65 */
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, dose_run(&q),
+      "a flowing by-time dose can only end on its cap");
+  TEST_ASSERT_TRUE_MESSAGE(dose_last_ms() >= PB_DOSE_CAP_MS_MAX,
+      "the dose must actually reach the ceiling, or this case proves nothing");
+  TEST_ASSERT_TRUE_MESSAGE(dose_last_ms() < PB_DOSE_CAP_MS_MAX + 1000u,
+      "the cap was NOT clamped: the dose ran on past the firmware's hard maximum");
+  TEST_ASSERT_TRUE_MESSAGE(sim_pump_on_ms() <= PB_DOSE_CAP_MS_MAX + 20u,
+      "D6 was asserted past the firmware's hard maximum run time");
+}
+
 /* §6: divide-first truncates the calibration to whole pulses per millilitre. Runs at the
    cal range's floor, a legal-but-ugly value, the nominal default and the ceiling, and
    checks dose_last_pulses() against the MULTIPLY-FIRST arithmetic within one pulse -- the
@@ -1802,6 +1837,7 @@ int main(void) {
   RUN_TEST(test_dose_stops_at_the_millilitre_target);
   RUN_TEST(test_dose_stops_at_the_cap_when_flow_never_reaches_target);
   RUN_TEST(test_pump_on_time_never_exceeds_the_cap);
+  RUN_TEST(test_a_cap_over_the_firmware_ceiling_is_clamped_to_the_ceiling);
   RUN_TEST(test_prime_abort_fires_when_nothing_flows_in_the_prime_window);
   RUN_TEST(test_prime_flag_still_aborts_when_nothing_ever_flows);
   RUN_TEST(test_prime_flag_caps_the_dose_at_the_prime_cap);

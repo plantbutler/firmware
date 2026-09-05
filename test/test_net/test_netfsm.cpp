@@ -1088,6 +1088,59 @@ static void test_a_backend_command_never_sets_hang(void) {
 #endif
 }
 
+/* Every other exec_pending() case in this file ends in a REFUSAL or an abort, where the honest
+   answer is zero millilitres either way -- so `ack(g_cmd.id, dose_flow_ml(), err_of(r))`
+   (exec.cpp) could be written `ack(g_cmd.id, 0, err_of(r))` and native and native_cal both
+   stayed green. Nothing anywhere ran a GRANTED, FLOWING backend dose through exec_pending() and
+   then looked at the number that went back on the wire.
+
+   The number matters on the backend, not here: butler's ack UPDATE writes flow_ml
+   unconditionally, its under-delivery alarm is `2 * flow_ml < ml`, and the pot's daily cap is
+   charged COALESCE(flow_ml, ml) -- see report.cpp's own note above report_set_ack(). A constant
+   zero would report every successful watering as a total failure to deliver AND charge the pot
+   the full requested millilitres against its daily allowance, both silently.
+
+   So: the summary-line case's arrangement, plus the two things it lacks -- flow, and a clock
+   past PB_BOOT_GAP_MS. Neither is optional. Without the advance the ladder answers
+   DOSE_REFUSED_BOOT, and because cli_print_dose_summary() prints for a refusal exactly as it
+   does for a granted dose, a case that only greps the summary line cannot tell the two apart.
+   The assertion here is on the REPORT BODY, which is where the backend actually reads it. */
+static void test_a_granted_backend_dose_acks_the_millilitres_that_actually_flowed(void) {
+#if PB_PULSES_PER_GATE == 0
+  TEST_IGNORE_MESSAGE("uncalibrated arm: cart_goto() always fails, so a granted dose is never "
+                       "reached; see native_cal");
+#else
+  pb_test_setup();
+  cart_begin();                    /* same reason as the two cases immediately above */
+  sim_set_screw_pulse_ms(2);
+  sim_set_home_region(0, 40);
+  sim_set_float(true);
+  /* 85 ml/s == 499 pulses/s at the sensor's own 5880/L rating, so k_cmd_200's ml=100 (target
+     100 * 5880 / 1000 = 588 pulses) lands in about 1.2 s -- well inside the body's cap_s=10,
+     and well inside PB_FLOW_MAX_HZ. The same rate test_dose_stops_at_the_millilitre_target
+     uses, for the same reasons. */
+  sim_set_flow_ml_s(85);
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);
+  net_begin(); exec_begin();
+  pb_net_passes(14, 100);
+  pb_advance(PB_BOOT_GAP_MS + 1u);           /* or the ladder answers boot, not water */
+  exec_pending();
+
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_last_result(),
+      "arrange: this case is worthless unless the dose was actually granted and reached target");
+  TEST_ASSERT_TRUE_MESSAGE(dose_flow_ml() >= 95u && dose_flow_ml() <= 110u,
+      "arrange: about 100 ml must have moved, or the number under test is not a real one");
+
+  report_stamp();
+  char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
+  char want[24];
+  snprintf(want, sizeof want, " flow_ml=%u", (unsigned)dose_flow_ml());
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, want), b);      /* the HONEST millilitres, on the wire */
+  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, " ack=17"), b);
+#endif
+}
+
 static void test_the_cached_accessors_fill_after_a_join_and_cost_nothing(void) {
   sensors_begin();
   net_begin();
@@ -1128,6 +1181,43 @@ static void test_a_dropped_link_clears_the_cached_signal_and_address(void) {
   TEST_ASSERT_EQUAL_UINT8(0, net_link());
   TEST_ASSERT_EQUAL_INT8(0, net_rssi());
   TEST_ASSERT_EQUAL_STRING("0.0.0.0", net_ip());
+}
+
+/* The two cases above prove the cache FILLS. Neither can tell whether it filled in one pass or
+   two, and one pass is a watchdog reset: link_rssi() is 1 AT and link_ip() up to 2, so a merged
+   refresh is 3 x 1200 + PB_NET_SLACK_MS = 5600 ms against a 5592 ms grant. That is the whole
+   argument in netfsm.cpp's comment above the pair, and the only thing implementing it is the
+   `return;` that ends the RSSI pass -- which could be DELETED with all 51 net cases green.
+
+   THIS CASE DOES NOT COUNT ATs, DELIBERATELY. link_fake.cpp charges ZERO for link_rssi() and
+   link_ip() (the real lib/Network/src/link_wifi.cpp charges 1 and up to 2), so an AT-count
+   assertion here would read 0 either way and pass for the wrong reason -- the same shape of
+   false evidence this branch has already produced a dozen times. What the fake CAN show
+   truthfully is which pass each answer arrived in, because each refresh writes its own
+   distinctive fixed value, so pass structure is what gets pinned: one refresh per pass, in
+   order, and the address must still be unset in the pass the signal arrives in. */
+static void test_the_signal_and_address_refreshes_never_share_a_pass(void) {
+  sensors_begin();
+  net_begin();
+
+  /* Step to the pass that reaches NET_IDLE -- the transition that arms both refreshes and
+     returns without doing either. One pass at a time: a batch of passes is exactly the
+     resolution this case has to beat. */
+  int guard = 0;
+  while (net_state() != NET_IDLE && guard++ < 40) pb_net_passes(1, 100);
+  TEST_ASSERT_EQUAL_MESSAGE(NET_IDLE, net_state(), "arrange: the FSM never joined");
+  TEST_ASSERT_EQUAL_INT8_MESSAGE(0, net_rssi(), "arrange: nothing may be refreshed yet");
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("0.0.0.0", net_ip(), "arrange: nothing may be refreshed yet");
+
+  pb_net_passes(1, 100);                       /* the signal refresh, and nothing else */
+  TEST_ASSERT_EQUAL_INT8_MESSAGE(-52, net_rssi(), "the signal refresh did not run in its pass");
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("0.0.0.0", net_ip(),
+      "the address refresh ran in the SAME pass as the signal refresh: 1 + 2 = 3 ATs, "
+      "3 * 1200 + PB_NET_SLACK_MS = 5600 ms, against a 5592 ms watchdog grant");
+
+  pb_net_passes(1, 100);                       /* the address refresh, in a pass of its own */
+  TEST_ASSERT_EQUAL_STRING_MESSAGE("192.168.1.42", net_ip(),
+      "the address refresh did not run in the pass after the signal refresh");
 }
 
 int main(void) {
@@ -1182,7 +1272,9 @@ int main(void) {
   RUN_TEST(test_err_recv_never_reaches_the_wire);
   RUN_TEST(test_a_backend_dose_prints_the_per_dose_summary_line);
   RUN_TEST(test_a_backend_command_never_sets_hang);
+  RUN_TEST(test_a_granted_backend_dose_acks_the_millilitres_that_actually_flowed);
   RUN_TEST(test_the_cached_accessors_fill_after_a_join_and_cost_nothing);
   RUN_TEST(test_a_dropped_link_clears_the_cached_signal_and_address);
+  RUN_TEST(test_the_signal_and_address_refreshes_never_share_a_pass);
   return UNITY_END();
 }
