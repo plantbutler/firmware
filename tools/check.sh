@@ -17,13 +17,48 @@
 #
 # Patterns use POSIX classes, never \b or \s: BSD grep is the default on macOS.
 set -uo pipefail
+# Resolved BEFORE the cd, and absolute: the verdict at the bottom greps this file for its own
+# invariant count, and a relative $0 stops resolving the moment the cd below moves out from
+# under it (`cd .. && firmware/tools/check.sh` is enough to do it).
+self_="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")/.."
 
 SCAN=(include src lib test)      # deliberately NOT tools/: this file contains the patterns
 fails=0
+oks=0
+skips=0
+skipped=()
 
 fail() { printf 'FAIL  %s\n' "$*" >&2; fails=$((fails + 1)); }
-ok()   { printf 'ok    %s\n' "$*"; }
+ok()   { printf 'ok    %s\n' "$*"; oks=$((oks + 1)); }
+
+# skip <n-invariants> <what> <how to make it run>
+# EIGHT of the 34 invariants below cannot be answered by reading source text: they read
+# object files, or a preprocessed translation unit, out of .pio/build. With .pio absent -- a
+# fresh clone, a CI job, anyone who has run `pio run -t clean` -- those blocks have nothing
+# to look at and skip. That was always true and always printed a line, but the SUMMARY at
+# the bottom then said "all invariants hold" and exited 0 regardless, so a materially weaker
+# gate reported itself as a passing one.
+#
+# MEASURED, not reasoned about: with .pio moved aside, this script reports `27 of 34
+# invariants ran; 7 were SKIPPED`. Seven and not eight because the preprocessed-console
+# block runs `pio run -e uno_r4_wifi -t idedata` itself and so builds the very env it needs;
+# every other build-dependent block only looks. The seven are not a random set either: the
+# safety.o/hal_uno.o byte-equality pair and all three lib/Network build checks exist BECAUSE
+# link_wifi.cpp went uncompiled into every binary for five tasks, invisible to every grep
+# over source text. A fresh clone loses precisely the invariants that were written because
+# source text could not see the bug.
+#
+# The count argument is the number of INVARIANTS the block would have run, not the number
+# of lines it prints -- the object-hash and sim-file-set blocks are two invariants each.
+# It is what keeps the arithmetic at the bottom exact: ok + FAIL + skipped == the total
+# this file's own audit grep reports.
+skip() {
+  skips=$((skips + $1))
+  printf 'skip  %s (run: %s)\n' "$2" "$3"
+  skipped+=("$2
+        run: $3")
+}
 
 # count <pattern> [grep-args-and-paths...] -> OCCURRENCE count (grep -o), not matching
 # lines: two hits written on the same physical line must count as 2, or "exactly N" stops
@@ -211,6 +246,13 @@ check_nc() {
 # primitives:
 #   grep -cE '^[[:space:]]*(check|check_files|check_nc|expect)[[:space:]]' tools/check.sh
 # A bare `grep -c 'expect '` over-counts: it also matches expect()'s own doc comment.
+#
+# THE SCRIPT NOW RUNS THAT SAME GREP OVER ITSELF and reconciles it against what it actually
+# printed: ok + FAIL + skipped must equal it, or the run fails on that alone (see the verdict
+# at the bottom). So the count above is no longer a claim maintained by hand -- but the
+# reconciliation only holds if a NEW INVARIANT ADDED INSIDE AN `if [ -d .pio/... ]` BLOCK also
+# adds its count to that block's skip() call in the `else` arm. Adding one and forgetting the
+# other is caught immediately, and loudly, rather than silently shifting the totals.
 # ---- invariants land here (task 13, then task 30) ----
 
 # ---- D6: spec §2.1, §2.2 ----
@@ -517,19 +559,20 @@ if [ -d .pio/build/uno_r4_wifi ]; then
   expect 1 "$(find .pio/build/uno_r4_wifi -name 'link_wifi.cpp.o' 2>/dev/null | wc -l | tr -d ' ')" \
     "uno_r4_wifi compiles lib/Network's driver (link_wifi.cpp.o present)"
 else
-  printf 'skip  uno_r4_wifi builds lib/Network (run: pio run -e uno_r4_wifi)\n'
+  skip 1 'uno_r4_wifi builds lib/Network' 'pio run -e uno_r4_wifi'
 fi
 if [ -d .pio/build/uno_r4_wifi_bringup ]; then
   expect 1 "$(find .pio/build/uno_r4_wifi_bringup -name 'link_wifi.cpp.o' 2>/dev/null | wc -l | tr -d ' ')" \
     "uno_r4_wifi_bringup compiles lib/Network's driver (link_wifi.cpp.o present)"
 else
-  printf 'skip  uno_r4_wifi_bringup builds lib/Network (run: pio run -e uno_r4_wifi_bringup)\n'
+  skip 1 'uno_r4_wifi_bringup builds lib/Network' 'pio run -e uno_r4_wifi_bringup'
 fi
 if [ -d .pio/build/uno_r4_wifi_test ]; then
   expect 1 "$(find .pio/build/uno_r4_wifi_test -name 'link_wifi.cpp.o' 2>/dev/null | wc -l | tr -d ' ')" \
     "uno_r4_wifi_test compiles lib/Network's driver (link_wifi.cpp.o present)"
 else
-  printf 'skip  uno_r4_wifi_test builds lib/Network (run: pio test -e uno_r4_wifi_test -f test_device --without-uploading --without-testing)\n'
+  skip 1 'uno_r4_wifi_test builds lib/Network' \
+    'pio test -e uno_r4_wifi_test -f test_device --without-uploading --without-testing'
 fi
 
 # ---- the two binaries, continued: spec §6, §9. Proved on the PREPROCESSED bench
@@ -564,7 +607,8 @@ print(" ".join(["-D" + x for x in d["defines"]] + ["-I" + x for x in d["includes
   expect 0 "$(grep -cE '"hang"|" hang"|"prime"|" prime"|"cal "|"noinit pattern"' "$pp" | tr -d ' ')" \
     "the bench binary carries no hang, prime, cal or noinit console token"
 else
-  printf 'skip  preprocessed bench console (run: pio run -e uno_r4_wifi -t idedata)\n'
+  skip 1 'the bench binary carries no hang, prime, cal or noinit console token' \
+    'pio run -e uno_r4_wifi -t idedata'
 fi
 rm -f "$pp"
 
@@ -592,7 +636,8 @@ if [ -n "$sha_a" ] && [ -n "$sha_b" ] && [ -n "$sha_c" ] && [ -n "$sha_d" ]; the
   expect 1 "$([ "$(shasum "$sha_c" | cut -d' ' -f1)" = "$(shasum "$sha_d" | cut -d' ' -f1)" ] && echo 1 || echo 0)" \
     "hal_uno.o is identical in bench and bringup (the pin layer is not the same code otherwise)"
 else
-  printf 'skip  object-hash equality (run: pio run -e uno_r4_wifi -e uno_r4_wifi_bringup)\n'
+  skip 2 'safety.o and hal_uno.o are byte-identical in bench and bringup' \
+    'pio run -e uno_r4_wifi -e uno_r4_wifi_bringup'
 fi
 
 # ---- sim: spec §8. The sim binary compiles no pump driver at all. ----
@@ -608,12 +653,52 @@ if [ -d .pio/build/uno_r4_wifi_sim ]; then
   expect 1 "$([ -e .pio/build/uno_r4_wifi_sim/src/hal_sim.cpp.o ] && echo 1 || echo 0)" \
     "the sim env compiled its HAL (hal_sim.cpp present -- check build_src_filter if not)"
 else
-  printf 'skip  sim file set (run: pio run -e uno_r4_wifi_sim)\n'
+  skip 2 'the sim env compiles no pump driver, and compiled its own HAL' \
+    'pio run -e uno_r4_wifi_sim'
+fi
+
+# ---- the verdict.
+#
+# TOTAL is this file's OWN audit grep (documented above the invariants), run against this
+# file, rather than a literal that would drift the first time an invariant is added: every
+# invariant is one check/check_files/check_nc/expect call at the start of a line, and the
+# reconciliation below is what keeps that claim honest at runtime instead of on trust. If
+# ok + FAIL + skipped ever stops summing to it, either a new invariant was added without a
+# skip() count beside it, or a block prints a different number of lines than it claims --
+# both are the static-count-vs-runtime-count mismatch this file's own history warns about
+# (fix round 1: "make check reported 22 while the grep said 21"), and neither is allowed to
+# pass quietly.
+TOTAL=$(grep -cE '^[[:space:]]*(check|check_files|check_nc|expect)[[:space:]]' "$self_")
+if [ "$((oks + fails + skips))" != "$TOTAL" ]; then
+  printf '\nthis file cannot count itself: %s ok + %s FAIL + %s skipped != %s invariants\n' \
+    "$oks" "$fails" "$skips" "$TOTAL" >&2
+  fails=$((fails + 1))
 fi
 
 if [ "$fails" -gt 0 ]; then
-  printf '\n%s invariant(s) FAILED\n' "$fails" >&2
+  printf '\n%s invariant(s) FAILED (%s ran, %s skipped, of %s)\n' \
+    "$fails" "$((oks + fails))" "$skips" "$TOTAL" >&2
   exit 1
 fi
-printf '\nall invariants hold\n'
+
+# EXIT 2, NOT 0, and never the words "all invariants hold". A skip is not a violation --
+# nothing here is known to be broken -- but a gate that could not run part of itself has
+# not passed, and saying so was the whole defect: with .pio absent, five invariants went
+# unrun (all three lib/Network build checks and the safety.o/hal_uno.o pair, which is
+# exactly the set that exists because a source file went uncompiled into every binary for
+# five tasks) and this script still printed "all invariants hold" and exited 0. A CI job on
+# a fresh clone therefore reported a materially weaker gate as a green one, and only a human
+# reading the script ever found out. 2 rather than 1 so the two states stay distinguishable
+# to anything that reads the code: 1 means an invariant is BROKEN, 2 means an invariant was
+# not ASKED. Every runner treats both as failure, which is the point -- the way to a green
+# gate is to run the builds named below, which take about four seconds between them.
+if [ "$skips" -gt 0 ]; then
+  printf '\n%s of %s invariants ran; %s were SKIPPED and this gate is incomplete:\n' \
+    "$oks" "$TOTAL" "$skips"
+  for s in "${skipped[@]}"; do printf '  - %s\n' "$s"; done
+  printf '\nRun the commands above (they populate .pio/build) and re-run this script.\n'
+  exit 2
+fi
+
+printf '\nall %s invariants hold\n' "$TOTAL"
 exit 0
