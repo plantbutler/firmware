@@ -21,7 +21,7 @@ into each source file that needs it. Such copying would be time-consuming
 and error-prone. With a header file, the related declarations appear
 in only one place. If they need to be changed, they can be changed in one
 place, and programs that include the header file will automatically use the
-new version when next recompiled. The header file eliminates the labor of
+updated definitions when next recompiled. The header file eliminates the labor of
 finding and changing all the copies as well as the risk that a failure to
 find one copy will result in inconsistencies within a program.
 

@@ -86,7 +86,7 @@ passes. **It has a visible price on the phone**, stated in §4.6: butler raises 
 | **`WDT.begin(wdt_cfg_t)` never sets `_timeout`** | so `getTimeout()` returns **0** under the config overload even when running | `WDT.cpp:32-46` vs `:59,153` — **corrects the design** |
 | `WDT.getCounter()` | `R_WDT_CounterGet`, exists; **this design's liveness probe** | `WDT.cpp:91-100` |
 | the WDT counter is a **down**-counter clocked at PCLKB/8192 | 24 MHz / 8192 = **2929.7 Hz**, i.e. ~2.93 counts/ms; a refresh reloads it to 16384 | `WDT.cpp:32-45` (`R_WDT_Refresh` inside `begin`), `bsp_clock_cfg.h:8,14` — **this is what makes `hal_wdt_alive()` measurable, and why the probe must not feed (§2.5)** |
-| `begin(uint32_t)` sets `stop_control = WDT_STOP_CONTROL_ENABLE` | "count will automatically stop when device enters sleep mode" | `WDT.cpp:67`, `r_wdt_api.h:115-116` |
+| `begin(uint32_t)` sets `stop_control = WDT_STOP_CONTROL_ENABLE` | "count will automatically stop when device enters sleep mode" | `WDT.cpp:67`, `r_wdt_api.h:113-114` |
 | `wdt_cfg_t` has **nine** members, not six | `p_callback`, `p_context`, `p_extend` follow `stop_control` | `r_wdt_api.h:147-160` — initialise with `= {}` (§2.5) |
 | **`pinMode(pin, OUTPUT)` writes the whole PFS word and latches PODR = 0** | so it drives the pin **LOW**, discarding a preceding `digitalWrite` | `cores/arduino/digital.cpp:12-14` → `R_IOPORT_PinCfg` → `R_BSP_PinCfg` = `PmnPFS = cfg` (`bsp_io.h:391-395`); `IOPORT_CFG_PORT_DIRECTION_OUTPUT = 0x4`, `IOPORT_CFG_PORT_OUTPUT_HIGH = 0x1` (`r_ioport_api.h:184,186`) — **corrects the design and the wiring README** |
 | the core's own idiom proves it | `IOPORT_CFG_PORT_DIRECTION_OUTPUT \| IOPORT_CFG_PORT_OUTPUT_HIGH` | `Arduino_LED_Matrix.h:125`, `SoftwareSerial.cpp:228,232`, `pin_data.c:14` |
@@ -258,7 +258,11 @@ uint16_t hal_adc_read(void);               /* A0, 14-bit */
 bool     hal_i2c_write16(uint8_t addr, uint16_t bits);  /* false == bus error */
 bool     hal_i2c_read16(uint8_t addr, uint16_t *bits);  /* false == bus error, NOT zero */
 bool     hal_i2c_probe(uint8_t addr);
-bool     hal_i2c_recover(void);            /* EXACTLY nine clocks, fixed count; refuses while dosing */
+bool     hal_i2c_recover(void);            /* EXACTLY nine clocks, fixed count. The
+                                              "not while dosing" guard is NOT here: it sits one
+                                              line above each call in sensors.cpp, because a HAL
+                                              that consults safety_dosing() calls UP through the
+                                              seam and inverts it (§2.13). */
 void     hal_servo_us(uint16_t us);        /* 1500 == stop; 0 == detach */
 
 bool     hal_wdt_start(void);              /* wdt_cfg_t overload; false if the core rejected it */
@@ -400,7 +404,7 @@ boot, so the last line of defence would become a pump-restart pulse generator.
 never touches D6 at all:**
 
 ```c
-/* src/hal_uno.cpp. Do NOT re-declare g_pin_cfg here: Arduino.h:60-66 already declares it,
+/* src/hal_uno.cpp. Do NOT re-declare g_pin_cfg here: Arduino.h:61-65 already declares it,
    INSIDE an extern "C" block, and a second declaration in a .cpp without extern "C" is a
    hard error ("declaration of 'g_pin_cfg' with 'C++' linkage conflicts with previous
    declaration with 'C' linkage"). hal_uno.cpp includes <Arduino.h>; that is the declaration. */
@@ -487,7 +491,8 @@ module. `status` prints the compiled level so bring-up 4a can confirm it.
 ### 2.3 The `.noinit` block — what survives a warm reset
 
 SRAM survives a watchdog or RESET-button reset; only the startup code clears `.bss`, and `fsp.ld`
-provides a `.noinit` NOLOAD section (`:222-231`) that it does not clear. One struct, ~44 bytes, with
+provides a `.noinit` NOLOAD section (`:222-231`) that it does not clear. One struct, **24 bytes**
+(measured with `sizeof`, not estimated — the figure was ~44 here until task 4 was built), with
 a magic word **and a checksum**:
 
 ```c
@@ -1853,7 +1858,9 @@ explicit field, so nothing else in the program changes meaning.
 
 /* ---- the watchdog. PCLKB = 24 MHz (bsp_clock_cfg.h:8,14: HOCO 48 / PCLKB_DIV 2).
    RL_16384 * PR_8192 / (PCLKB/1000) = 16384*8192/24000 = 5592 ms (WDT.cpp:105-113).
-   We use the wdt_cfg_t overload for stop_control = DISABLE (WDT.cpp:67, r_wdt_api.h:115-116),
+   We use the wdt_cfg_t overload to get stop_control = DISABLE. WDT.cpp:67 is the
+   OTHER overload, begin(uint32_t), setting ENABLE -- which is the reason this one
+   exists, not evidence for DISABLE. r_wdt_api.h:113-114 defines both values,
    and that overload NEVER assigns _timeout (WDT.cpp:32-46), so getTimeout() would
    return 0 on a running dog. hal_wdt_granted() computes this number instead.
    The counter is a DOWN-counter at PCLKB/8192 = 2929.7 Hz = 2.93 counts/ms, which is
@@ -2437,7 +2444,38 @@ build_flags = ${env.build_flags} -std=gnu++17 -DPB_NATIVE=1 -DPB_SIM=1 -DPB_BRIN
 test_build_src = yes
 build_src_filter = +<*> -<main.cpp> -<hal_uno.cpp>
 lib_ignore = Network, Screen, Servo, Arduino_Sensorkit, LiquidCrystal_I2C
+
+; --- 2026-09-03 correction. Two flags and four one-flag variants that the block above
+; --- did not print. Six suites in this document are specified to compile TWICE, once
+; --- with a flag and once without; without a named environment for each, none of those
+; --- cases has anywhere to be compiled in, and `pio test -e native` cannot even build,
+; --- because pins.h #errors when no relay polarity is defined. Every variant is one flag
+; --- on top of env:native and nothing else, so there is one place to change the rest.
+[env:native_bench]                                 ; the bench-vs-bringup cases
+extends = env:native
+build_flags = ${env:native.build_flags} -UPB_BRINGUP
+
+[env:native_cal]                                   ; the calibrated arm of the cart #if
+extends = env:native
+build_flags = ${env:native.build_flags} -DPB_PULSES_PER_GATE=1450
+
+[env:native_measured]                              ; the two cap-clamp cases
+extends = env:native
+build_flags = ${env:native.build_flags} -DPB_ML_PER_S_MEASURED=30
+
+[env:native_nosimcli]                              ; `sim ...` is not a command here
+extends = env:native
+build_flags = ${env:native.build_flags} -UPB_SIM_CLI
 ```
+
+**`[env:native]`'s flags, corrected 2026-09-03.** The printed line above is missing two that
+it cannot build without. `-DPB_RELAY_ACTIVE_HIGH` is required because §2.2 gives `pins.h` no
+default polarity and an unconditional `#error`, and `safety.cpp` and `sensors.cpp` both include
+it — the flag is inert on the host, since `PB_PUMP_OWNER` is never defined off the board, so
+`PIN_PUMP_EN` and the PFS macros do not exist there. `-DPB_SIM_CLI=1` is required because the
+console suites drive the fake's serial console. `native_nosimcli` undefines `PB_SIM_CLI` and
+**not** `PB_SIM`: `PB_SIM` also gates every `hal_*` body in `hal_sim.cpp`, so `-UPB_SIM` would
+leave the host suite linking against no HAL at all.
 
 Notes an implementer needs:
 
