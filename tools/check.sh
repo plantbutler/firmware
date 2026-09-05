@@ -81,15 +81,90 @@ check_files() {
   fi
 }
 
-# To count the invariants below (e.g. before adding more): almost all of them are one
-# check() or check_files() call each; three are bespoke expect() calls, each because it
-# compares two independently-derived numbers rather than a single grep's count against a
-# literal. D2/D3 (immediately below) compares two pinMode counts derived two different
-# ways. The sim file-set pair (task 29, spec §8) each compare a want-bit against a file's
-# on-disk existence: an object file's PRESENCE has no text pattern to grep -- only its own
-# `-e` test -- so check()/check_files() cannot express it and expect() is the honest fit,
-# not a workaround. Count all three:
-#   grep -cE '^[[:space:]]*(check|check_files|expect)[[:space:]]' tools/check.sh
+# ---- fix round 1: six of the checks below turned out to fire on ordinary PROSE
+# describing the very thing they forbid, not on a real violation -- a comment in
+# cli.cpp merely mentioning `dose_run(`, one in safety.cpp restating the contra_latched
+# rule in the exact words the rule is usually explained in, one containing a literal %d
+# (which is how the bug it guards is always discussed in prose). Nothing gcc -E: the
+# preprocessed-console check further down already pays that cost where a console token
+# has no other truthful test, and paying it for six ordinary text greps would buy
+# accuracy none of them needs at a complexity every future reader would then have to
+# maintain. Instead, count_nc()/check_nc() drop every comment-SHAPED line before
+# grepping -- a line whose first non-blank characters are `//`, `/*` or `*`.
+#
+# THE LIMIT, stated once rather than implied, and both halves confirmed by actually
+# constructing each case: this is a per-LINE filter, not a preprocessor, and it
+# recognises only a line that STARTS as a comment. Two real gaps follow from that:
+#   1. A trailing comment on a line that also carries code -- `foo(); /* dose_run( */`
+#      -- still counts, because that line is code-shaped with a comment riding on it,
+#      not comment-shaped.
+#   2. A CONTINUATION line of a multi-line block comment still counts unless it happens
+#      to start with `*`. This matters here specifically because it is NOT how this
+#      codebase writes a multi-line comment: the dominant style throughout this tree
+#      (see include/safety.h's own file-header comment, immediately above this file's
+#      own multi-line comments) opens on `/*` and then indents plain prose on every
+#      following line with no leading marker at all, closing on `*/`. A violating
+#      phrase on the SECOND line of exactly that shape is still comment-shaped to a
+#      human and still counts here.
+# Neither gap is silent, because this paragraph says so instead of the header merely
+# implying the six checks below are now comment-proof. They are comment-proof for a
+# single-line comment and for the OPENING line of a multi-line one, which is what every
+# violation actually constructed for this fix round happened to be -- narrowing the six
+# checks further, or adding a real multi-line-aware parser, is future work if a
+# continuation-line false positive is ever actually hit.
+strip_comments_() { grep -vE '^[[:space:]]*(//|/\*|\*)' "$@" 2>/dev/null; }
+
+# count_nc <pattern> [grep-args-and-paths...] -- like count(), but every comment-shaped
+# LINE (strip_comments_(), above) is dropped from a file before the pattern is counted
+# against what remains. Still occurrence-based (grep -o on the survivors), for the same
+# reason count() is: two hits on one physical code line must still count as 2. The file
+# list comes from `grep -rlE '.'`, which resolves the same paths/--exclude=... args
+# count()/files() already accept into the same file set grep -r would have scanned --
+# there is no shortcut to that resolution short of asking grep to do it.
+count_nc() {
+  local pat="$1"; shift
+  local f total=0
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    total=$((total + $(strip_comments_ "$f" | grep -ohE "$pat" 2>/dev/null | wc -l | tr -d ' ')))
+  done < <(grep -rlE '.' "$@" 2>/dev/null)
+  echo "$total"
+}
+
+# check_nc <want> <pattern> [grep-args-and-paths...] -- <description>
+# Same shape and the same `grep -n` failure diagnostic as check(), but counts through
+# count_nc() instead of count(). The diagnostic dump is comment-filtered too (by
+# checking the CONTENT after grep -n's own "file:line:" prefix), so a FAIL never points
+# a developer at a comment this check no longer counts.
+check_nc() {
+  local want="$1" pat="$2"; shift 2
+  local -a gargs=()
+  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do gargs+=("$1"); shift; done
+  shift
+  local desc="$1" got
+  got=$(count_nc "$pat" "${gargs[@]}")
+  if [ "$got" = "$want" ]; then
+    ok "$desc ($want)"
+  else
+    fail "$desc: expected $want, found $got"
+    grep -rnE "$pat" "${gargs[@]}" 2>/dev/null \
+      | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*)' \
+      | sed 's/^/      /' >&2
+  fi
+}
+
+# To count the invariants below (e.g. before adding more): most of them are one check()
+# or check_nc() call each; several are bespoke expect() calls, each because it compares
+# two independently-derived numbers rather than a single grep's count against a literal.
+# D2/D3 (immediately below) compares two pinMode counts derived two different ways. The
+# sim file-set pair and the per-env link_wifi/object-hash checks (task 29/30) each
+# compare a want-bit against a file's on-disk existence or a sha1 match: neither has a
+# text pattern to grep -- only its own `-e`/shasum test -- so check()/check_files()
+# cannot express them and expect() is the honest fit, not a workaround. check_nc() (fix
+# round 1, task 30) is check()'s comment-blind twin, for the six checks where an
+# ordinary sentence describing the rule can otherwise flip the count. Count all four
+# primitives:
+#   grep -cE '^[[:space:]]*(check|check_files|check_nc|expect)[[:space:]]' tools/check.sh
 # A bare `grep -c 'expect '` over-counts: it also matches expect()'s own doc comment.
 # ---- invariants land here (task 13, then task 30) ----
 
@@ -213,7 +288,10 @@ check 0 'drawString|clearDisplay|clearLine' lib/Screen -- \
 # the parentheses rather than exempt the file -- said in words, not spelled, exactly
 # like the WiFi.ping treatment below. Re-run after the reword: netfsm.h needs no
 # exemption. ----
-check 0 'WiFiS3|link\.h|Network\.h|netfsm\.h' src/safety.cpp lib/Manifold -- \
+# check_nc(), fix round 1: a comment in safety.cpp saying "This file must never
+# #include netfsm.h" is exactly the sentence a safety-conscious comment would write,
+# and used to flip this from 0 to 1 on its own.
+check_nc 0 'WiFiS3|link\.h|Network\.h|netfsm\.h' src/safety.cpp lib/Manifold -- \
   "the safety layer never names the network stack (safety.cpp, lib/Manifold)"
 
 # ---- the mirror direction, spec §9 items 17-18: the network layer and the UI painter
@@ -224,7 +302,10 @@ check 0 'WiFiS3|link\.h|Network\.h|netfsm\.h' src/safety.cpp lib/Manifold -- \
 # whose socket is open, with the build and make check both green (spec §3). Proven able
 # to fire (task 30): `printf '#include "safety.h"\n' >> src/netfsm.cpp` turns this FAIL,
 # reverted after. ----
-check 0 'safety\.h|dose_run|hal_pump_write' src/netfsm.cpp src/ui.cpp lib/Network -- \
+# check_nc(), fix round 1: a comment in netfsm.cpp saying "must never call dose_run(&q)
+# itself", one in ui.cpp pointing at "the pump-side contract", or one in link_wifi.cpp
+# naming hal_pump_write while explaining why it must not, each used to flip this from 0.
+check_nc 0 'safety\.h|dose_run|hal_pump_write' src/netfsm.cpp src/ui.cpp lib/Network -- \
   "the network layer and the painter cannot assert D6"
 # src/exec.cpp carries the tree's SECOND dose_run( call site (its exec_pending() ->
 # dose_run(&q), task 24) and is expected to: this invariant is scoped to cli.cpp on
@@ -232,7 +313,10 @@ check 0 'safety\.h|dose_run|hal_pump_write' src/netfsm.cpp src/ui.cpp lib/Networ
 # trigger directly and is where "exactly one" is worth enforcing on its own. Widen the
 # scope comment if a future task adds a third call site somewhere legitimate; never
 # widen the invariant's own count past 1 to make room for it.
-check 1 'dose_run\(' src/cli.cpp -- \
+# check_nc(), fix round 1: a comment merely mentioning `dose_run(` -- documenting the
+# one call site that already exists, say -- used to read as a second site: "expected 1,
+# found 2".
+check_nc 1 'dose_run\(' src/cli.cpp -- \
   "cli.cpp has exactly one dose_run call site"
 
 # ---- carried finding, task 30 (not in spec §9's printed table): nothing outside
@@ -281,7 +365,11 @@ check 0 "$LINK_SEAM_PAT" "${SCAN[@]}" \
 # a second production setter -- widening this past src/safety.cpp would count those and
 # make "exactly one" false forever, the same trap PB_PUMP_OWNER's own check.sh comment
 # already warns about for a bare-token count. ----
-check 1 'g_nv\.contra_latched[[:space:]]*=[[:space:]]*true' src/safety.cpp -- \
+# check_nc(), fix round 1, the worst of the six: safety.cpp is the file most likely to
+# carry a prose comment restating this exact rule ("contra_latched is set to true
+# exactly once, in dose_end_ml_"), and a single such mention used to flip this from 1 to
+# 2 -- a false FAIL on the file that most needs a true one to be trusted.
+check_nc 1 'g_nv\.contra_latched[[:space:]]*=[[:space:]]*true' src/safety.cpp -- \
   "contra_latched is set to true in exactly one place (dose_end_ml_, spec section 2.7)"
 
 # ---- blocking, buffers and formatting: spec §3, §9, §12 ----
@@ -301,7 +389,10 @@ check 0 '(^|[^[:alnum:]_])delay\(' "${SCAN[@]}" --exclude=hal_uno.cpp -- \
 # matched none of them, the widened one below matches all four. No such format string
 # exists in the tree today (this stays 0), so the widening only closes a blind spot, it
 # does not surface a live bug.
-check 0 '%[-+ #*0-9.]*[fgeFGE]([^[:alnum:]]|$)' "${SCAN[@]}" -- \
+# check_nc(), fix round 1: a literal quoted float token in a comment (lower
+# probability than the other five, but still real -- a bring-up note quoting the exact
+# format string a bug once used) used to count the same as the format string itself.
+check_nc 0 '%[-+ #*0-9.]*[fgeFGE]([^[:alnum:]]|$)' "${SCAN[@]}" -- \
   "no float formatting anywhere (newlib float printf is the deepest stack consumer)"
 # ---- the wire's integers: spec §9, §15.2. Every t=/ack=/chN= site is %lu with an
 #      explicit (unsigned long) cast. -Wformat-signedness in build_src_flags is the early
@@ -312,7 +403,10 @@ check 0 '%[-+ #*0-9.]*[fgeFGE]([^[:alnum:]]|$)' "${SCAN[@]}" -- \
 #      the FIRST one, not from day 25 -- with the console looking healthy throughout,
 #      because report.cpp/netfsm.cpp's OWN %lu sites are unaffected. -Wall -Wextra does
 #      not diagnose a %d against an unsigned argument. ----
-check 0 '%[-+ #*0-9.]*[di]([^[:alnum:]]|$)' src/report.cpp src/netfsm.cpp -- \
+# check_nc(), fix round 1: a comment containing a literal %d used to count as a
+# violation on its own -- and %d is how this exact bug is always discussed in prose,
+# which made this the likeliest of the six to trip on ordinary documentation.
+check_nc 0 '%[-+ #*0-9.]*[di]([^[:alnum:]]|$)' src/report.cpp src/netfsm.cpp -- \
   "no signed integer conversion in the report or the framing"
 check 0 'for[[:space:]]*\([[:space:]]*;[[:space:]]*;[[:space:]]*\)|while[[:space:]]*\([[:space:]]*(true|1)[[:space:]]*\)' \
   "${SCAN[@]}" --exclude=safety.cpp -- \
