@@ -305,12 +305,14 @@ void net_poll(bool dosing) {
     }
 
     case NET_IDLE: {
-      /* Refresh passes come first and each spends the WHOLE pass: link_rssi() is 1 AT,
-         link_ip() up to 2 (once per join; the driver's own cache makes every call after the
-         first free even within this same join -- see link_wifi.cpp). 1 + 2 = 3 ATs in one
-         pass would be 3600 ms, and 3600 + PB_NET_SLACK_MS = 5600 > 5592 -- the same
-         arithmetic every other pass in this file already respects, which is why these are
-         never combined into one. */
+      /* Refresh passes come first and each spends the WHOLE pass: link_rssi() is 1 AT and
+         link_ip() is 1 AT (once per join; the driver's own cache makes every call after the
+         first free even within this same join -- see link_wifi.cpp). They were split when
+         link_ip() was WiFi.localIP() at up to 2 ATs: 1 + 2 = 3 ATs = 3600 ms, and 3600 +
+         PB_NET_SLACK_MS = 5600 > 5592. At 1 + 1 they would now fit in one pass, and they stay
+         apart anyway: a 1-AT pass keeps ~3.2 s of margin under the grant where a 2-AT pass
+         keeps ~1.2 s, and nothing about a refresh needs the tighter one. Every 2-AT pass in
+         this file is 2 ATs because it MUST be. */
       if (g_need_rssi) {
         modem_ran_();
         const uint32_t t0 = hal_millis();
@@ -320,16 +322,17 @@ void net_poll(bool dosing) {
         return;
       }
       if (g_need_ip) {
-        /* No was_timeout()/poison() pairing here, unlike every other AT-issuing pass: a
-           SUCCESSFUL link_ip() call legitimately costs up to ~2.5 s (a 100 ms wait plus up
-           to 2 ATs) by design (link_wifi.cpp), which already exceeds PB_NET_STEP_MS on the
-           ordinary, no-error path -- was_timeout()'s >= PB_NET_STEP_MS test would misfire
-           and poison the link on every single successful join. The driver's own guard
-           (only queries the seam's address once per join, gated on the link being up) is
-           what actually bounds the common case; the pathological one is Finding 3, and it
-           is not fixable from this side of the seam (task 27 report). */
+        /* The same was_timeout()/poison() pairing as every other AT-issuing pass. This pass
+           used to be the one exception: link_ip() was WiFi.localIP(), whose SUCCESSFUL call
+           costs ~2.5 s (a 100 ms wait plus up to 2 ATs), above PB_NET_STEP_MS on the
+           no-error path, so the test would have poisoned every good join -- and whose
+           failing call spins up to ~125 s, which no test on this side of the seam can
+           interrupt. link_wifi.cpp now issues the one bounded query instead, so a slow
+           answer here means what it means everywhere else: the modem timed out. */
         modem_ran_();
-        const char *ip = link_ip();              /* up to 2 ATs, once per join */
+        const uint32_t t0 = hal_millis();
+        const char *ip = link_ip();              /* 1 AT, once per join */
+        if (was_timeout(t0)) { poison(); return; }
         snprintf(g_ip, sizeof g_ip, "%s", ip);
         g_need_ip = false;
         return;

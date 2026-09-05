@@ -1186,18 +1186,19 @@ static void test_a_dropped_link_clears_the_cached_signal_and_address(void) {
 }
 
 /* The two cases above prove the cache FILLS. Neither can tell whether it filled in one pass or
-   two, and one pass is a watchdog reset: link_rssi() is 1 AT and link_ip() up to 2, so a merged
-   refresh is 3 x 1200 + PB_NET_SLACK_MS = 5600 ms against a 5592 ms grant. That is the whole
-   argument in netfsm.cpp's comment above the pair, and the only thing implementing it is the
-   `return;` that ends the RSSI pass -- which could be DELETED with all 51 net cases green.
+   two. When this case was written one pass was a watchdog reset: link_ip() was WiFi.localIP()
+   at up to 2 ATs, so a merged refresh was 3 x 1200 + PB_NET_SLACK_MS = 5600 ms against a
+   5592 ms grant. link_ip() is 1 bounded AT now and the pair would fit; netfsm.cpp keeps them
+   apart for the margin (its comment above the pair has the arithmetic), and the only thing
+   implementing that is the `return;` that ends the RSSI pass -- which could be DELETED with
+   every other net case green.
 
-   THIS CASE DOES NOT COUNT ATs, DELIBERATELY. link_fake.cpp charges ZERO for link_rssi() and
-   link_ip() (the real lib/Network/src/link_wifi.cpp charges 1 and up to 2), so an AT-count
-   assertion here would read 0 either way and pass for the wrong reason -- the same shape of
-   false evidence this branch has already produced a dozen times. What the fake CAN show
-   truthfully is which pass each answer arrived in, because each refresh writes its own
-   distinctive fixed value, so pass structure is what gets pinned: one refresh per pass, in
-   order, and the address must still be unset in the pass the signal arrives in. */
+   This case pins pass STRUCTURE, not an AT count: each refresh writes its own distinctive
+   fixed value, so which pass each answer arrived in is what the fake can show truthfully --
+   one refresh per pass, in order, and the address still unset in the pass the signal arrives
+   in. (link_fake.cpp charged 0 for both when this was written and an AT count would have
+   passed for the wrong reason; it charges 1 each now, which is what the two timeout cases
+   below need.) */
 static void test_the_signal_and_address_refreshes_never_share_a_pass(void) {
   sensors_begin();
   net_begin();
@@ -1214,12 +1215,56 @@ static void test_the_signal_and_address_refreshes_never_share_a_pass(void) {
   pb_net_passes(1, 100);                       /* the signal refresh, and nothing else */
   TEST_ASSERT_EQUAL_INT8_MESSAGE(-52, net_rssi(), "the signal refresh did not run in its pass");
   TEST_ASSERT_EQUAL_STRING_MESSAGE("0.0.0.0", net_ip(),
-      "the address refresh ran in the SAME pass as the signal refresh: 1 + 2 = 3 ATs, "
-      "3 * 1200 + PB_NET_SLACK_MS = 5600 ms, against a 5592 ms watchdog grant");
+      "the address refresh ran in the SAME pass as the signal refresh: netfsm.cpp keeps "
+      "each refresh in a 1-AT pass of its own, for the margin under the watchdog grant");
 
   pb_net_passes(1, 100);                       /* the address refresh, in a pass of its own */
   TEST_ASSERT_EQUAL_STRING_MESSAGE("192.168.1.42", net_ip(),
       "the address refresh did not run in the pass after the signal refresh");
+}
+
+/* Both refresh passes carry the was_timeout()/poison() pairing every other AT-issuing pass in
+   netfsm.cpp has, and until these two cases neither pairing was pinned: link_fake.cpp charged
+   0 ATs for link_rssi() and link_ip() and never consulted link_fake_timeout_next(), so either
+   poison() could be deleted with every net case green. The fake now charges both like every
+   other primitive (one AT each -- the driver's address query became ONE bounded modem
+   round trip in link_wifi.cpp, where it used to be WiFi.localIP()'s 50-iteration spin), and a
+   modem timeout in either pass must tear the session down exactly as one in any other pass. */
+static void arrange_idle_(void) {
+  sensors_begin();
+  net_begin();
+  int guard = 0;
+  while (net_state() != NET_IDLE && guard++ < 40) pb_net_passes(1, 100);
+  TEST_ASSERT_EQUAL_MESSAGE(NET_IDLE, net_state(), "arrange: the FSM never joined");
+}
+
+static void test_a_timeout_in_the_signal_refresh_poisons_the_link(void) {
+  arrange_idle_();
+  const uint16_t desyncs = link_desyncs();
+  link_fake_timeout_next();
+  pb_net_passes(1, 100);                       /* the signal refresh, and it times out */
+  TEST_ASSERT_EQUAL_MESSAGE(NET_DOWN, net_state(),
+      "a modem timeout in the signal refresh did not poison the link");
+  TEST_ASSERT_EQUAL_INT8(0, net_rssi());
+  pb_advance(2500);                            /* past the first backoff rung */
+  pb_net_passes(1, 100);                       /* the deferred tear-down */
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(desyncs + 1, link_desyncs(), "the session was not torn down");
+}
+
+static void test_a_timeout_in_the_address_refresh_poisons_the_link(void) {
+  arrange_idle_();
+  pb_net_passes(1, 100);                       /* the signal refresh, cleanly */
+  TEST_ASSERT_EQUAL_INT8_MESSAGE(-52, net_rssi(), "arrange: the signal refresh did not run");
+  const uint16_t desyncs = link_desyncs();
+  link_fake_timeout_next();
+  pb_net_passes(1, 100);                       /* the address refresh, and it times out */
+  TEST_ASSERT_EQUAL_MESSAGE(NET_DOWN, net_state(),
+      "a modem timeout in the address refresh did not poison the link: on the board this is "
+      "the pass that used to spend up to 125 s inside WiFi.localIP() against a 5592 ms grant");
+  TEST_ASSERT_EQUAL_STRING("0.0.0.0", net_ip());
+  pb_advance(2500);
+  pb_net_passes(1, 100);
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(desyncs + 1, link_desyncs(), "the session was not torn down");
 }
 
 int main(void) {
@@ -1278,5 +1323,7 @@ int main(void) {
   RUN_TEST(test_the_cached_accessors_fill_after_a_join_and_cost_nothing);
   RUN_TEST(test_a_dropped_link_clears_the_cached_signal_and_address);
   RUN_TEST(test_the_signal_and_address_refreshes_never_share_a_pass);
+  RUN_TEST(test_a_timeout_in_the_signal_refresh_poisons_the_link);
+  RUN_TEST(test_a_timeout_in_the_address_refresh_poisons_the_link);
   return UNITY_END();
 }

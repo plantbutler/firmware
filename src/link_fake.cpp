@@ -4,6 +4,7 @@
 #include "sim.h"
 #include "config.h"
 #include <string.h>
+#include <stdio.h>
 
 #define FAKE_RESP_CAP 512
 
@@ -49,21 +50,23 @@ link_state_t link_state(void) {
   return g_state;
 }
 
-/* THESE TWO ARE FREE HERE AND ARE NOT FREE ON THE BOARD, and that gap is a trap worth naming
-   rather than leaving for the next reader to fall into. lib/Network/src/link_wifi.cpp charges
-   1 AT for the signal (a WiFi.RSSI() round trip) and up to 2 for the address (one
-   WiFi.localIP(), at most once per join). Neither calls at_() below, so link_fake_at_count()
-   reads 0 for both, and ANY AT-count assertion over a pass that refreshes them passes whether
-   or not the budget it claims to check is respected -- found exactly that way: netfsm.cpp's
-   one-refresh-per-pass rule (1 + 2 = 3 ATs = 5600 ms against a 5592 ms grant) survived every
-   AT-count case in the suite. Modelling the real costs here would need this file to carry
-   link_wifi.cpp's per-join caching too, and would move the fake clock under every existing
-   per-pass assertion; the cheaper and more honest answer is that the rule is pinned by pass
-   STRUCTURE instead -- see test_the_signal_and_address_refreshes_never_share_a_pass. Each
-   returns its own distinctive fixed value, which is what makes "which pass did this arrive in"
-   answerable at all. */
-int8_t      link_rssi(void) { return -52; }
-const char *link_ip(void)   { static char ip[16] = "192.168.1.42"; return ip; }
+/* One AT each, like the driver: lib/Network/src/link_wifi.cpp charges 1 for the signal (a
+   WiFi.RSSI() round trip) and 1 for the address (its own bounded _IPSTA query, at most once
+   per join). These two were FREE here until the address query was bounded -- the real cost was
+   "up to 2, or ~125 s", which no fake can charge honestly -- and while they were free, both
+   refresh passes' was_timeout()/poison() pairings were unpinned: neither consulted
+   g_timeout_next, so either poison() could be deleted with every net case green. Charging
+   at_() is what lets test_a_timeout_in_the_{signal,address}_refresh_poisons_the_link fail.
+   Only netfsm.cpp calls either (a make check invariant), once per join each, so there is no
+   per-join cache to model here. Each still returns its own distinctive fixed value, which is
+   what makes "which pass did this arrive in" answerable at all -- see
+   test_the_signal_and_address_refreshes_never_share_a_pass. */
+int8_t      link_rssi(void) { return at_() ? -52 : 0; }
+const char *link_ip(void) {
+  static char ip[16];
+  snprintf(ip, sizeof ip, "%s", at_() ? "192.168.1.42" : "0.0.0.0");
+  return ip;
+}
 uint16_t    link_desyncs(void) { return g_desyncs; }
 
 bool sock_open(void) {

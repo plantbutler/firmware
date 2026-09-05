@@ -3,6 +3,7 @@
    coverage at all (spec §9). Zero hits for the safety header, the dosing entry point or the
    pump write are a make check invariant over this directory. */
 #include <WiFiS3.h>
+#include <string>
 #include "link.h"
 #include "config.h"
 #include "secrets.h"
@@ -13,18 +14,21 @@
 static WiFiClient g_client;
 static uint16_t g_desyncs;
 
-/* WiFi.localIP() (WiFi.cpp:328-357) is a do/while loop, up to 50 times: a 100 ms sleep then up
-   to 2 modem.write() calls, while the IP still reads 0.0.0.0 -- NOT the bounded single query
-   the rest of this file's primitives are. When there is genuinely no IP (not joined, or just
-   dropped), that is PRECISELY the condition that runs all 50 iterations: up to 100 + 2*1200 =
-   2500 ms per spin, ~125000 ms worst case, against a 5592 ms watchdog grant -- a guaranteed
-   reset from one call.
+/* link_ip() does NOT call WiFi.localIP(). That one (WiFi.cpp:328-357) is a do/while loop, up
+   to 50 times: a 100 ms sleep, a _MODE read, then the _IPSTA query, while the answer still reads
+   0.0.0.0 -- and "still 0.0.0.0" is PRECISELY the state of a link that dropped between the
+   pass that saw WL_CONNECTED and the pass that asks for the address. That path is up to
+   100 + 2*1200 = 2500 ms per spin, ~125000 ms worst case, against a 5592 ms watchdog grant:
+   a guaranteed reset, and one that repeats after every rejoin while the AP flaps. So link_ip()
+   issues the ONE modem round trip the loop body issues on a joined link -- the _IPSTA query
+   itself, bounded by modem.timeout() like every other primitive here -- and skips the _MODE
+   read, because this file only ever joins as a station. No answer, or 0.0.0.0, is left as
+   0.0.0.0 with the cache still invalid; netfsm.cpp asks once per join, so that is one pass
+   with no address, not a spin.
    g_last_state is link_state()'s own last answer, kept here with zero extra ATs (link_state()
    already computes it; this just remembers it) so link_ip() can gate on "is the link UP right
-   now" without paying an AT to ask. g_ip_valid makes the one WiFi.localIP() call per join
-   happen AT MOST ONCE: after that, link_ip() is a pure accessor and cannot block at all, which
-   is the only shape safe to call from cli_print_status() -- the console command that runs
-   synchronously inside loop() with nothing else feeding the dog while it does. */
+   now" without paying an AT to ask. g_ip_valid makes the query happen AT MOST ONCE per join:
+   after that, link_ip() is a pure accessor and cannot block at all. */
 static link_state_t g_last_state = LINK_DOWN;
 static bool         g_ip_valid;
 static char         g_ip[16] = "0.0.0.0";   /* what link_ip() returns before the first
@@ -83,18 +87,24 @@ link_state_t link_state(void) {
 }
 int8_t link_rssi(void) { return (int8_t)WiFi.RSSI(); }
 
-/* Guarded and cached, not a bare pass-through -- see the comment beside g_last_state above.
-   NOT UP: never touches WiFi.localIP() at all (0 ATs); the answer would be worthless anyway.
-   UP, not yet cached: one WiFi.localIP() call, which on a genuinely joined link is expected to
-   resolve on its first internal iteration (a 100 ms sleep plus up to 2 ATs, ~2500 ms worst case
-   -- survivable inside the 5592 ms grant, but not free, which is why this runs at most once per
-   join rather than once per `status`). UP, already cached: a pure accessor, cannot block. */
+/* Guarded, bounded and cached -- see the comment beside g_last_state above.
+   NOT UP: never touches the modem at all (0 ATs); the answer would be worthless anyway.
+   UP, not yet cached: exactly ONE modem round trip, `AT+IPSTA=0` (IP_ADDR), the same command
+   WiFi.localIP() issues inside its loop, minus the loop. modem.write() returns within
+   modem.timeout() -- PB_NET_STEP_MS, set by link_begin() -- whatever the modem does, so this
+   costs 1 AT on the netfsm.cpp budget and cannot exceed it. A timeout or a 0.0.0.0 answer leaves
+   the cache invalid and g_ip honest. UP, already cached: a pure accessor, cannot block. */
 const char *link_ip(void) {
   if (!g_ip_valid && g_last_state == LINK_UP) {
-    IPAddress a = WiFi.localIP();
-    snprintf(g_ip, sizeof g_ip, "%u.%u.%u.%u",
-             (unsigned)a[0], (unsigned)a[1], (unsigned)a[2], (unsigned)a[3]);
-    g_ip_valid = true;
+    std::string res;
+    if (modem.write(std::string(PROMPT(_IPSTA)), res, "%s%d\r\n", CMD_WRITE(_IPSTA), IP_ADDR)) {
+      IPAddress a;
+      if (a.fromString(res.c_str()) && a != IPAddress(0, 0, 0, 0)) {
+        snprintf(g_ip, sizeof g_ip, "%u.%u.%u.%u",
+                 (unsigned)a[0], (unsigned)a[1], (unsigned)a[2], (unsigned)a[3]);
+        g_ip_valid = true;
+      }
+    }
   }
   return g_ip;
 }
