@@ -178,7 +178,9 @@ extern "C" void setup(void) {
 static void ui_fill_(ui_state_t *s) {
   memset(s, 0, sizeof *s);
   strncpy(s->build, PB_BUILD_NAME, sizeof s->build - 1);
-  strncpy(s->controller, PB_CONTROLLER, sizeof s->controller - 1);
+  /* A number since 2026-09-05, printed rather than copied. The field stays
+     char[] because the screens draw text and 0..255 is three characters. */
+  snprintf(s->controller, sizeof s->controller, "%u", (unsigned)PB_CONTROLLER);
   s->uptime_min   = hal_millis() / 60000u;      /* MINUTES: spec §5's bus rule */
   s->pump_on      = safety_dosing();            /* ui.cpp may not include safety.h itself */
   s->float_ok     = (hal_pin_read(PIN_HALL_FLOAT) == PB_LOW);

@@ -515,7 +515,8 @@ void cli_print_status(void) {
   char b[160];
   note_memory_();
 
-  snprintf(b, sizeof b, "build=%s controller=%s\n", PB_BUILD_NAME, PB_CONTROLLER);
+  snprintf(b, sizeof b, "build=%s controller=%u\n", PB_BUILD_NAME,
+           (unsigned)PB_CONTROLLER);
   hal_serial_write(b);
 
 #ifdef PB_RELAY_ACTIVE_LOW

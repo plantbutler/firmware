@@ -52,7 +52,9 @@ static void test_report_carries_c_t_and_the_valid_channels(void) {
   TEST_ASSERT_TRUE(build() > 0);
   char t[32];
   snprintf(t, sizeof t, "t=%lu", (unsigned long)report_t_wire());
-  TEST_ASSERT_TRUE(has_tok("c=" PB_CONTROLLER));
+  char c[16];
+  snprintf(c, sizeof c, "c=%u", (unsigned)PB_CONTROLLER);
+  TEST_ASSERT_TRUE(has_tok(c));
   TEST_ASSERT_TRUE(has_tok(t));
   TEST_ASSERT_TRUE(has_tok("ch0=8000"));
   TEST_ASSERT_TRUE(has_tok("ch5=8005"));
@@ -400,7 +402,7 @@ static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
   report_set_ack(4294967295u, PB_DOSE_MAX_ML, "resetmid");
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE(strlen(g_buf) < PB_BODY_CAP);
-  TEST_ASSERT_TRUE(strlen(g_buf) <= sizeof(PB_CONTROLLER) + 2 + PB_BODY_WORST_FIXED);
+  TEST_ASSERT_TRUE(strlen(g_buf) <= PB_CONTROLLER_WIRE + 2 + PB_BODY_WORST_FIXED);
 }
 
 /* backend/fake_device.py's build_report() is the shape butler was written against:
@@ -424,9 +426,9 @@ static void test_report_matches_the_fake_device_shape(void) {
   }
   char golden[PB_BODY_CAP];
   snprintf(golden, sizeof golden,
-           "c=%s t=%lu ch0=8000 ch1=8001 ch2=8002 ch3=8003 ch4=8004 ch5=8005 "
+           "c=%u t=%lu ch0=8000 ch1=8001 ch2=8002 ch3=8003 ch4=8004 ch5=8005 "
            "float=1 pos=unknown ack=17 flow_ml=248",
-           PB_CONTROLLER, (unsigned long)report_t_wire());
+           (unsigned)PB_CONTROLLER, (unsigned long)report_t_wire());
   TEST_ASSERT_EQUAL_STRING(golden, spine);
 }
 

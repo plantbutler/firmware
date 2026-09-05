@@ -15,16 +15,20 @@
 #include "cart.h"
 #include "noinit.h"    /* g_nv.cmd_high_water: the replay guard, §4.3 */
 #include "secrets.h"   /* PB_CONTROLLER: the two static_asserts below and the c= field.
+                          An INTEGER since 2026-09-05, so `c=` is the same shape as every
+                          other identifier on the wire and a typo cannot open a second
+                          garden. Board 0 is a real board, which is why the assert below
+                          is a range and not a "not empty".
                           [env:native] and [env:uno_r4_wifi_sim] pass it in build_flags;
                           the two device envs do not, and this header is its only other
                           definition. Its #ifndef guard makes both routes agree. */
 #include <stdio.h>
 #include <string.h>
 
-static_assert(sizeof(PB_CONTROLLER) + 2 + PB_BODY_WORST_FIXED <= PB_BODY_CAP,
+static_assert(PB_CONTROLLER_WIRE + 2 + PB_BODY_WORST_FIXED <= PB_BODY_CAP,
               "the body's own worst case does not fit PB_BODY_CAP (spec §7's term-by-term sum)");
-static_assert(sizeof(PB_CONTROLLER) > 1,
-              "an empty c= is 'no c= in the report': a permanent 400 (butler.py:252-253)");
+static_assert(PB_CONTROLLER >= 0 && PB_CONTROLLER <= 255,
+              "c= is 0..255 on the wire: butler.py refuses anything else (MAX_CONTROLLER)");
 
 static uint32_t g_t_wire, g_t_ms;
 static report_ack_t g_ack;
@@ -85,7 +89,7 @@ uint16_t report_build(char *buf, uint16_t cap) {
                                   a report that says err=heap is worth more than no report. */
   const bool stuck = sensors_stuck();
 
-  ok = ok && put_s(buf, cap, &n, "c=%s", PB_CONTROLLER);
+  ok = ok && put_u(buf, cap, &n, "c=%lu", (uint32_t)PB_CONTROLLER);
   ok = ok && put_u(buf, cap, &n, " t=%lu", g_t_wire);
 
   if (!stuck) {                       /* §5: a stuck mux omits the WIRED channels, not the body */

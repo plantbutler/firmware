@@ -25,7 +25,7 @@ void tearDown(void) { pb_test_teardown(); }
 static void test_the_native_runner_links_and_runs(void) {
   /* PB_CONTROLLER comes from [env:native]'s build_flags, so this also proves the flag
      reached the compiler. */
-  TEST_ASSERT_EQUAL_STRING("test1", PB_CONTROLLER);
+  TEST_ASSERT_EQUAL_UINT(7u, (unsigned)PB_CONTROLLER);
 }
 
 /* spec §7: RL_16384 * PR_8192 / (PCLKB/1000), PCLKB = 24 MHz (bsp_clock_cfg.h:8,14).
@@ -42,8 +42,8 @@ static void test_the_watchdog_grant_arithmetic_matches_the_constant(void) {
    term not counted in PB_BODY_WORST_FIXED. An empty c= is a permanent 400 (butler.py
    parse_report: c must be non-empty). */
 static void test_the_body_worst_case_sum_fits_the_body_cap(void) {
-  TEST_ASSERT_TRUE(sizeof(PB_CONTROLLER) > 1u);
-  TEST_ASSERT_TRUE(sizeof(PB_CONTROLLER) + 2u + PB_BODY_WORST_FIXED <= PB_BODY_CAP);
+  TEST_ASSERT_TRUE(PB_CONTROLLER >= 0 && PB_CONTROLLER <= 255);
+  TEST_ASSERT_TRUE(PB_CONTROLLER_WIRE + 2u + PB_BODY_WORST_FIXED <= PB_BODY_CAP);
   TEST_ASSERT_TRUE(PB_HDR_FIXED + PB_BODY_CAP <= PB_TX_CAP);
 }
 

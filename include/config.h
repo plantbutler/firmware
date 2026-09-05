@@ -222,9 +222,13 @@ commit the number, and delete -DPB_ALLOW_UNCALIBRATED from [env:uno_r4_wifi]."
 
    The old PB_BODY_CAP of 288 therefore had NO margin at all: any PB_CONTROLLER longer
    than six characters overflowed, and the failure mode is err=txcap with the report
-   DROPPED -- a silent reporting blackout, not a 400. netfsm.cpp static_asserts
-   sizeof(PB_CONTROLLER) + 2 + PB_BODY_WORST_FIXED <= PB_BODY_CAP, and that
-   sizeof(PB_CONTROLLER) > 1 (an empty c= is a permanent 400). ---- */
+   DROPPED -- a silent reporting blackout, not a 400. That whole class went away on
+   2026-09-05 when the controller became an integer: PB_CONTROLLER_WIRE is what it can
+   cost on the wire, and 0..255 is three characters whatever anybody sets. netfsm.cpp and
+   report.cpp still static_assert PB_CONTROLLER_WIRE + 2 + PB_BODY_WORST_FIXED <=
+   PB_BODY_CAP, and that PB_CONTROLLER is inside 0..255 -- a RANGE, not a "not empty",
+   because board 0 is a real board and is the one the app fills in by default. ---- */
+#define PB_CONTROLLER_WIRE       3     /* strlen("255"); c= is 0..255 (butler.MAX_CONTROLLER) */
 #define PB_BODY_WORST_FIXED    288
 #define PB_BODY_CAP            384
 #define PB_DIAG_CLAMP       999999     /* every chN diagnostic is min(v, this) on the way out:
