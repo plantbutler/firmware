@@ -158,7 +158,9 @@ extern "C" void setup(void) {
      status. main.cpp holds the verdict; netfsm.cpp holds the flag, because [env:native]
      filters main.cpp out and no host test could otherwise reach it.
 
-     NET_BEGIN() FIRST, THE VERDICT SECOND, and never the other way round: net_begin() clears
+     The ORDER -- net_begin() first, the verdict second -- lives in net_boot() and not here,
+     because [env:native] filters main.cpp out and an order written here is an order no host
+     test can fail on. What follows is why that order is the whole mechanism: net_begin() clears
      g_disabled unconditionally -- deliberately, because a latch left standing across a restart
      would make net_poll() a silent no-op forever (netfsm.cpp, and the case that pins it,
      test_net_begin_clears_a_standing_disable_latch). Latch the verdict BEFORE that line and
@@ -167,8 +169,7 @@ extern "C" void setup(void) {
      board then reports rescaled raw counts to the backend for 48 hours with a failed
      watchdog, ADC or heap assertion behind it. The order is the whole of the mechanism;
      test_a_failed_boot_assertion_survives_net_begin is its sentence in the host suite. */
-  net_begin();
-  if (main_net_disabled()) net_disable(main_boot_err());
+  net_boot(main_net_disabled() ? main_boot_err() : NULL);
   exec_begin();
 
   cli_begin();

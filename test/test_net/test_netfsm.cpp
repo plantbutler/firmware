@@ -361,8 +361,10 @@ static void test_net_begin_clears_a_standing_disable_latch(void) {
    banner -- main.cpp reads its own g_net_disabled for that, not this latch -- and reports
    anyway, for 48 hours, with a failed watchdog, ADC or heap assertion behind it. */
 static void test_a_failed_boot_assertion_survives_net_begin(void) {
-  net_begin();                       /* main.cpp setup(): FIRST -- resets every static */
-  net_disable("wdt");                /* main.cpp setup(): SECOND -- the verdict, latched after */
+  /* net_boot() and NOT the two calls by hand: replicating the order here would pin nothing,
+     since main.cpp could be reordered and this case would still pass. net_boot() is the one
+     copy of that order, and setup() has no other way to reach it. */
+  net_boot("wdt");
   TEST_ASSERT_NOT_NULL(net_disabled());
   TEST_ASSERT_EQUAL_STRING("wdt", net_disabled());
 

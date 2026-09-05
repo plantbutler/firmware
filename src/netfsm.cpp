@@ -119,6 +119,18 @@ void net_begin(void) {
   g_need_reset = false;
 }
 
+/* setup()'s boot order, in the one file a host test can reach. net_begin() MUST run first: it
+   clears g_disabled unconditionally, deliberately, so a latch left standing across a restart
+   cannot make net_poll() a silent no-op forever. Latch the verdict before that line and
+   net_begin() throws it away one statement later -- the banner still prints net=DISABLED,
+   because it reads main.cpp's own flag rather than this one, and the board then reports
+   rescaled raw counts for 48 hours with a failed watchdog, ADC or heap assertion behind it.
+   Pinned by test_a_failed_boot_assertion_survives_net_begin. */
+void net_boot(const char *boot_err) {
+  net_begin();
+  if (boot_err) net_disable(boot_err);
+}
+
 /* PB_RETRY_DEADLINE_MS = 30000, well inside butler's RETRY_WINDOW_S = 300 (butler.py:86).
    g_t_ms is the UNSALTED hal_millis() stamped alongside g_t_wire (§4.1). Measuring against the
    wire value gives `elapsed - salt` mod 2^32. Two variables, one purpose each (§4.4). */

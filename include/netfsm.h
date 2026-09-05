@@ -14,6 +14,12 @@ typedef enum { NET_DOWN, NET_JOIN_ISSUE, NET_JOIN_WAIT, NET_IDLE,
                NET_SOCK_CLOSE, NET_CONNECT, NET_SEND, NET_RECV, NET_CLOSE } net_state_t;
 
 void        net_begin(void);
+void        net_boot(const char *boot_err);  /* net_begin() and then, only if boot_err is
+                                                non-NULL, net_disable(). setup()'s two-line
+                                                order lives HERE and not in main.cpp, because
+                                                [env:native] filters main.cpp out: an order
+                                                written there is an order no host test can
+                                                fail on. See net_boot()'s own comment. */
 void        net_poll(bool dosing);          /* the flag is passed IN — see netfsm.cpp */
 net_state_t net_state(void);
 uint16_t    net_last_status(void);
