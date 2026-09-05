@@ -156,9 +156,19 @@ extern "C" void setup(void) {
 
   /* spec §2.5: a failed watchdog, ADC or heap assertion disables the network and says why in
      status. main.cpp holds the verdict; netfsm.cpp holds the flag, because [env:native]
-     filters main.cpp out and no host test could otherwise reach it. */
-  if (main_net_disabled()) net_disable(main_boot_err());
+     filters main.cpp out and no host test could otherwise reach it.
+
+     NET_BEGIN() FIRST, THE VERDICT SECOND, and never the other way round: net_begin() clears
+     g_disabled unconditionally -- deliberately, because a latch left standing across a restart
+     would make net_poll() a silent no-op forever (netfsm.cpp, and the case that pins it,
+     test_net_begin_clears_a_standing_disable_latch). Latch the verdict BEFORE that line and
+     net_begin() throws it away one statement later: the banner above still prints
+     net=DISABLED, because it reads this file's own g_net_disabled and not the flag, and the
+     board then reports rescaled raw counts to the backend for 48 hours with a failed
+     watchdog, ADC or heap assertion behind it. The order is the whole of the mechanism;
+     test_a_failed_boot_assertion_survives_net_begin is its sentence in the host suite. */
   net_begin();
+  if (main_net_disabled()) net_disable(main_boot_err());
   exec_begin();
 
   cli_begin();

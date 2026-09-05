@@ -346,6 +346,34 @@ static void test_net_begin_clears_a_standing_disable_latch(void) {
   TEST_ASSERT_NOT_EQUAL(NET_DOWN, net_state());   /* it actually runs again */
 }
 
+/* The case above pins net_begin()'s clear, which is right and stays. This one pins the ONLY
+   thing that makes that clear safe: the ORDER setup() calls the two in.
+
+   [env:native] filters main.cpp out (platformio.ini's build_src_filter), so main_net_disabled()
+   and main_boot_err() do not exist in this binary and there is nothing here to link against.
+   The sequence below is therefore main.cpp's own two lines RETYPED, with those two accessors
+   stood in for by a verdict this suite can produce itself -- the order is the whole subject, so
+   the order is what is written out. If setup() is ever reordered again, this case is the
+   sentence that says what the reordering costs; keep the two in step.
+
+   What it costs: net_begin() clears g_disabled unconditionally and by design, so a verdict
+   latched BEFORE it is thrown away one line later. The board then prints net=DISABLED on the
+   banner -- main.cpp reads its own g_net_disabled for that, not this latch -- and reports
+   anyway, for 48 hours, with a failed watchdog, ADC or heap assertion behind it. */
+static void test_a_failed_boot_assertion_survives_net_begin(void) {
+  net_begin();                       /* main.cpp setup(): FIRST -- resets every static */
+  net_disable("wdt");                /* main.cpp setup(): SECOND -- the verdict, latched after */
+  TEST_ASSERT_NOT_NULL(net_disabled());
+  TEST_ASSERT_EQUAL_STRING("wdt", net_disabled());
+
+  /* A latch nothing reads is not a safety measure. net_poll()'s first act is to honour it, so
+     four whole passes must move nothing: no join, no socket, no report on the wire. */
+  pb_net_passes(4, PB_NET_STEP_MS);
+  TEST_ASSERT_EQUAL(NET_DOWN, net_state());
+  TEST_ASSERT_EQUAL_UINT32(0, net_reports_ok());
+  TEST_ASSERT_EQUAL_UINT32(0, net_reports_failed());
+}
+
 static void test_a_join_deadline_is_not_expired_early_by_the_clock_rollover(void) {
   /* Armed BEFORE net_begin(): every timestamp in the FSM is relative to the one before it, and
      a board 49.7 days up has all of them up here together. */
@@ -1120,6 +1148,7 @@ int main(void) {
   RUN_TEST(test_stale_bytes_in_the_rx_buffer_cannot_become_a_command);
   RUN_TEST(test_poll_is_a_noop_while_the_pump_is_asserted);
   RUN_TEST(test_net_begin_clears_a_standing_disable_latch);
+  RUN_TEST(test_a_failed_boot_assertion_survives_net_begin);
   RUN_TEST(test_a_join_deadline_is_not_expired_early_by_the_clock_rollover);
   RUN_TEST(test_a_backoff_wait_still_waits_across_the_clock_rollover);
   RUN_TEST(test_a_recv_deadline_is_not_expired_early_by_the_clock_rollover);
