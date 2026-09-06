@@ -5,10 +5,20 @@
 #include "pins.h"
 #include "safety.h"
 
-Screen::Screen(ScreenType type) : type(type), lcd(I2C_ADDR_LCD, 16, 2), present_(false) {}
+Screen::Screen(ScreenType type)
+    : type(type), lcd_a(I2C_ADDR_LCD, 16, 2), lcd_b(I2C_ADDR_LCD_ALT, 16, 2), lcd(&lcd_a),
+      present_(false) {}
 
 bool Screen::probe() {
-  present_ = hal_i2c_probe(type == ScreenType::Oled ? I2C_ADDR_OLED : I2C_ADDR_LCD);
+  if (type == ScreenType::Oled) {
+    present_ = hal_i2c_probe(I2C_ADDR_OLED);
+    return present_;
+  }
+  /* 0x27 first, then 0x3F (pins.h): the wiring says the backpack ships at either, and a
+     panel probed at the wrong one would sit dark for the whole run with nothing saying why. */
+  if (hal_i2c_probe(I2C_ADDR_LCD))          { lcd = &lcd_a; present_ = true; }
+  else if (hal_i2c_probe(I2C_ADDR_LCD_ALT)) { lcd = &lcd_b; present_ = true; }
+  else                                       present_ = false;
   return present_;
 }
 
@@ -33,7 +43,7 @@ bool Screen::paint_ok_(uint32_t unit_start_ms) {
 /* Fix round 2 (Important): begin() is NOT budget-guarded, on either panel, and both
    chains are already past PB_WDT_GRANTED_MS (5592 ms) on their own:
 
-   LCD -- lcd.init() (-> init_priv() -> begin()) + lcd.backlight(), traced against
+   LCD -- lcd->init() (-> init_priv() -> begin()) + lcd->backlight(), traced against
    LiquidCrystal_I2C.cpp:63-129,152-159,233-241: one expanderWrite() (1 tx, the
    backlight-off reset) + four write4bits() 4-bit-mode-select attempts (4x3 = 12 tx) +
    five command()-based calls -- FUNCTIONSET, display(), clear(), ENTRYMODESET, home()
@@ -91,8 +101,8 @@ void Screen::begin() {
        deliberately NOT run under PB_SCREEN_PAINT_BUDGET_MS -- budgeting it would mark a
        healthy LCD not-present on every single boot. It is on spec §9's not-tested-on-
        the-host list, same as today. */
-    lcd.init();
-    lcd.backlight();
+    lcd->init();
+    lcd->backlight();
   }
 }
 
@@ -124,7 +134,7 @@ void Screen::clear() {
     return;
   }
   uint32_t t0 = hal_millis();
-  lcd.clear();
+  lcd->clear();
   paint_ok_(t0);
 }
 
@@ -168,11 +178,11 @@ void Screen::row(uint8_t r, const char *text) {
     return;
   }
   uint32_t t0 = hal_millis();
-  lcd.setCursor(0, r);
+  lcd->setCursor(0, r);
   if (!paint_ok_(t0)) return;
   for (uint8_t i = 0; i < 16 && text[i] != '\0'; ++i) {
     t0 = hal_millis();
-    lcd.write((uint8_t)text[i]);
+    lcd->write((uint8_t)text[i]);
     if (!paint_ok_(t0)) return;
   }
 }

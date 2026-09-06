@@ -42,7 +42,10 @@ PB_RELAY_ACTIVE_HIGH in platformio.ini build_flags after you have READ THE MODUL
 /* ---- I2C addresses (A4/A5; the bus that gates the pump) ---- */
 #define I2C_ADDR_EXPANDER  0x20  /* PCF8575, A0-A2 low. P0..P3 = MUX1 S0..S3,
                                     P4 = HALL_HOME (input, 10 k pull-up R3) */
-#define I2C_ADDR_LCD       0x27  /* LCD1602 backpack */
+#define I2C_ADDR_LCD       0x27  /* LCD1602 backpack, A0-A2 bridged ... */
+#define I2C_ADDR_LCD_ALT   0x3F  /* ... or open: the same PCF8574 backpack ships either way,
+                                    and cad/wiring's bring-up 1 accepts both. Screen::probe()
+                                    asks 0x27 first, then 0x3F, and keeps whichever answers. */
 #define I2C_ADDR_OLED      0x3C  /* SensorKit OLED (u8x8) */
 
 /* ---- D6, and only for its owner ----

@@ -137,7 +137,7 @@ dedup window, which shows up as a missing row rather than as an error anywhere.
   hall, on the `PIN_SERVO` (D9) continuous servo. Every blocking wait in the old
   time-based Manifold became a (target pulses, deadline, stall window) triple. It writes to
   no panel and names no network header.
-- `lib/Screen` — one wrapper over the SensorKit OLED (u8x8) and a 16x2 I2C LCD at 0x27.
+- `lib/Screen` — one wrapper over the SensorKit OLED (u8x8) and a 16x2 I2C LCD at 0x27 or 0x3F (the backpack ships either way; `probe()` asks both and keeps the one that answers).
 - `lib/Network` — `link_wifi.cpp`, seam 2's driver, plus `include/Network.h`, which nothing
   includes and which **must not be deleted**: its comment is the only surviving account of
   why this library once failed to build at all. Device only: `[env:native]` puts it in
