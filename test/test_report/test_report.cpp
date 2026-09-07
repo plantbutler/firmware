@@ -112,54 +112,15 @@ static void test_report_float_is_only_ever_zero_or_one(void) {
   }
 }
 
-static void test_repeated_float_refusals_drive_float_to_zero_on_the_wire(void) {
-  fresh_sweep();
-  sim_set_float(true);
-  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT + 1; ++i) safety_float_refusal_count(true);
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "float=0"));          /* even though the tank samples OK */
+/* The flap trips on the PB_FLOAT_FLAP_LIMIT-th consecutive refusal; a further refusal cannot
+   untrip it, which is why two rows below run past the limit. */
+static void trip_float_flap_(unsigned refusals) {
+  for (unsigned i = 0; i < refusals; ++i) safety_float_refusal_count(true);
 }
 
-static void test_a_granted_dose_clears_the_float_refusal_counter(void) {
-  fresh_sweep();
-  sim_set_float(true);
-  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT + 1; ++i) safety_float_refusal_count(true);
-  safety_float_refusal_count(false);             /* any granted dose clears it */
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "float=1"));
-}
-
-/* ---- the three latches on the wire: ch207 contra, ch210 the float flap, ch211 dry. The
-   first two say why a float= they never change is 0; ch211 is what forces pos=unknown.
-   Absent reads as 0 to the backend, so all three are present at 0 on a clean boot, and
-   every case that stands one up reads the other two at 0 on the same report. ---- */
-static void test_ch210_and_ch211_are_zero_on_a_clean_boot(void) {
-  fresh_sweep();
-  TEST_ASSERT_FALSE(safety_contra());
-  TEST_ASSERT_FALSE(safety_float_flap());
-  TEST_ASSERT_FALSE(safety_dry());
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);
-}
-
-/* The flap trips on the PB_FLOAT_FLAP_LIMIT-th consecutive refusal and clears only on a
-   granted dose, so the clear is a real dose that reaches its target. The sibling at 0 catches
-   an emitter that puts flap || dry on both channels. */
-static void test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dose(void) {
-  fresh_sweep();
-  sim_set_float(true);
-  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);
-  TEST_ASSERT_TRUE(safety_float_flap());
-  TEST_ASSERT_FALSE(safety_dry());
-  TEST_ASSERT_FALSE(safety_contra());
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);   /* the flap is not the dry latch */
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);   /* nor the contradiction */
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=0"), g_buf);   /* unchanged: the flap still forces it */
-
+/* A dose that reaches its target: the only thing besides the counter's own clear that puts
+   the flap back down. */
+static void grant_a_dose_(void) {
   pb_advance(PB_BOOT_GAP_MS + 1u);
   pulses_begin();
   sim_set_flow_ml_s(85u);
@@ -168,64 +129,68 @@ static void test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dos
   q.cap_ms = PB_DOSE_CAP_MS_MAX;
   q.long_prime = true;
   TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q), "arrange: a granted dose");
-  TEST_ASSERT_FALSE(safety_float_flap());
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=1"), g_buf);
 }
 
-/* The dry latch is a pos= term, not a float= term: ch211=1 rides beside float=1. */
-static void test_ch211_is_one_while_the_dry_latch_stands(void) {
-  fresh_sweep();
-  sim_set_float(true);
-  safety_dry_set(true);
-  TEST_ASSERT_FALSE(safety_float_flap());
-  TEST_ASSERT_FALSE(safety_contra());
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);   /* the dry latch is not the flap */
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);   /* nor the contradiction */
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=1"), g_buf);   /* dry is not a float= term */
-  safety_dry_set(false);                           /* `dry off`: the only way back */
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);
-}
+static void latch_nothing_(void)              { }
+static void latch_flap_(void)                 { trip_float_flap_(PB_FLOAT_FLAP_LIMIT); }
+static void latch_flap_past_the_limit_(void)  { trip_float_flap_(PB_FLOAT_FLAP_LIMIT + 1u); }
+static void latch_flap_then_the_clear_(void)  { trip_float_flap_(PB_FLOAT_FLAP_LIMIT + 1u);
+                                                safety_float_refusal_count(false); }
+static void latch_flap_then_a_dose_(void)     { trip_float_flap_(PB_FLOAT_FLAP_LIMIT);
+                                                grant_a_dose_(); }
+static void latch_dry_(void)                  { safety_dry_set(true); }
+static void latch_dry_then_off_(void)         { safety_dry_set(true); safety_dry_set(false); }
+static void latch_contra_(void)               { pb_latch_contra(); }
+static void latch_flap_and_dry_(void)         { trip_float_flap_(PB_FLOAT_FLAP_LIMIT);
+                                                safety_dry_set(true); }
+static void latch_flap_and_dry_off_(void)     { trip_float_flap_(PB_FLOAT_FLAP_LIMIT);
+                                                safety_dry_set(true); safety_dry_set(false); }
 
-/* The contradiction alone: an emitter reading flap || contra on ch210, or dry || contra on
-   ch211, passed the cases above. contra is a float= term, so float= goes to 0 with it. */
-static void test_ch207_alone_leaves_ch210_and_ch211_at_zero(void) {
-  fresh_sweep();
-  pb_latch_contra();
-  TEST_ASSERT_FALSE(safety_float_flap());
-  TEST_ASSERT_FALSE(safety_dry());
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);   /* the contradiction is not the flap */
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);   /* nor the dry latch */
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=0"), g_buf);
-}
-
-/* Both up on one report catches an emitter in which one latch masks the other. dry off then
-   drops only ch211: the flap still stands. */
-static void test_ch210_and_ch211_are_both_one_when_both_latches_stand(void) {
-  fresh_sweep();
-  sim_set_float(true);
-  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);
-  safety_dry_set(true);
-  TEST_ASSERT_TRUE(safety_float_flap());
-  TEST_ASSERT_TRUE(safety_dry());
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=0"), g_buf);       /* the flap forces it; dry does not */
-  safety_dry_set(false);
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);
+/* ---- the three latches on the wire: ch207 contra, ch210 the float flap, ch211 dry. Each
+   reaches its own channel and no other: an emitter reading flap || contra on ch210, or
+   dry || contra on ch211, or flap || dry on both, satisfies some rows and not the rest.
+   Absent reads as 0 to the backend, so all three ride at 0 on a clean boot. contra and the
+   flap are float= terms and force it to 0 while they stand; the dry latch is no float= term
+   at all -- it rides beside float=1, and is what forces pos=unknown instead. Every row leaves
+   the tank reading OK, so a 0 in the float column can only be a latch. ---- */
+static void test_each_latch_reaches_its_own_channel_and_only_two_of_them_move_float(void) {
+  static const struct {
+    const char *why;
+    void (*arrange)(void);
+    int contra, flap, dry, wire_float;
+  } rows[] = {
+    { "a clean boot: no latch stands",                     latch_nothing_,             0,0,0, 1 },
+    { "the flap, on the limit-th consecutive refusal",     latch_flap_,                0,1,0, 0 },
+    { "the flap, one refusal past the limit",              latch_flap_past_the_limit_, 0,1,0, 0 },
+    { "the flap, dropped by the counter's own clear",      latch_flap_then_the_clear_, 0,0,0, 1 },
+    { "the flap, dropped by a granted dose",               latch_flap_then_a_dose_,    0,0,0, 1 },
+    { "the dry latch alone, beside a float the tank likes",latch_dry_,                 0,0,1, 1 },
+    { "the dry latch released by `dry off`",               latch_dry_then_off_,        0,0,0, 1 },
+    { "the contradiction alone, on a tank reading OK",     latch_contra_,              1,0,0, 0 },
+    { "both latches on one report, neither masking the other", latch_flap_and_dry_,    0,1,1, 0 },
+    { "`dry off` drops ch211 and leaves the flap standing",latch_flap_and_dry_off_,    0,1,0, 0 },
+  };
+  for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
+    tearDown(); setUp();                    /* a cold fixture per row, as a case gets */
+    fresh_sweep();
+    sim_set_float(true);
+    rows[i].arrange();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(rows[i].contra, safety_contra() ? 1 : 0, rows[i].why);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(rows[i].flap, safety_float_flap() ? 1 : 0, rows[i].why);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(rows[i].dry, safety_dry() ? 1 : 0, rows[i].why);
+    TEST_ASSERT_TRUE_MESSAGE(build() > 0, rows[i].why);
+    char msg[PB_BODY_CAP + 96];
+    snprintf(msg, sizeof msg, "%s | %s", rows[i].why, g_buf);
+    char tok[16];
+    snprintf(tok, sizeof tok, "ch207=%d", rows[i].contra);
+    TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, tok), msg);
+    snprintf(tok, sizeof tok, "ch210=%d", rows[i].flap);
+    TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, tok), msg);
+    snprintf(tok, sizeof tok, "ch211=%d", rows[i].dry);
+    TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, tok), msg);
+    snprintf(tok, sizeof tok, "float=%d", rows[i].wire_float);
+    TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, tok), msg);
+  }
 }
 
 static void test_report_pos_is_unknown_while_the_going_live_flag_is_set(void) {
@@ -335,14 +300,6 @@ static void test_report_never_emits_ack_zero(void) {
   report_set_ack(0, 0, "none");          /* ack is _int_in(v,"ack",1,2**63): 0 400s the report */
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_FALSE(pb_has_key(g_buf, "ack="));
-}
-
-static void test_report_ack_id_survives_above_sixty_five_thousand(void) {
-  fresh_sweep();
-  report_set_ack(4294967295u, 1000, "none");
-  TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "ack=4294967295"));
-  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "flow_ml=1000"));
 }
 
 /* No report may be built while the ack slot reads err=recv: butler would mark the command
@@ -522,17 +479,47 @@ static void test_a_break_inside_the_stack_margin_latches_err_heap(void) {
   TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "err=heap"), g_buf);
 }
 
-/* PB_BODY_WORST_SUM is a hand sum of every field at its widest; this builds that body and
-   checks the number. t= is parked one step short of UINT32_MAX because the stamp's own clock
-   read advances the fake first. The diagnostic block cannot be driven to width through
-   report_build() (three producers are constants in the fake, four are booleans), so the block
-   as built is swapped for the emitter's own at twelve values above the clamp. */
-static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
+/* Every field the host can drive to its widest at once. ch200..ch202 are constants in the
+   fake, ch203 has no setter, ch206's only host writer is kept out of this file and ch208 is a
+   boolean, so the diagnostic block still falls some forty bytes short of its clamp width; the
+   rest of the body is at full stretch. t= is parked one step short of UINT32_MAX because the
+   stamp's own clock read advances the fake first, so nothing that reads the clock may run
+   between this and build(). */
+static void arrange_widest_body_(void) {
   for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch) sim_set_channel(ch, 16383);  /* 14-bit maximum */
   sim_set_channel(PB_CANARY_CHANNEL, 1);
+  sim_set_float(false);
   TEST_ASSERT_TRUE(sensors_sweep());
+  sim_set_float(true);
+  TEST_ASSERT_TRUE(sensors_sweep());             /* a float change is on record: ch204 counts */
+
+  pb_latch_contra();                             /* ch207: float OK, no flow, a real dose */
+  trip_float_flap_(PB_FLOAT_FLAP_LIMIT);                                           /* ch210 */
+  safety_dry_set(true);                                                            /* ch211 */
+
+  pulses_leak_poll(false);                       /* ch205: past the clamp, pump off, as loop() polls */
+  sim_flow_storm(2000);
+  for (int i = 0; i < 100 && pulses_leak_count() <= (uint32_t)PB_DIAG_CLAMP; ++i) {
+    sim_advance(10000);
+    pulses_leak_poll(false);
+  }
+  sim_flow_storm(0);
+  TEST_ASSERT_TRUE(pulses_leak_count() > (uint32_t)PB_DIAG_CLAMP);
+
+  sim_wdt_rate_hz(1000000u);                     /* ch209: the counter drains to 0 inside the probe */
+  (void)hal_wdt_alive();
+  sim_wdt_rate_hz(2929u);
+  TEST_ASSERT_TRUE(hal_wdt_last_delta() >= 10000u);   /* five digits: the whole reload */
+
   sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt() - 1u));   /* jump, never 2^31 steps */
   report_set_ack(4294967295u, PB_DOSE_MAX_ML, "resetmid");
+}
+
+/* PB_BODY_WORST_SUM is a hand sum of every field at its widest; this builds that body and
+   checks the number. The diagnostic block cannot be driven to width through report_build(),
+   so the block as built is swapped for the emitter's own at twelve values above the clamp. */
+static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
+  arrange_widest_body_();
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "t=4294967295"), g_buf);
   TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch0=16383"), g_buf);
@@ -567,39 +554,10 @@ static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
 }
 
 /* The runtime half: the widest body report_build() itself can produce from the real producers
-   must reach the wire, under the cap and no longer than the table. ch200..ch202 are constants
-   in the fake, ch203 has no setter, ch206's only host writer is kept out of this file and
-   ch208 is a boolean, so the body stays some forty bytes short and the bound is an inequality. */
+   must reach the wire, under the cap and no longer than the table. The block falls short of
+   its clamp width for the reasons the arrangement gives, so the bound is an inequality. */
 static void test_report_build_fits_the_buffer_with_every_host_drivable_field_at_its_widest(void) {
-  for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch) sim_set_channel(ch, 16383);  /* 14-bit maximum */
-  sim_set_channel(PB_CANARY_CHANNEL, 1);
-  sim_set_float(false);
-  TEST_ASSERT_TRUE(sensors_sweep());
-  sim_set_float(true);
-  TEST_ASSERT_TRUE(sensors_sweep());             /* a float change is on record: ch204 counts */
-
-  pb_latch_contra();                             /* ch207: float OK, no flow, a real dose */
-  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);   /* ch210 */
-  safety_dry_set(true);                                                            /* ch211 */
-
-  pulses_leak_poll(false);                       /* ch205: past the clamp, pump off, as loop() polls */
-  sim_flow_storm(2000);
-  for (int i = 0; i < 100 && pulses_leak_count() <= (uint32_t)PB_DIAG_CLAMP; ++i) {
-    sim_advance(10000);
-    pulses_leak_poll(false);
-  }
-  sim_flow_storm(0);
-  TEST_ASSERT_TRUE(pulses_leak_count() > (uint32_t)PB_DIAG_CLAMP);
-
-  sim_wdt_rate_hz(1000000u);                     /* ch209: the counter drains to 0 inside the probe */
-  (void)hal_wdt_alive();
-  sim_wdt_rate_hz(2929u);
-  TEST_ASSERT_TRUE(hal_wdt_last_delta() >= 10000u);   /* five digits: the whole reload */
-
-  /* parked one step short, as above; nothing that reads the clock may run before build() */
-  sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt() - 1u));   /* t= widest; ch204 past the clamp */
-  report_set_ack(4294967295u, PB_DOSE_MAX_ML, "resetmid");
-
+  arrange_widest_body_();
   const uint16_t n = build();
   TEST_ASSERT_TRUE_MESSAGE(n > 0, "the widest host body was dropped as txcap");
   TEST_ASSERT_EQUAL_UINT16(n, (uint16_t)strlen(g_buf));
@@ -702,12 +660,30 @@ static void test_response_a_key_embedded_in_a_longer_key_is_not_matched(void) {
   TEST_ASSERT_EQUAL_UINT16(250, r.cmd.ml);   /* the real ml=, not flow_ml=999's tail */
 }
 
-static void test_response_rejects_command_id_zero(void) {
+/* Four shapes a corrupted body can take that each yield no command AND leave the replay mark
+   where it was: a refused line must not burn the id it named, or a later well-formed response
+   carrying that id would be turned away as a replay. */
+static void test_a_malformed_command_line_yields_no_command_and_never_moves_the_mark(void) {
+  static const struct { const char *body; const char *why; } rows[] = {
+    { "next=60\ncmd=0 water=3 ml=250 cap_s=30\n",
+      "cmd=0 is not an id" },
+    { "next=60\ncmd=21\n",
+      "neither water= nor stop=1: a shape butler never sends and a corrupted body might, and "
+      "neither branch's field checks succeed" },
+    { "next=60\ncmd=17 water=256 ml=250 cap_s=30\n",
+      "an outlet too wide for outlet's own uint8_t: 256 cast down is 0, a LEGAL-looking "
+      "outlet rather than the obviously-bogus field it was" },
+    { "next=60\ncmd=17 water=4294967297 ml=250 cap_s=30\n",
+      "2^32 + 1 wraps modulo 2^32 to outlet=1 under a rounded-down single-threshold guard; "
+      "field_u32's per-digit check is what refuses it instead" },
+  };
   response_t r;
-  const char *b = "next=60\ncmd=0 water=3 ml=250 cap_s=30\n";
-  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
-  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
-  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);   /* and it never moves the mark */
+  for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
+    TEST_ASSERT_FALSE_MESSAGE(response_parse(rows[i].body, (uint16_t)strlen(rows[i].body), &r),
+                              rows[i].why);
+    TEST_ASSERT_EQUAL_MESSAGE(CMD_NONE, r.cmd.kind, rows[i].why);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, g_nv.cmd_high_water, rows[i].why);
+  }
 }
 
 static void test_response_rejects_a_repeated_or_lower_command_id(void) {
@@ -788,17 +764,6 @@ static void test_response_body_with_no_next_line_still_parses_the_command(void) 
   TEST_ASSERT_EQUAL(CMD_WATER, r.cmd.kind);
 }
 
-/* A cmd= with neither water= nor stop=1 is a shape butler never sends and a corrupted body
-   might: neither branch's field checks succeed, so the line yields nothing and the mark
-   does not move -- the id stays available for a LATER, well-formed response to use. */
-static void test_response_cmd_with_no_water_or_stop_yields_no_command(void) {
-  response_t r;
-  const char *b = "next=60\ncmd=21\n";
-  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
-  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
-  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
-}
-
 /* field_u32 requires the first character after '=' to be a digit -- a leading '-' or letter
    fails that test immediately, so ml= reads as ABSENT, not as some salvaged magnitude. */
 static void test_response_rejects_negative_or_non_numeric_ml(void) {
@@ -810,37 +775,23 @@ static void test_response_rejects_negative_or_non_numeric_ml(void) {
   TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
 }
 
-/* An outlet outside 1..PB_OUTLETS, water=0 included, is accepted here; exec_pending() refuses
-   it with err=range above cart_goto(), so the backend learns the real reason. Nothing here
-   drives hardware. */
-static void test_response_water_zero_is_accepted_structurally(void) {
-  response_t r;
-  const char *b = "next=60\ncmd=17 water=0 ml=250 cap_s=30\n";
-  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
-  TEST_ASSERT_EQUAL(CMD_WATER, r.cmd.kind);
-  TEST_ASSERT_EQUAL_UINT8(0, r.cmd.outlet);
-}
-
-/* Same point, the other side of PB_OUTLETS: an outlet that fits the uint8_t field but is
-   well above the five real gates is ALSO accepted here for the identical reason. */
-static void test_response_an_outlet_above_pb_outlets_is_accepted_structurally(void) {
-  response_t r;
+/* An outlet outside 1..PB_OUTLETS is accepted here at either end -- water=0 below the gates
+   and a number well above them -- because it fits outlet's own field and nothing here drives
+   hardware. exec_pending() refuses both with err=range above cart_goto(), so the backend
+   learns the real reason. The ids ascend: the mark moves on the first row. */
+static void test_response_an_outlet_outside_the_real_gates_is_accepted_structurally(void) {
   TEST_ASSERT_TRUE_MESSAGE(PB_OUTLETS < 200, "fixture assumes PB_OUTLETS stays small");
-  const char *b = "next=60\ncmd=17 water=200 ml=250 cap_s=30\n";
-  TEST_ASSERT_TRUE(response_parse(b, (uint16_t)strlen(b), &r));
-  TEST_ASSERT_EQUAL(CMD_WATER, r.cmd.kind);
-  TEST_ASSERT_EQUAL_UINT8(200, r.cmd.outlet);
-}
-
-/* An outlet that does NOT fit outlet's own uint8_t field is a different case from the two
-   above and must be rejected outright here, not truncated by the (uint8_t) cast: 256 cast
-   to uint8_t is 0, which is a LEGAL-looking outlet, not the obviously-bogus field it was. */
-static void test_response_an_outlet_too_wide_for_the_field_yields_no_command(void) {
+  static const struct { const char *body; uint8_t outlet; } rows[] = {
+    { "next=60\ncmd=17 water=0 ml=250 cap_s=30\n",     0 },
+    { "next=60\ncmd=18 water=200 ml=250 cap_s=30\n", 200 },
+  };
   response_t r;
-  const char *b = "next=60\ncmd=17 water=256 ml=250 cap_s=30\n";
-  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
-  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
-  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
+  for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
+    TEST_ASSERT_TRUE_MESSAGE(response_parse(rows[i].body, (uint16_t)strlen(rows[i].body), &r),
+                             rows[i].body);
+    TEST_ASSERT_EQUAL_MESSAGE(CMD_WATER, r.cmd.kind, rows[i].body);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(rows[i].outlet, r.cmd.outlet, rows[i].body);
+  }
 }
 
 /* The same width rule, the other two fields: a value well within uint32_t (no overflow, so
@@ -900,18 +851,6 @@ static void test_response_skips_a_replayed_line_and_accepts_a_fresh_one_after_it
   TEST_ASSERT_EQUAL_UINT32(18, r.cmd.id);
   TEST_ASSERT_EQUAL_UINT8(2, r.cmd.outlet);
   TEST_ASSERT_EQUAL_UINT32(18, g_nv.cmd_high_water);
-}
-
-/* The overflow-wrap hazard field_u32's exact per-digit check exists to close: with a
-   rounded-down single-threshold guard, "water=4294967297" (2^32 + 1) wraps modulo 2^32 to
-   outlet=1 and is SILENTLY ACCEPTED as a legitimate small outlet -- a malformed field
-   masquerading as a valid command instead of yielding no command at all. */
-static void test_response_an_overflowing_numeric_field_is_rejected_not_wrapped(void) {
-  response_t r;
-  const char *b = "next=60\ncmd=17 water=4294967297 ml=250 cap_s=30\n";
-  TEST_ASSERT_FALSE(response_parse(b, (uint16_t)strlen(b), &r));
-  TEST_ASSERT_EQUAL(CMD_NONE, r.cmd.kind);
-  TEST_ASSERT_EQUAL_UINT32(0, g_nv.cmd_high_water);
 }
 
 /* The exact representable boundary (2^32 - 1, UINT32_MAX) is legal for a uint32_t field and
@@ -975,13 +914,7 @@ int main(void) {
   RUN_TEST(test_report_float_is_the_debounced_tank_verdict_anded_with_not_contra);
   RUN_TEST(test_report_float_is_zero_under_the_contradiction_latch_even_though_the_tank_reads_ok);
   RUN_TEST(test_report_float_is_only_ever_zero_or_one);
-  RUN_TEST(test_repeated_float_refusals_drive_float_to_zero_on_the_wire);
-  RUN_TEST(test_a_granted_dose_clears_the_float_refusal_counter);
-  RUN_TEST(test_ch210_and_ch211_are_zero_on_a_clean_boot);
-  RUN_TEST(test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dose);
-  RUN_TEST(test_ch211_is_one_while_the_dry_latch_stands);
-  RUN_TEST(test_ch207_alone_leaves_ch210_and_ch211_at_zero);
-  RUN_TEST(test_ch210_and_ch211_are_both_one_when_both_latches_stand);
+  RUN_TEST(test_each_latch_reaches_its_own_channel_and_only_two_of_them_move_float);
   RUN_TEST(test_report_pos_is_unknown_while_the_going_live_flag_is_set);
   RUN_TEST(test_report_pos_is_unknown_while_the_dry_latch_is_set);
   RUN_TEST(test_report_pos_is_unknown_after_the_expander_goes_unhealthy);
@@ -989,7 +922,6 @@ int main(void) {
   RUN_TEST(test_report_omits_flow_ml_when_there_is_no_ack);
   RUN_TEST(test_report_never_emits_ack_without_flow_ml);
   RUN_TEST(test_report_never_emits_ack_zero);
-  RUN_TEST(test_report_ack_id_survives_above_sixty_five_thousand);
   RUN_TEST(test_report_build_refuses_while_the_ack_slot_still_reads_recv);
   RUN_TEST(test_report_t_is_unsigned_at_and_above_two_to_the_thirty_one);
   RUN_TEST(test_report_t_differs_across_two_boots_fifteen_seconds_apart);
@@ -1009,7 +941,7 @@ int main(void) {
   RUN_TEST(test_response_parses_a_stop_command);
   RUN_TEST(test_response_ignores_unknown_keys);
   RUN_TEST(test_response_a_key_embedded_in_a_longer_key_is_not_matched);
-  RUN_TEST(test_response_rejects_command_id_zero);
+  RUN_TEST(test_a_malformed_command_line_yields_no_command_and_never_moves_the_mark);
   RUN_TEST(test_response_rejects_a_repeated_or_lower_command_id);
   RUN_TEST(test_response_rejects_water_without_ml_or_without_cap_s);
   RUN_TEST(test_response_rejects_ml_zero);
@@ -1017,17 +949,13 @@ int main(void) {
   RUN_TEST(test_response_next_out_of_range_keeps_the_previous_interval);
   RUN_TEST(test_response_empty_or_null_body_yields_no_command);
   RUN_TEST(test_response_body_with_no_next_line_still_parses_the_command);
-  RUN_TEST(test_response_cmd_with_no_water_or_stop_yields_no_command);
   RUN_TEST(test_response_rejects_negative_or_non_numeric_ml);
-  RUN_TEST(test_response_water_zero_is_accepted_structurally);
-  RUN_TEST(test_response_an_outlet_above_pb_outlets_is_accepted_structurally);
-  RUN_TEST(test_response_an_outlet_too_wide_for_the_field_yields_no_command);
+  RUN_TEST(test_response_an_outlet_outside_the_real_gates_is_accepted_structurally);
   RUN_TEST(test_response_rejects_ml_or_cap_s_too_wide_for_their_fields);
   RUN_TEST(test_response_a_trailing_non_digit_does_not_truncate_to_a_smaller_number);
   RUN_TEST(test_response_stop_zero_is_neither_stop_nor_water);
   RUN_TEST(test_response_two_cmd_fields_on_one_line_the_first_wins);
   RUN_TEST(test_response_skips_a_replayed_line_and_accepts_a_fresh_one_after_it);
-  RUN_TEST(test_response_an_overflowing_numeric_field_is_rejected_not_wrapped);
   RUN_TEST(test_response_the_exact_uint32_boundary_still_parses);
   RUN_TEST(test_response_carries_cap_s_through_unclamped);
   RUN_TEST(test_response_cmd_high_water_survives_a_warm_reset);
