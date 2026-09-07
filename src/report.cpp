@@ -98,16 +98,23 @@ uint16_t report_build(char *buf, uint16_t cap) {
         ok = ok && put_ch(buf, cap, &n, ch, sensors_value(ch));
   }
 
-  /* ch200..ch209, every one clamped: chN must be < MAX_RAW = 2^31 (butler.py:88,251), and a
+  /* ch200..ch211, every one clamped: chN must be < MAX_RAW = 2^31 (butler.py:88,251), and a
      storming D2 pushes ch205 past 2^31 in ~12.4 days. At least one is ALWAYS present, so a
-     wedged bus produces an alarm instead of silence (§4.1). */
-  const uint32_t diag[10] = {
+     wedged bus produces an alarm instead of silence (§4.1). ch210 and ch211 put the other
+     two latches beside ch207's: the flap (1 while PB_FLOAT_FLAP_LIMIT consecutive float
+     refusals stand) and the dry latch (1 while g_nv.dry_latched stands). They say WHY
+     float= is 0; float= itself is unchanged below. The array's length is pinned to
+     PB_DIAG_CHANNELS because config.h's PB_BODY_WORST_FIXED sum is done at that count. */
+  const uint32_t diag[] = {
     hal_heap_arena(), hal_heap_ordblks(), hal_stack_hwm(),
     sensors_i2c_errors(), sensors_float_change_age_s(), pulses_leak_count(),
     (uint32_t)net_desyncs(), safety_contra() ? 1u : 0u,
-    cart_parked() ? 1u : 0u, hal_wdt_last_delta()
+    cart_parked() ? 1u : 0u, hal_wdt_last_delta(),
+    safety_float_flap() ? 1u : 0u, safety_dry() ? 1u : 0u
   };
-  for (uint32_t i = 0; i < 10; ++i) {
+  static_assert(sizeof diag / sizeof diag[0] == PB_DIAG_CHANNELS,
+                "the diag array and PB_DIAG_CHANNELS disagree: re-do PB_BODY_WORST_FIXED's sum");
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) {
     uint32_t v = diag[i] > (uint32_t)PB_DIAG_CLAMP ? (uint32_t)PB_DIAG_CLAMP : diag[i];
     ok = ok && put_ch(buf, cap, &n, 200u + i, v);
   }

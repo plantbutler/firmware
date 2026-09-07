@@ -149,6 +149,57 @@ static void test_a_granted_dose_clears_the_float_refusal_counter(void) {
   TEST_ASSERT_TRUE(has_tok("float=1"));
 }
 
+/* ---- the latches on the wire (2026-09-07 latches-on-the-wire spec, §1): ch210 = the flap
+   latch (safety_float_flap()), ch211 = the dry latch (safety_dry()), beside ch207's contra
+   latch. float= is UNCHANGED -- still debounced AND !contra AND !flap -- the two channels say
+   WHY it is 0, they do not change what it is. Absent on the wire reads as 0 to the backend
+   (an older board is "never latched"), so both must be PRESENT on a clean boot, as 0. ---- */
+static void test_ch210_and_ch211_are_zero_on_a_clean_boot(void) {
+  fresh_sweep();
+  TEST_ASSERT_FALSE(safety_float_flap());
+  TEST_ASSERT_FALSE(safety_dry());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
+}
+
+/* The flap trips on the PB_FLOAT_FLAP_LIMIT-th consecutive float refusal (safety.h: the
+   predicate is >=) and is cleared on dose_end_ml_()'s path, which only a GRANTED dose
+   reaches -- so the clear below is a real dose_run() that flows to its target, the same
+   fixture test_dose.cpp drives DOSE_OK with, not the accessor called with false. */
+static void test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dose(void) {
+  fresh_sweep();
+  sim_set_float(true);
+  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);
+  TEST_ASSERT_TRUE(safety_float_flap());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);   /* unchanged: the flap still forces it */
+
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_flow_ml_s(85u);
+  dose_req_t q = {0};
+  q.ml = (uint16_t)PB_DOSE_RIG_MAX_ML;
+  q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  q.long_prime = true;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q), "arrange: a granted dose");
+  TEST_ASSERT_FALSE(safety_float_flap());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=1"), g_buf);
+}
+
+static void test_ch211_is_one_while_the_dry_latch_stands(void) {
+  fresh_sweep();
+  safety_dry_set(true);
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  safety_dry_set(false);                           /* `dry off`: the only way back */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
+}
+
 static void test_report_pos_is_unknown_while_the_going_live_flag_is_set(void) {
   fresh_sweep();
   TEST_ASSERT_EQUAL_INT(1, PB_REPORT_POS_UNKNOWN);   /* ships defined — §4.6 */
@@ -407,7 +458,7 @@ static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
 
 /* backend/fake_device.py's build_report() is the shape butler was written against:
    "c= t= chN=... float= pos= ack= flow_ml=", space-joined, one trailing newline. Ours adds
-   ch200..ch209 and err=; strip those and the two must be byte-identical. */
+   ch200..ch211 and err=; strip those and the two must be byte-identical. */
 static void test_report_matches_the_fake_device_shape(void) {
   fresh_sweep();
   sim_set_float(true);
@@ -419,8 +470,10 @@ static void test_report_matches_the_fake_device_shape(void) {
   for (char *tok = strtok(copy, " \n"); tok; tok = strtok(NULL, " \n")) {
     /* The diagnostic RANGE by name, never the prefix "ch2": `ch2=8002` is a WIRED channel and
        starts with the same three characters, so a prefix filter deletes a token the golden
-       string keeps and this case can never pass. */
-    if (strncmp(tok, "ch20", 4) == 0 || strncmp(tok, "err=", 4) == 0) continue;
+       string keeps and this case can never pass. Two four-character prefixes, because the
+       range is ch200..ch211 and the latches at ch210/ch211 start "ch21". */
+    if (strncmp(tok, "ch20", 4) == 0 || strncmp(tok, "ch21", 4) == 0 ||
+        strncmp(tok, "err=", 4) == 0) continue;
     if (spine[0]) strncat(spine, " ", sizeof spine - strlen(spine) - 1);
     strncat(spine, tok, sizeof spine - strlen(spine) - 1);
   }
@@ -776,6 +829,9 @@ int main(void) {
   RUN_TEST(test_report_float_is_only_ever_zero_or_one);
   RUN_TEST(test_repeated_float_refusals_drive_float_to_zero_on_the_wire);
   RUN_TEST(test_a_granted_dose_clears_the_float_refusal_counter);
+  RUN_TEST(test_ch210_and_ch211_are_zero_on_a_clean_boot);
+  RUN_TEST(test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dose);
+  RUN_TEST(test_ch211_is_one_while_the_dry_latch_stands);
   RUN_TEST(test_report_pos_is_unknown_while_the_going_live_flag_is_set);
   RUN_TEST(test_report_pos_is_unknown_while_the_dry_latch_is_set);
   RUN_TEST(test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated);

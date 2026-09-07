@@ -127,7 +127,9 @@ dedup window, which shows up as a missing row rather than as an error anywhere.
 - `src/netfsm.cpp` — the network state machine: one bounded link or socket step per pass,
   at most two AT commands in any of them.
 - `src/report.cpp` / `src/exec.cpp` — the `k=v` body, and the one bounded command per
-  round trip that comes back in the response.
+  round trip that comes back in the response. The body carries `ch0`..`ch5` and the twelve
+  diagnostics `ch200`..`ch211`; the board's three latches ride among them — `ch207` contra,
+  `ch210` the float flap, `ch211` dry — beside a `float=` they only explain, never change.
 - `src/sensors.cpp`, `src/pulses.cpp`, `src/cli.cpp`, `src/ui.cpp`, `src/noinit.cpp` — the
   mux and I2C health, the flow and screw meters, the console, the two panels, the latches.
 - `src/hal_uno.cpp` / `src/hal_sim.cpp` — seam 1's two implementations. The board one owns
