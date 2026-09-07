@@ -216,7 +216,8 @@ commit the number, and delete -DPB_ALLOW_UNCALIBRATED from [env:uno_r4_wifi]."
 
        t=4294967295                        13
        six wired channels, chN=16383     6*10 =  60   (14-bit ADC: 5 digits)
-       twelve diagnostics, chNNN=999999 12*13 = 156   (clamped; unclamped it is 12*16 = 192)
+       twelve diagnostics, chNNN=999999 12*13 = 156   (clamped; unclamped, a uint32_t's ten
+                                                       digits make it 12*17 = 204)
        float=1                              8
        pos=unknown                         12
        ack=4294967295                      15

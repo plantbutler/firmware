@@ -382,7 +382,10 @@ static void test_a_saturated_diagnostic_counter_stays_inside_max_raw(void) {
    (spec §1) had no failing test behind it for them: an emitter that skipped indices 10 and
    11 passed the whole suite. report_put_diags() takes the array, so this case hands it
    twelve values above the clamp and reads twelve clamped tokens back -- and the block's
-   byte count is config.h's "twelve diagnostics, chNNN=999999 12*13" row, measured. */
+   byte count is config.h's "twelve diagnostics, chNNN=999999 12*13" row, measured. So is
+   the row's parenthetical, the block's width WITHOUT the clamp: the same twelve fields at
+   a uint32_t's ten digits are 17 bytes each, 12*17. That factor was hand-typed as 16 from
+   the ten-channel table on, and nothing measured it. */
 static void test_every_diagnostic_channel_is_clamped_on_the_wire_the_two_latches_included(void) {
   uint32_t above[PB_DIAG_CHANNELS];
   for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) above[i] = 0xFFFFFFFFu;
@@ -395,6 +398,15 @@ static void test_every_diagnostic_channel_is_clamped_on_the_wire_the_two_latches
     TEST_ASSERT_TRUE_MESSAGE(has_tok(tok), g_buf);
   }
   TEST_ASSERT_EQUAL_UINT16((uint16_t)(PB_DIAG_CHANNELS * 13), n);   /* " chNNN=999999" x 12 */
+
+  uint16_t unclamped = 0;                            /* " chNNN=4294967295" x 12: 17 each */
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) {
+    char raw[24];
+    unclamped = (uint16_t)(unclamped + snprintf(raw, sizeof raw, " ch%lu=%lu",
+                                                (unsigned long)(200u + i), (unsigned long)above[i]));
+  }
+  TEST_ASSERT_EQUAL_UINT16((uint16_t)(PB_DIAG_CHANNELS * 17), unclamped);
+  TEST_ASSERT_EQUAL_UINT16((uint16_t)(PB_DIAG_CHANNELS * 4), (uint16_t)(unclamped - n));
 }
 
 /* The same producer, at the other end of its range: one leaked pulse must reach the wire as
