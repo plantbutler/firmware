@@ -33,8 +33,9 @@ static bool        g_net_disabled;
 static const char *g_boot_err = "none";
 static ui_state_t  g_ui;                 /* file-static: the main stack is 1024 B */
 
-bool        main_net_disabled(void) { return g_net_disabled; }
-const char *main_boot_err(void)     { return g_boot_err; }
+/* Every boot check that fails leaves the network off and names itself in the banner;
+   the last failure's name wins. */
+static void boot_fail_(const char *why) { g_net_disabled = true; g_boot_err = why; }
 
 /* setup()/loop() are declared extern "C" by the core (api/Common.h); a plain C++
    definition here would mangle and never link. */
@@ -70,17 +71,15 @@ extern "C" void setup(void) {
   /* AFTER both screens' begin(): their init chains (44 Wire transactions for the LCD, 16
      for the OLED) are up to ~60 s of unfed bus traffic against a 5592 ms grant, safe ONLY
      while the dog is not yet armed. Moved earlier, this reboots the board during boot. */
-  if (!hal_wdt_start()) { g_net_disabled = true; g_boot_err = "wdt"; }
+  if (!hal_wdt_start()) boot_fail_("wdt");
 
   /* The library's timeout getter returns 0 under the wdt_cfg_t overload even on a running
      dog, so hal_wdt_granted() computes the grant itself. (Do not name that getter here:
      the build check greps it to zero, comments included.) */
-  if (hal_wdt_granted() != PB_WDT_GRANTED_MS) { g_net_disabled = true; g_boot_err = "wdt"; }
+  if (hal_wdt_granted() != PB_WDT_GRANTED_MS) boot_fail_("wdt");
 
   /* the worst net step is 2 AT commands = 2400 ms; that plus slack must fit the grant. */
-  if (hal_wdt_granted() < 2u * PB_NET_STEP_MS + PB_NET_SLACK_MS) {
-    g_net_disabled = true; g_boot_err = "wdt";
-  }
+  if (hal_wdt_granted() < 2u * PB_NET_STEP_MS + PB_NET_SLACK_MS) boot_fail_("wdt");
 
   /* Liveness, not a constant: the counter must DECREASE across a 40 ms UNFED window. A
      failure also latches dry, through safety_dry_set() -- one route to the latch, not two.
@@ -89,21 +88,19 @@ extern "C" void setup(void) {
      second probe that could disagree near the threshold. The banner prints it as alive=. */
   const bool wdt_alive = hal_wdt_alive();
   if (!wdt_alive) {
-    g_net_disabled = true; g_boot_err = "wdt";
+    boot_fail_("wdt");
     safety_dry_set(true);
   }
 
   /* The hardware ADC width is fixed and analogReadResolution() only stores the REQUESTED
      one, so a core bump that changed the width would silently rescale every raw count on
      the wire. The only producer of err=adc. */
-  if (!hal_adc_width_ok()) { g_net_disabled = true; g_boot_err = "adc"; }
+  if (!hal_adc_width_ok()) boot_fail_("adc");
 
   /* _sbrk is the unchecked libnosys version and nothing references __HeapLimit, so the
      break against the stack is the ONLY heap bound there is. The network stack is the
      largest allocator, so past this a water command is what the corruption reaches. */
-  if (hal_heap_break() >= hal_stack_limit() - PB_STACK_MARGIN) {
-    g_net_disabled = true; g_boot_err = "heap";
-  }
+  if (hal_heap_break() >= hal_stack_limit() - PB_STACK_MARGIN) boot_fail_("heap");
 
   /* The boot banner, read BEFORE 12 V goes onto COM. Printed BEFORE cli_begin(), which
      writes "type help" as its own first action. */
@@ -136,7 +133,7 @@ extern "C" void setup(void) {
      before it is thrown away one statement later -- the banner still prints net=DISABLED,
      because it reads this file's own flag, and the board reports rescaled counts for 48
      hours. The order lives in netfsm.cpp because no host test can reach this file. */
-  net_boot(main_net_disabled() ? main_boot_err() : NULL);
+  net_boot(g_net_disabled ? g_boot_err : NULL);
   exec_begin();
 
   cli_begin();
