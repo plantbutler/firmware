@@ -537,10 +537,12 @@ void cli_print_dose_summary(void) {
   hal_serial_write(line);
 }
 
-void cli_print_status(void) {
-  char b[160];
-  note_memory_();
+/* ---- status, one printer per concern, in the order the lines come out. No printed line may
+   carry a digit, a dot and a digit in a row: the float-formatting test scans every line for
+   that shape, so a spec section is cited by its title, never by its number. ---- */
 
+static void status_build_(void) {
+  char b[160];
   snprintf(b, sizeof b, "build=%s controller=%u\n", PB_BUILD_NAME,
            (unsigned)PB_CONTROLLER);
   hal_serial_write(b);
@@ -553,9 +555,10 @@ void cli_print_status(void) {
   snprintf(b, sizeof b, "pump_on_level=%u polarity=%s\n",
            (unsigned)hal_pump_level_on(), pol);
   hal_serial_write(b);
+}
 
-  /* No numeric section citation in a printed line: the float-formatting test scans every
-     printed line for a digit-dot-digit run, the shape of a stray float specifier. */
+static void status_mcu_(void) {
+  char b[160];
   /* hal_wdt_alive() probes and then caches the delta; C++ leaves argument evaluation order
      unspecified (gcc on ARM goes right-to-left), so passing both inline would print the
      delta of the previous probe. Call it first, into a local. */
@@ -585,7 +588,10 @@ void cli_print_status(void) {
            (unsigned long)PB_ADC_BITS, (unsigned long)hal_adc_bits(),
            hal_adc_width_ok() ? "yes" : "no");
   hal_serial_write(b);
+}
 
+static void status_sensors_(void) {
+  char b[160];
   snprintf(b, sizeof b, "screw=%lu flow_total=%lu flow_hz=%lu leak=%lu\n",
            (unsigned long)pulses_screw(), (unsigned long)pulses_flow(),
            (unsigned long)pulses_flow_rate(), (unsigned long)pulses_leak_count());
@@ -595,7 +601,10 @@ void cli_print_status(void) {
            (unsigned long)sensors_i2c_errors(), (unsigned long)sensors_i2c_txn_per_min(),
            sensors_i2c_healthy() ? "yes" : "no");
   hal_serial_write(b);
+}
 
+static void status_cart_(void) {
+  char b[160];
 #if PB_PULSES_PER_GATE == 0
   hal_serial_write("cart=UNCALIBRATED (PB_PULSES_PER_GATE=0) - goto refuses, pos never ok\n");
 #else
@@ -617,7 +626,9 @@ void cli_print_status(void) {
      the console `stop`, `dry on`, the float, the two flow rules, the plausibility
      ceiling, the cap and the watchdog. */
   hal_serial_write("note: a backend stop=1 CANNOT interrupt a running dose; type `stop`\n");
+}
 
+static void status_report_(void) {
   /* A truncated body is a DROPPED report, not a 400, and the console is the only place
      that failure is visible. */
   cli_printf_u32("report: last_body=%lu bytes\n", (uint32_t)report_last_len());
@@ -627,7 +638,9 @@ void cli_print_status(void) {
   /* A rebuilt or restored backend database restarts commands.id at 1, and the board then
      refuses EVERY command as a replay until a COLD boot (power cycle, not RESET). */
   cli_printf_u32("cmd_high_water=%lu (recovery: cold boot)\n", g_nv.cmd_high_water);
+}
 
+static void status_network_(void) {
   cli_printf_u32("link=%lu\n", (uint32_t)net_link());         /* 0 down, 1 joining, 2 up */
   cli_printf_i32("rssi=%ld dBm\n", (int32_t)net_rssi());
   hal_serial_write("ip="); hal_serial_write(net_ip()); hal_serial_write("\n");
@@ -645,7 +658,10 @@ void cli_print_status(void) {
   cli_printf_u32("desyncs=%lu\n", (uint32_t)net_desyncs());   /* rides out as ch206 */
   if (net_disabled()) { hal_serial_write("net=DISABLED ("); hal_serial_write(net_disabled());
                         hal_serial_write(")\n"); }
+}
 
+static void status_memory_(void) {
+  char b[160];
   snprintf(b, sizeof b,
            "arena=%lu (min %lu max %lu) ordblks=%lu break=0x%lx stack_hwm=%lu (max %lu) "
            "headroom=%lu\n",
@@ -655,7 +671,10 @@ void cli_print_status(void) {
            (unsigned long)g_hwm_max,
            (unsigned long)(hal_stack_limit() - hal_heap_break()));
   hal_serial_write(b);
+}
 
+static void status_latches_(void) {
+  char b[160];
   /* safety_dry()'s verdict, not a re-read of g_nv.dry_latched: the same accessor the
      dose ladder reads. */
   cli_printf_u32("dry=%lu\n", (uint32_t)(safety_dry() ? 1u : 0u));
@@ -679,7 +698,9 @@ void cli_print_status(void) {
            (unsigned long)g_nv.pattern, (unsigned long)g_nv.sum,
            (unsigned)noinit_was_cold(), (unsigned)noinit_reset_mid());
   hal_serial_write(b);
+}
 
+static void status_dosing_(void) {
   cli_printf_u32("pulses_per_l=%lu\n", (uint32_t)cfg_pulses_per_l_get());
   cli_printf_u32("prime_ms=%lu\n",     (uint32_t)PB_PRIME_MS_DEFAULT);
   cli_printf_u32("stall_ms=%lu\n",     (uint32_t)PB_STALL_MS_DEFAULT);
@@ -689,11 +710,23 @@ void cli_print_status(void) {
 #else
   hal_serial_write("cap=UNCLAMPED (PB_ML_PER_S_MEASURED=0; bring-up 7b commits it)\n");
 #endif
-  /* No digit-dot-digit citation in this printed line either: see the wdt line above. */
   hal_serial_write("stop: `stop` and `dry on` abort a running dose; a backend stop=1 CANNOT "
                    "- net_poll() does not run while the pump is asserted (design spec "
                    "section \"What a backend stop=1 can and cannot do\")\n");
   hal_serial_write("last=");
   hal_serial_write(safety_last_err());     /* one bare token of the wire's err enum */
   hal_serial_write("\n");
+}
+
+void cli_print_status(void) {
+  note_memory_();
+  status_build_();
+  status_mcu_();
+  status_sensors_();
+  status_cart_();
+  status_report_();
+  status_network_();
+  status_memory_();
+  status_latches_();
+  status_dosing_();
 }
