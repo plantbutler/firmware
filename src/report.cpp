@@ -15,7 +15,7 @@
 #include <string.h>
 
 static_assert(PB_CONTROLLER_WIRE + 2 + PB_BODY_WORST_FIXED <= PB_BODY_CAP,
-              "the body's own worst case does not fit PB_BODY_CAP (spec §7's term-by-term sum)");
+              "the body's own worst case does not fit PB_BODY_CAP: re-do the term-by-term sum");
 static_assert(PB_CONTROLLER >= 0 && PB_CONTROLLER <= 255,
               "c= is 0..255 on the wire: butler.py refuses anything else (MAX_CONTROLLER)");
 

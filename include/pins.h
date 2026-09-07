@@ -8,6 +8,9 @@
 #ifndef PB_RELAY_ACTIVE_HIGH
 #  error "Define PB_RELAY_ACTIVE_HIGH in platformio.ini build_flags after you have READ THE MODULE."
 #endif
+#ifdef PB_RELAY_ACTIVE_LOW
+#  error "This build drives the relay active-high only. An active-low module needs the arm back."
+#endif
 
 /* ---- direct pins (cad/wiring/README.md pin table) ---- */
 #define PIN_FLOW           2   /* YF-S401 pulse. 1 k series at the board; INPUT_PULLUP is the

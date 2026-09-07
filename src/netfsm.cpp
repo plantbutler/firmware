@@ -19,8 +19,9 @@
 
 static_assert(sizeof(HOST_NAME) + sizeof(BUTLER_TOKEN) + PB_HDR_FIXED + PB_BODY_CAP <= PB_TX_CAP,
               "HOST_NAME + BUTLER_TOKEN + headers + body do not fit PB_TX_CAP: snprintf would "
-              "truncate silently while Content-Length still claimed the full length (spec §4.2)");
-static_assert(PB_CONTROLLER_WIRE + 2 + PB_BODY_WORST_FIXED <= PB_BODY_CAP, "body cap (§7)");
+              "truncate silently while Content-Length still claimed the full length");
+static_assert(PB_CONTROLLER_WIRE + 2 + PB_BODY_WORST_FIXED <= PB_BODY_CAP,
+              "the body's worst case does not fit PB_BODY_CAP");
 static_assert(PB_CONTROLLER >= 0 && PB_CONTROLLER <= 255, "c= is 0..255 (butler.MAX_CONTROLLER)");
 
 static const uint32_t k_backoff[] = PB_NET_BACKOFF_MS;

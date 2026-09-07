@@ -47,9 +47,9 @@ bool     hal_wdt_alive(void);              /* counter DECREASED across an UNFED 
 uint32_t hal_wdt_last_delta(void);         /* what the LAST hal_wdt_alive() probe measured;
                                               rides out as ch209. Read it only after that call
                                               has returned and been stored. */
-void     hal_wdt_feed(void);               /* ONE caller: safety_tick(). Never from inside the
-                                              alive probe's window — the probe brackets that
-                                              window with its own feed on either side. */
+void     hal_wdt_feed(void);               /* One caller outside this seam: safety_tick(). The
+                                              alive probe below feeds on either side of its own
+                                              window, and never inside it. */
 
 bool     hal_irq_armed(uint8_t pin);       /* IELSR scan + NVIC enable for the pin's ICU channel */
 bool     hal_irq_filtered(uint8_t pin);    /* IRQCR[ch] FLTEN; `status` prints icufilter= from it */
