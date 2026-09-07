@@ -1450,6 +1450,7 @@ int main(void) {
   RUN_TEST(test_dose_stops_at_the_millilitre_target);
   RUN_TEST(test_pump_on_time_never_exceeds_the_cap);
   RUN_TEST(test_a_cap_over_the_firmware_ceiling_is_clamped_to_the_ceiling);
+  RUN_TEST(test_dose_cap_holds_across_a_millis_rollover);
   RUN_TEST(test_the_prime_window_bounds_the_dose_and_the_prime_flag_extends_and_caps_it);
   RUN_TEST(test_a_burst_of_pulses_at_the_start_never_disarms_the_noflow_abort);
   RUN_TEST(test_a_healthy_metered_dose_completes_on_the_default_prime_window);
@@ -1475,9 +1476,5 @@ int main(void) {
      pb_test_teardown() resets g_last_end_ms between them. */
   RUN_TEST(test_g_last_end_ms_leaks_here_if_teardown_does_not_reset_it);
   RUN_TEST(test_g_last_end_ms_does_not_leak_between_cases);
-  /* LAST: it leaves g_last_end_ms at a small wrapped value that would poison every later
-     case's cooldown arithmetic; teardown resets it too, but this is the belt to those
-     braces. */
-  RUN_TEST(test_dose_cap_holds_across_a_millis_rollover);
   return UNITY_END();
 }
