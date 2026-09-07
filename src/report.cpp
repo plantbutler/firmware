@@ -65,6 +65,19 @@ static bool put_ch(char *b, uint16_t cap, uint16_t *n, uint32_t ch, uint32_t v) 
   return true;
 }
 
+/* ch200..ch211, every one clamped: chN must be < MAX_RAW = 2^31 (butler.py:88,251), and a
+   storming D2 pushes ch205 past 2^31 in ~12.4 days. At least one is ALWAYS present, so a
+   wedged bus produces an alarm instead of silence (§4.1). A function of the ARRAY, not of the
+   producers, so the host can prove the clamp for every index and measure the block at its
+   full width -- see report.h. */
+bool report_put_diags(char *b, uint16_t cap, uint16_t *n, const uint32_t *diag) {
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) {
+    const uint32_t v = diag[i] > (uint32_t)PB_DIAG_CLAMP ? (uint32_t)PB_DIAG_CLAMP : diag[i];
+    if (!put_ch(b, cap, n, 200u + i, v)) return false;
+  }
+  return true;
+}
+
 /* Spec §12 item 0: "hal_begin() and EVERY REPORT check the break against the stack, because
    nothing else will." _sbrk is the unchecked libnosys version and __HeapLimit is referenced by
    nothing in the image, so this is the only heap bound that exists — and the 48-hour run is
@@ -98,13 +111,12 @@ uint16_t report_build(char *buf, uint16_t cap) {
         ok = ok && put_ch(buf, cap, &n, ch, sensors_value(ch));
   }
 
-  /* ch200..ch211, every one clamped: chN must be < MAX_RAW = 2^31 (butler.py:88,251), and a
-     storming D2 pushes ch205 past 2^31 in ~12.4 days. At least one is ALWAYS present, so a
-     wedged bus produces an alarm instead of silence (§4.1). ch210 and ch211 put the other
-     two latches beside ch207's: the flap (1 while PB_FLOAT_FLAP_LIMIT consecutive float
-     refusals stand) and the dry latch (1 while g_nv.dry_latched stands). They say WHY
-     float= is 0; float= itself is unchanged below. The array's length is pinned to
-     PB_DIAG_CHANNELS because config.h's PB_BODY_WORST_FIXED sum is done at that count. */
+  /* The twelve producers, in channel order, for report_put_diags() above. ch210 and ch211
+     put the other two latches beside ch207's: the flap (1 while PB_FLOAT_FLAP_LIMIT
+     consecutive float refusals stand) and the dry latch (1 while g_nv.dry_latched stands).
+     ch207 and ch210 say WHY float= is 0 -- float= itself is unchanged below. ch211 is not a
+     float= term at all: it is what forces pos=unknown further down. The array's length is
+     pinned to PB_DIAG_CHANNELS because config.h's PB_BODY_WORST_SUM is done at that count. */
   const uint32_t diag[] = {
     hal_heap_arena(), hal_heap_ordblks(), hal_stack_hwm(),
     sensors_i2c_errors(), sensors_float_change_age_s(), pulses_leak_count(),
@@ -113,11 +125,8 @@ uint16_t report_build(char *buf, uint16_t cap) {
     safety_float_flap() ? 1u : 0u, safety_dry() ? 1u : 0u
   };
   static_assert(sizeof diag / sizeof diag[0] == PB_DIAG_CHANNELS,
-                "the diag array and PB_DIAG_CHANNELS disagree: re-do PB_BODY_WORST_FIXED's sum");
-  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) {
-    uint32_t v = diag[i] > (uint32_t)PB_DIAG_CLAMP ? (uint32_t)PB_DIAG_CLAMP : diag[i];
-    ok = ok && put_ch(buf, cap, &n, 200u + i, v);
-  }
+                "the diag array and PB_DIAG_CHANNELS disagree: re-do PB_BODY_WORST_SUM");
+  ok = ok && report_put_diags(buf, cap, &n, diag);
 
   /* §2.10, §4.1: the DEBOUNCED tank verdict, ANDed with !contra, forced to 0 above
      PB_FLOAT_FLAP_LIMIT consecutive DOSE_REFUSED_FLOAT results. Never 2, never negative:

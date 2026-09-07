@@ -16,6 +16,7 @@
 #include "noinit.h"
 
 static char g_buf[PB_BODY_CAP];
+static char g_blk[PB_BODY_CAP];     /* the diagnostic block alone, at its clamp width */
 
 void setUp(void)    { pb_test_setup(); sensors_begin(); memset(g_buf, 0, sizeof g_buf); }
 void tearDown(void) { pb_test_teardown(); }
@@ -151,9 +152,11 @@ static void test_a_granted_dose_clears_the_float_refusal_counter(void) {
 
 /* ---- the latches on the wire (2026-09-07 latches-on-the-wire spec, §1): ch210 = the flap
    latch (safety_float_flap()), ch211 = the dry latch (safety_dry()), beside ch207's contra
-   latch. float= is UNCHANGED -- still debounced AND !contra AND !flap -- the two channels say
-   WHY it is 0, they do not change what it is. Absent on the wire reads as 0 to the backend
-   (an older board is "never latched"), so both must be PRESENT on a clean boot, as 0. ---- */
+   latch. float= is UNCHANGED -- still debounced AND !contra AND !flap -- so ch207 and ch210
+   say WHY it is 0, they do not change what it is; ch211 is not a float= term at all, it is
+   what forces pos=unknown (report.cpp's pos_ok). Absent on the wire reads as 0 to the
+   backend (an older board is "never latched"), so both must be PRESENT on a clean boot,
+   as 0. ---- */
 static void test_ch210_and_ch211_are_zero_on_a_clean_boot(void) {
   fresh_sweep();
   TEST_ASSERT_FALSE(safety_float_flap());
@@ -190,11 +193,17 @@ static void test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dos
   TEST_ASSERT_TRUE_MESSAGE(has_tok("float=1"), g_buf);
 }
 
+/* With the tank reading OK, ch211=1 rides beside float=1: the dry latch is in pos='s formula
+   (test_report_pos_is_unknown_while_the_dry_latch_is_set), not in float='s. Pinned because
+   AGENTS.md and report.cpp's own comment once grouped all three latches as float='s
+   explainers -- an `&& !safety_dry()` added to the fl line on that reading fails here. */
 static void test_ch211_is_one_while_the_dry_latch_stands(void) {
   fresh_sweep();
+  sim_set_float(true);
   safety_dry_set(true);
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=1"), g_buf);   /* dry is not a float= term */
   safety_dry_set(false);                           /* `dry off`: the only way back */
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
@@ -368,6 +377,26 @@ static void test_a_saturated_diagnostic_counter_stays_inside_max_raw(void) {
   TEST_ASSERT_TRUE(has_tok(clamp));
 }
 
+/* The clamp for EVERY index, ch210 and ch211 included. Through report_build() the two latch
+   channels are booleans and can never sit above PB_DIAG_CLAMP, so "clamped like the rest"
+   (spec §1) had no failing test behind it for them: an emitter that skipped indices 10 and
+   11 passed the whole suite. report_put_diags() takes the array, so this case hands it
+   twelve values above the clamp and reads twelve clamped tokens back -- and the block's
+   byte count is config.h's "twelve diagnostics, chNNN=999999 12*13" row, measured. */
+static void test_every_diagnostic_channel_is_clamped_on_the_wire_the_two_latches_included(void) {
+  uint32_t above[PB_DIAG_CHANNELS];
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) above[i] = 0xFFFFFFFFu;
+  uint16_t n = 0;
+  TEST_ASSERT_TRUE(report_put_diags(g_buf, sizeof g_buf, &n, above));
+  g_buf[n] = '\0';
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) {
+    char tok[24];
+    snprintf(tok, sizeof tok, "ch%lu=%lu", (unsigned long)(200u + i), (unsigned long)PB_DIAG_CLAMP);
+    TEST_ASSERT_TRUE_MESSAGE(has_tok(tok), g_buf);
+  }
+  TEST_ASSERT_EQUAL_UINT16((uint16_t)(PB_DIAG_CHANNELS * 13), n);   /* " chNNN=999999" x 12 */
+}
+
 /* The same producer, at the other end of its range: one leaked pulse must reach the wire as
    BOTH ch205 and err=leak. §4.1 carries `leak` in its fixed enum and §1 says there is no
    latch, so this is the only surface the token has. */
@@ -445,15 +474,57 @@ static void test_a_break_inside_the_stack_margin_latches_err_heap(void) {
   TEST_ASSERT_TRUE_MESSAGE(has_tok("err=heap"), g_buf);
 }
 
+/* The buffer arithmetic, pinned to the bytes. PB_BODY_WORST_SUM (config.h) is a hand sum of
+   every field at its widest; this case builds that body and checks the number. Every field
+   report_build() reads is driven to its maximum: the six wired channels at the 14-bit
+   ceiling, t= at UINT32_MAX (the clock parked ONE step short of it, because the stamp's own
+   hal_millis() advances the fake before it reads -- parked AT the target, the earlier
+   version of this case stamped t=0 and measured a 4-byte t=, never the 13 the table counts,
+   and asserted nothing that would have noticed), ack= at UINT32_MAX, flow_ml= at
+   PB_DOSE_MAX_ML, err= at the longest token. The one field no host case can drive to its
+   width through report_build() is the diagnostic block -- three producers are constants in
+   hal_sim.cpp, four are booleans -- so the block as built is swapped for the block
+   report_put_diags() writes with all twelve inputs above the clamp, and the total must EQUAL
+   the table: a thirteenth channel or a wider token fails here, and so does a hand-edit of
+   the constant. Before this pin, PB_BODY_WORST_FIXED set back to the ten-diagnostic 288
+   passed every case in the tree, this one included. */
 static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
   for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch) sim_set_channel(ch, 16383);  /* 14-bit maximum */
   sim_set_channel(PB_CANARY_CHANNEL, 1);
   TEST_ASSERT_TRUE(sensors_sweep());
-  sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt()));   /* jump, never 2^31 steps */
+  sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt() - 1u));   /* jump, never 2^31 steps */
   report_set_ack(4294967295u, PB_DOSE_MAX_ML, "resetmid");
   TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("t=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch0=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch5=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ack=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("flow_ml=1000"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=resetmid"), g_buf);
   TEST_ASSERT_TRUE(strlen(g_buf) < PB_BODY_CAP);
-  TEST_ASSERT_TRUE(strlen(g_buf) <= PB_CONTROLLER_WIRE + 2 + PB_BODY_WORST_FIXED);
+
+  /* the diagnostic block as built: from the first diagnostic to the space before float= */
+  const char *d0 = strstr(g_buf, " ch200=");
+  const char *d1 = strstr(g_buf, " float=");
+  TEST_ASSERT_NOT_NULL(d0);
+  TEST_ASSERT_NOT_NULL(d1);
+  TEST_ASSERT_TRUE(d1 > d0);
+  const size_t diag_built = (size_t)(d1 - d0);
+
+  /* the same block at its clamp width, from the emitter itself */
+  uint32_t above[PB_DIAG_CHANNELS];
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) above[i] = 0xFFFFFFFFu;
+  uint16_t diag_worst = 0;
+  TEST_ASSERT_TRUE(report_put_diags(g_blk, sizeof g_blk, &diag_worst, above));
+
+  char c[16];
+  const int cw = snprintf(c, sizeof c, "c=%u", (unsigned)PB_CONTROLLER);   /* the excluded term */
+  const size_t worst = strlen(g_buf) - (size_t)cw - diag_built + diag_worst;
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)PB_BODY_WORST_SUM, (uint32_t)worst);
+  TEST_ASSERT_TRUE(worst <= (size_t)PB_BODY_WORST_FIXED);
+  TEST_ASSERT_TRUE((size_t)PB_BODY_WORST_FIXED - worst < 32u);   /* rounded up, never loosened */
+  TEST_ASSERT_TRUE(PB_CONTROLLER_WIRE + 2u + PB_BODY_WORST_FIXED <= PB_BODY_CAP);
 }
 
 /* backend/fake_device.py's build_report() is the shape butler was written against:
@@ -844,6 +915,7 @@ int main(void) {
   RUN_TEST(test_report_t_differs_across_two_boots_fifteen_seconds_apart);
   RUN_TEST(test_report_never_repeats_a_key);
   RUN_TEST(test_a_saturated_diagnostic_counter_stays_inside_max_raw);
+  RUN_TEST(test_every_diagnostic_channel_is_clamped_on_the_wire_the_two_latches_included);
   RUN_TEST(test_ch205_counts_leak_pulses_and_err_leak_reaches_the_wire);
   RUN_TEST(test_ch204_is_zero_before_d5_has_ever_changed_not_a_sentinel);
   RUN_TEST(test_report_err_token_never_contains_whitespace);

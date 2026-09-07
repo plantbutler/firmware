@@ -129,7 +129,8 @@ dedup window, which shows up as a missing row rather than as an error anywhere.
 - `src/report.cpp` / `src/exec.cpp` — the `k=v` body, and the one bounded command per
   round trip that comes back in the response. The body carries `ch0`..`ch5` and the twelve
   diagnostics `ch200`..`ch211`; the board's three latches ride among them — `ch207` contra,
-  `ch210` the float flap, `ch211` dry — beside a `float=` they only explain, never change.
+  `ch210` the float flap, `ch211` dry. The first two say why a `float=` they never change
+  is 0; the dry latch is no `float=` term at all — it is what forces `pos=unknown`.
 - `src/sensors.cpp`, `src/pulses.cpp`, `src/cli.cpp`, `src/ui.cpp`, `src/noinit.cpp` — the
   mux and I2C health, the flow and screw meters, the console, the two panels, the latches.
 - `src/hal_uno.cpp` / `src/hal_sim.cpp` — seam 1's two implementations. The board one owns
