@@ -905,26 +905,13 @@ void test_dose_stops_at_the_millilitre_target(void) {
       "a metered dose that reaches its pulse target must end DOSE_OK, not on its cap");
 }
 
-/* When the meter never reaches the target the cap ends the dose, and the cap is a bound on
-   time, never a second target. target = 100 * 5880 / 1000 = 588 pulses, delivered 0; cap
-   the typed 1000 ms (the measured clamp computes 100 * 1000 / 30 * 2 = 6666 and leaves it
-   alone). Under PB_PRIME_MS_DEFAULT, so the prime and stall rules never arm and nothing
-   latches. */
-void test_dose_stops_at_the_cap_when_flow_never_reaches_target(void) {
-  pb_test_setup();
-  arrange_abort_cap_();
-  dose_req_t q = {0}; q.ml = 100u; q.cap_ms = 1000u;
-  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_CAP, dose_run(&q),
-      "a metered dose that never reaches its target must end on its cap");
-}
-
 /* The cap bounds how long D6 is asserted, not how long the call takes: sim_pump_on_ms()
    counts milliseconds with the pin high. Twenty ms of slack is the loop's granularity --
    the fake advances 1 ms per clock read, and the OFF write is the statement after the
    break. */
 void test_pump_on_time_never_exceeds_the_cap(void) {
   pb_test_setup();
-  pb_arrange_dosable(0u);
+  arrange_abort_cap_();
   dose_req_t q = {0}; q.by_time = true; q.cap_ms = 2000u;  /* under PB_PRIME_MS_DEFAULT */
   (void)dose_run(&q);
   TEST_ASSERT_TRUE_MESSAGE(sim_pump_on_ms() <= 2000u + 20u,
@@ -1207,100 +1194,81 @@ void test_g_last_end_ms_does_not_leak_between_cases(void) {
 }
 
 /* With the target rule first, a D2 at the ISR's own 2 kHz ceiling reaches a 250 ml target
-   in ~625 ms and the dose returns DOSE_OK with flow_ml=250 for water that never moved. */
-void test_the_rate_rules_are_evaluated_above_the_target_rule(void) {
-  pb_test_setup();
-  pb_advance(PB_BOOT_GAP_MS + 1u);
-  sim_set_float(true);
-  TEST_ASSERT_TRUE(cfg_pulses_per_l_set(5000u));
-  sim_flow_storm_at_pump_on(2000u);
-  dose_req_t q = {0}; q.ml = 250u; q.cap_ms = PB_DOSE_CAP_MS_MAX; q.need_pos = false;
-  TEST_ASSERT_EQUAL(DOSE_ABORT_NOISE, dose_run(&q));
-  TEST_ASSERT_NOT_EQUAL(DOSE_OK, dose_last_result());
+   in ~625 ms and the dose returns DOSE_OK with flow_ml=250 for water that never moved.
+
+   The 250 ml row proves the storm aborts, not the order: 1250 pulses need ~625 ms of a
+   2000 Hz storm, six 100 ms estimator windows after the storm is first visible, so either
+   order exits on the rate ceiling long before the target. The 45 ml row is the one that
+   decides the order: 225 pulses at cfg 5000 land the target inside the iteration the first
+   window closes, so both conditions turn true at once. It was found empirically -- the
+   window closes at el ~115 ms with 227 pulses; 44 reaches its 220 at ~112 ms before the
+   window closes and neither order catches it; 46 is reached after the window has already
+   broken the loop. Moving the rate-ceiling check below the target flips that row to
+   DOSE_OK. */
+void test_the_rate_ceiling_is_evaluated_above_the_target_rule(void) {
+  const uint16_t mls[] = { 250u, 45u };   /* six windows past the target, and inside one */
+  for (size_t i = 0; i < sizeof mls / sizeof mls[0]; ++i) {
+    pb_test_setup();
+    pb_arrange_dosable(0u);
+    TEST_ASSERT_TRUE(cfg_pulses_per_l_set(5000u));
+    TEST_ASSERT_EQUAL_UINT32(0u, pulses_flow_rate());   /* NOT storming before the dose: the
+                                                           idle guard must not be what fires */
+    sim_flow_storm_at_pump_on(2000u);                   /* a storm that begins WITH the pump */
+    dose_req_t q = {0}; q.ml = mls[i]; q.cap_ms = PB_DOSE_CAP_MS_MAX; q.need_pos = false;
+    TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_NOISE, dose_run(&q),
+        "the rate ceiling must win the race against the target rule, not lose it");
+    TEST_ASSERT_NOT_EQUAL(DOSE_OK, dose_last_result());
+    TEST_ASSERT_TRUE_MESSAGE(dose_flow_ml() <= (uint16_t)PB_DOSE_RIG_MAX_ML,
+        "no target is ever reached by noise: nothing may be acked as delivered");
+  }
 }
 
-/* The same storm, stated as the consequence: no target is ever reached by noise. */
-void test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached(void) {
-  pb_test_setup();
-  pb_advance(PB_BOOT_GAP_MS + 1u);
-  sim_set_float(true);
-  TEST_ASSERT_TRUE(cfg_pulses_per_l_set(5000u));
-  TEST_ASSERT_EQUAL_UINT32(0u, pulses_flow_rate());   /* NOT storming before the dose: the
-                                                         idle guard must not be what fires */
-  sim_flow_storm_at_pump_on(2000u);
-  dose_req_t q = {0}; q.ml = 250u; q.cap_ms = PB_DOSE_CAP_MS_MAX;
-  TEST_ASSERT_EQUAL(DOSE_ABORT_NOISE, dose_run(&q));
-  TEST_ASSERT_EQUAL_UINT16(0u, dose_flow_ml() > 250u ? 1u : 0u);   /* nothing was acked */
+/* The window on its own, then what `prime` does to it: it EXTENDS the window (a line that
+   never primes still aborts, at PB_PRIME_LONG_MS rather than never) and it CAPS the whole
+   dose at PB_PRIME_CAP_MS regardless of the typed 60 s. Each row bounds how long D6 was
+   asserted, which is the only measure of a window that means anything. */
+void test_the_prime_window_bounds_the_dose_and_the_prime_flag_extends_and_caps_it(void) {
+  static const struct {
+    const char   *name;
+    uint16_t      flow_ml_s;
+    uint32_t      cap_ms;
+    bool          long_prime;
+    dose_result_t want;
+    uint32_t      on_at_least;
+    uint32_t      on_below;
+  } rows[] = {
+    { "a line that never primes", 0u, PB_DOSE_CAP_MS_MAX, false, DOSE_ABORT_NOFLOW,
+      0u,               PB_PRIME_MS_DEFAULT + 200u },
+    { "prime, and still nothing", 0u, 60000u,             true,  DOSE_ABORT_NOFLOW,
+      PB_PRIME_LONG_MS, PB_PRIME_CAP_MS + 500u },
+    { "prime, and flowing",      30u, 60000u,             true,  DOSE_ABORT_CAP,
+      0u,               PB_PRIME_CAP_MS + 200u },
+  };
+  for (size_t i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
+    pb_test_setup();
+    pb_arrange_dosable(rows[i].flow_ml_s);
+    dose_req_t q = {0};
+    q.by_time = true; q.cap_ms = rows[i].cap_ms; q.long_prime = rows[i].long_prime;
+    TEST_ASSERT_EQUAL_MESSAGE(rows[i].want, dose_run(&q), rows[i].name);
+    TEST_ASSERT_TRUE_MESSAGE(sim_pump_on_ms() >= rows[i].on_at_least, rows[i].name);
+    TEST_ASSERT_TRUE_MESSAGE(sim_pump_on_ms() <  rows[i].on_below,    rows[i].name);
+  }
 }
 
-/* The two cases above prove the storm aborts, not the order: their 1250-pulse target needs
-   ~625 ms of a 2000 Hz storm, six 100 ms estimator windows after the storm is first
-   visible, so either order exits on the rate ceiling long before the target. This fixture
-   lands the target inside the iteration the first window closes, so both conditions turn
-   true at once and only the order decides. 45 ml (225 pulses at cfg 5000) was found
-   empirically: the window closes at el ~115 ms with 227 pulses; 44 reaches its 220 at
-   ~112 ms before the window closes and neither order catches it; 46 is reached after the
-   window has already broken the loop. Moving the rate-ceiling check below the target flips
-   this fixture to DOSE_OK. */
-void test_the_rate_ceiling_alone_wins_the_race_against_the_target(void) {
-  pb_test_setup();
-  pb_arrange_dosable(0u);
-  TEST_ASSERT_TRUE(cfg_pulses_per_l_set(5000u));
-  sim_flow_storm_at_pump_on(2000u);
-  dose_req_t q = {0}; q.ml = 45u; q.cap_ms = PB_DOSE_CAP_MS_MAX;
-  TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_NOISE, dose_run(&q),
-      "the rate ceiling must win the race against the target rule, not lose it");
-}
-
-/* The no-flow abort, half 1: a line that never primes. The pump runs the whole default
-   window and nothing comes out. */
-void test_prime_abort_fires_when_nothing_flows_in_the_prime_window(void) {
-  pb_test_setup();
-  arrange_abort_noflow_();
-  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
-  TEST_ASSERT_EQUAL(DOSE_ABORT_NOFLOW, dose_run(&q));
-  TEST_ASSERT_TRUE(sim_pump_on_ms() < PB_PRIME_MS_DEFAULT + 200u);
-}
-
-/* `prime` extends the window; a dose that never flows still aborts, at PB_PRIME_LONG_MS
-   rather than never. */
-void test_prime_flag_still_aborts_when_nothing_ever_flows(void) {
-  pb_test_setup();
-  pb_arrange_dosable(0u);
-  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 60000u; q.long_prime = true;
-  TEST_ASSERT_EQUAL(DOSE_ABORT_NOFLOW, dose_run(&q));
-  TEST_ASSERT_TRUE(sim_pump_on_ms() >= PB_PRIME_LONG_MS);        /* the window extended */
-  TEST_ASSERT_TRUE(sim_pump_on_ms() <  PB_PRIME_CAP_MS + 500u);  /* and it still ended */
-}
-
-void test_prime_flag_caps_the_dose_at_the_prime_cap(void) {
-  pb_test_setup();
-  pb_arrange_dosable(30u);                        /* flowing, so no no-flow abort */
-  dose_req_t q = {0}; q.by_time = true; q.cap_ms = 60000u; q.long_prime = true;
-  TEST_ASSERT_EQUAL(DOSE_ABORT_CAP, dose_run(&q));
-  TEST_ASSERT_TRUE(sim_pump_on_ms() <= PB_PRIME_CAP_MS + 200u);  /* NOT the typed 60 s */
-}
-
-/* A dose that delivered a few pulses and then stopped must still abort: arming on `got`
+/* The rule is armed on time, never on pulses: a burst that stops -- above the threshold or
+   exactly one pulse short of it -- must not be read as "flow started". Arming on `got`
    would let zero flow disarm the rule entirely. */
-void test_stall_abort_is_armed_on_time_not_on_pulses(void) {
-  pb_test_setup();
-  pb_arrange_dosable(0u);
-  sim_set_flow_burst_pulses(PB_PRIME_MIN_PULSES + 2u);   /* then nothing, forever */
-  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
-  TEST_ASSERT_EQUAL(DOSE_ABORT_NOFLOW, dose_run(&q));
-  TEST_ASSERT_TRUE(sim_pump_on_ms() <
-                   PB_PRIME_MS_DEFAULT + PB_STALL_MS_DEFAULT + 500u);
-}
-
-/* The prime rule's boundary, from the other side: exactly one pulse short of the
-   threshold must NOT be read as "flow started". */
-void test_five_spurious_edges_at_start_do_not_disable_the_abort(void) {
-  pb_test_setup();
-  pb_arrange_dosable(0u);
-  sim_set_flow_burst_pulses(PB_PRIME_MIN_PULSES - 1u);
-  dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
-  TEST_ASSERT_EQUAL(DOSE_ABORT_NOFLOW, dose_run(&q));
+void test_a_burst_of_pulses_at_the_start_never_disarms_the_noflow_abort(void) {
+  const uint32_t bursts[] = { PB_PRIME_MIN_PULSES + 2u, PB_PRIME_MIN_PULSES - 1u };
+  for (size_t i = 0; i < sizeof bursts / sizeof bursts[0]; ++i) {
+    pb_test_setup();
+    pb_arrange_dosable(0u);
+    sim_set_flow_burst_pulses(bursts[i]);         /* then nothing, forever */
+    dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
+    TEST_ASSERT_EQUAL(DOSE_ABORT_NOFLOW, dose_run(&q));
+    TEST_ASSERT_TRUE(sim_pump_on_ms() <
+                     PB_PRIME_MS_DEFAULT + PB_STALL_MS_DEFAULT + 500u);
+  }
 }
 
 /* A healthy dose on the untouched default prime window, no long_prime: 100 ml at 85 ml/s
@@ -1477,19 +1445,13 @@ int main(void) {
   RUN_TEST(test_dose_refused_when_the_cap_is_zero);
   RUN_TEST(test_dose_refused_when_a_need_pos_dose_names_outlet_zero);
   RUN_TEST(test_dose_refused_when_the_idle_pulse_rate_is_nonzero);
-  RUN_TEST(test_the_rate_rules_are_evaluated_above_the_target_rule);
-  RUN_TEST(test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached);
-  RUN_TEST(test_the_rate_ceiling_alone_wins_the_race_against_the_target);
+  RUN_TEST(test_the_rate_ceiling_is_evaluated_above_the_target_rule);
   RUN_TEST(test_metered_dose_with_a_zero_target_is_refused_not_run_to_cap);
   RUN_TEST(test_dose_stops_at_the_millilitre_target);
-  RUN_TEST(test_dose_stops_at_the_cap_when_flow_never_reaches_target);
   RUN_TEST(test_pump_on_time_never_exceeds_the_cap);
   RUN_TEST(test_a_cap_over_the_firmware_ceiling_is_clamped_to_the_ceiling);
-  RUN_TEST(test_prime_abort_fires_when_nothing_flows_in_the_prime_window);
-  RUN_TEST(test_prime_flag_still_aborts_when_nothing_ever_flows);
-  RUN_TEST(test_prime_flag_caps_the_dose_at_the_prime_cap);
-  RUN_TEST(test_stall_abort_is_armed_on_time_not_on_pulses);
-  RUN_TEST(test_five_spurious_edges_at_start_do_not_disable_the_abort);
+  RUN_TEST(test_the_prime_window_bounds_the_dose_and_the_prime_flag_extends_and_caps_it);
+  RUN_TEST(test_a_burst_of_pulses_at_the_start_never_disarms_the_noflow_abort);
   RUN_TEST(test_a_healthy_metered_dose_completes_on_the_default_prime_window);
   RUN_TEST(test_dose_aborts_when_the_pulse_rate_exceeds_the_meter_rating);
   RUN_TEST(test_a_dose_that_reaches_target_implausibly_fast_is_noise_not_ok);

@@ -34,17 +34,6 @@ void test_latch_overrides_err_to_contra_on_the_dose_that_sets_it(void) {
   TEST_ASSERT_EQUAL_STRING("contra", safety_last_err());
 }
 
-/* The float dropped: the two sensors agree that the tank ran out. Ordinary abort. */
-void test_latch_does_not_set_when_the_float_dropped_mid_dose(void) {
-  pb_advance(PB_BOOT_GAP_MS + 1u);
-  sim_set_float(true); sim_set_flow_ml_s(0);
-  sim_set_float_at_ms(500u, false);          /* the fake drops D5 mid-dose */
-  dose_req_t q = {0}; q.by_time = true;
-  q.cap_ms = PB_PRIME_MS_DEFAULT + PB_STALL_MS_DEFAULT + 1000u;
-  TEST_ASSERT_EQUAL(DOSE_ABORT_FLOAT, dose_run(&q));
-  TEST_ASSERT_FALSE(safety_contra());
-}
-
 /* Water was moving and then stopped -- a hose off a pot, a tank sucked dry mid-dose: the
    meter and the float agree. Ordinary abort, no latch. */
 void test_latch_does_not_set_when_flow_started_and_then_stalled(void) {
@@ -158,10 +147,11 @@ void test_latch_is_not_cleared_by_dry_off_or_by_a_successful_home(void) {
   TEST_ASSERT_TRUE(safety_contra());
 }
 
-/* Dropping the float at 500 ms, as the mid-dose case above does, leaves elapsed < prime_ms,
-   so that case passes even without the latch's own fresh float read. Dropping it exactly at
-   the prime boundary makes every other latch condition hold -- DOSE_ABORT_FLOAT, elapsed
-   past prime_ms, zero pulses -- so that fresh read is the only thing between this dose and
+/* The float dropped: the two sensors agree that the tank ran out, so this is an ordinary
+   abort and never the latch. Dropped at 500 ms it would leave elapsed < prime_ms, and the
+   dose would pass this even without the latch's own fresh float read; dropped exactly at
+   the prime boundary every other latch condition holds -- DOSE_ABORT_FLOAT, elapsed past
+   prime_ms, zero pulses -- so that fresh read is the only thing between this dose and
    contra=1. */
 void test_latch_does_not_set_when_the_float_drops_at_the_prime_boundary(void) {
   pb_advance(PB_BOOT_GAP_MS + 1u);
@@ -208,7 +198,6 @@ int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_latch_sets_when_the_float_said_ok_and_no_pulse_ever_arrived);
   RUN_TEST(test_latch_overrides_err_to_contra_on_the_dose_that_sets_it);
-  RUN_TEST(test_latch_does_not_set_when_the_float_dropped_mid_dose);
   RUN_TEST(test_latch_does_not_set_when_flow_started_and_then_stalled);
   RUN_TEST(test_latch_does_not_set_when_the_dose_was_stopped_before_the_prime_window);
   RUN_TEST(test_latch_uses_the_doses_own_prime_window_not_the_configured_default);

@@ -200,21 +200,14 @@ void test_servo_is_stopped_on_every_exit_path(void) {
   }
 }
 
-static void test_the_cart_is_parked_off_every_outlet_after_every_command_including_a_failed_goto(void) {
-  pb_test_setup();
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);   /* water=3; goto will fail */
-  net_begin(); exec_begin();
-  pb_net_passes(14, 100);
-  exec_pending();
-  TEST_ASSERT_TRUE(cart_parked());
-}
-
-static void test_the_cart_is_parked_after_a_stop_command_and_after_an_out_of_range_outlet(void) {
-  const char *bodies[2]; size_t lens[2];
-  bodies[0] = k_stop_200;         lens[0] = sizeof k_stop_200 - 1u;
-  bodies[1] = k_out_of_range_200; lens[1] = sizeof k_out_of_range_200 - 1u;
-  for (unsigned i = 0; i < 2; ++i) {
+/* Every command leaves the cart off every outlet: one that waters and whose goto fails, one
+   that stops, and one naming an outlet the board refuses. */
+static void test_the_cart_is_parked_after_every_command_including_a_failed_goto(void) {
+  const char *bodies[3]; size_t lens[3];
+  bodies[0] = k_cmd_200;          lens[0] = sizeof k_cmd_200 - 1u;   /* water=3; goto will fail */
+  bodies[1] = k_stop_200;         lens[1] = sizeof k_stop_200 - 1u;
+  bodies[2] = k_out_of_range_200; lens[2] = sizeof k_out_of_range_200 - 1u;
+  for (unsigned i = 0; i < 3; ++i) {
     pb_test_setup();
     link_fake_reset(); link_fake_set_state(LINK_UP);
     link_fake_queue_response(bodies[i], lens[i]);
@@ -239,7 +232,6 @@ int main(void) {
   RUN_TEST(test_stall_aborts_within_the_stall_window_and_loses_position);
   RUN_TEST(test_goto_rejects_an_outlet_outside_one_to_five);
   RUN_TEST(test_servo_is_stopped_on_every_exit_path);
-  RUN_TEST(test_the_cart_is_parked_off_every_outlet_after_every_command_including_a_failed_goto);
-  RUN_TEST(test_the_cart_is_parked_after_a_stop_command_and_after_an_out_of_range_outlet);
+  RUN_TEST(test_the_cart_is_parked_after_every_command_including_a_failed_goto);
   return UNITY_END();
 }
