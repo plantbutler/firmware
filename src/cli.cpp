@@ -41,19 +41,8 @@ void cli_printf_i32(const char *fmt, int32_t v) {
   hal_serial_write(b);
 }
 
-static bool parse_u32_(const char *s, uint32_t *out) {
-  uint32_t v = 0;
-  if (*s < '0' || *s > '9') return false;
-  for (; *s != '\0'; ++s) {
-    if (*s < '0' || *s > '9') return false;
-    v = v * 10u + (uint32_t)(*s - '0');
-  }
-  *out = v;
-  return true;
-}
-
-/* Bounded sibling of parse_u32_(): a console argument ends at a space, not a NUL. Digits
-   only -- a strtol would accept `servo 0x600 200`. */
+/* Bounded, because a console argument ends at a space, not a NUL. Digits only -- a strtol
+   would accept `servo 0x600 200`. */
 static bool parse_u32_range_(const char *begin, const char *end, uint32_t *out) {
   uint32_t v = 0;
   if (begin >= end || *begin < '0' || *begin > '9') return false;
@@ -63,6 +52,10 @@ static bool parse_u32_range_(const char *begin, const char *end, uint32_t *out) 
   }
   *out = v;
   return true;
+}
+
+static bool parse_u32_(const char *s, uint32_t *out) {
+  return parse_u32_range_(s, s + strlen(s), out);
 }
 
 static const char *token_end_(const char *s) {
