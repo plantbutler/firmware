@@ -22,7 +22,7 @@ make build-all && make check   # build every board variant, then the 34 invarian
 ```
 
 `secrets.h` is gitignored and never committed. `make check` exits 2 until `make build-all` has run,
-because seven of its checks read the compiled objects.
+because eight of its checks read the compiled objects.
 
 Bring-up and bench work, each a different binary:
 
@@ -55,7 +55,7 @@ Two seams, each a header of plain functions with a board and a host implementati
 | file | what it holds |
 | --- | --- |
 | `src/main.cpp` | `setup()` in its load-bearing order, the boot banner, `loop()` |
-| `src/safety.cpp` | the only writer of the pump pin and the only watchdog feeder; the float debounce, the latches, `dose_run()` |
+| `src/safety.cpp` | every decision to run the pump, and the only watchdog feeder outside the hardware layer; the float debounce, the latches, `dose_run()` |
 | `src/netfsm.cpp` | the report and response state machine, one bounded network step per pass |
 | `src/report.cpp`, `src/exec.cpp` | the `k=v` report body; the one command per round trip that comes back |
 | `src/sensors.cpp`, `src/pulses.cpp` | the sensor multiplexer and the health of the two-wire bus the sensors and screens share; the flow and screw pulse counters |

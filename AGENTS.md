@@ -9,9 +9,12 @@ entries 4 (the wire), 5 (what the firmware may decide) and 7 (safety) are what t
 
 `make check` runs 34 invariants; the ones below are the ones you will meet.
 
-- `src/safety.cpp` is the only writer of the pump pin, and the only place that tells the
-  watchdog the program is alive. The watchdog is the timer that reboots the board if nothing
-  does.
+- `src/hal_uno.cpp` is the only file that writes the pump pin. Every decision to write it is in
+  `src/safety.cpp`, which reaches the pin through the hardware layer.
+- `safety_tick()` is the only thing that feeds the watchdog outside the hardware layer. The
+  watchdog is the timer that reboots the board if nothing tells it the program is alive; the
+  hardware layer feeds it twice more, on either side of the one window it deliberately leaves
+  unfed to measure that the timer is running.
   `dose_run()` has exactly one call site in `src/cli.cpp`.
 - The board library header is included only by `src/hal_uno.cpp`, `src/sim_console.cpp` and
   `lib/Screen`. Everything else reaches hardware through `include/hal.h`.

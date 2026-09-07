@@ -41,29 +41,26 @@ files() { local pat="$1"; shift; grep -rlE "$pat" "$@" 2>/dev/null | wc -l | tr 
 expect() { if [ "$2" = "$1" ]; then ok "$3 ($1)"; else fail "$3: expected $1, found $2"; fi; }
 
 # Usage: check <want> <pattern> [grep args and paths...] -- <description>. A FAIL lists the hits.
-check() {
-  local want="$1" pat="$2"; shift 2
-  local -a gargs=()
-  while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do gargs+=("$1"); shift; done
-  shift            # drop the -- sentinel
-  local desc="$1" got
-  got=$(count "$pat" "${gargs[@]}")
-  if [ "$got" = "$want" ]; then
-    ok "$desc ($want)"
-  else
-    fail "$desc: expected $want, found $got"
-    grep -rnE "$pat" "${gargs[@]}" 2>/dev/null | sed 's/^/      /' >&2
-  fi
+
+# Files containing the pattern, comments and their contents stripped first: the same blindness
+# check_nc has, so a comment may name a macro this counts without tripping it.
+files_nc() {
+  local pat="$1"; shift
+  local -a fl=()
+  while IFS= read -r f; do [ -n "$f" ] && fl+=("$f"); done < <(grep -rlE '.' "$@" 2>/dev/null)
+  [ "${#fl[@]}" -eq 0 ] && { echo 0; return; }
+  strip_spans_ "${fl[@]}" | grep -E "$pat" 2>/dev/null | sed -E 's/:[0-9]+:.*$//' \
+    | sort -u | wc -l | tr -d ' '
 }
 
-# Same shape as check, counting files.
+# Same shape as check_nc, counting files.
 check_files() {
   local want="$1" pat="$2"; shift 2
   local -a gargs=()
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do gargs+=("$1"); shift; done
   shift
   local desc="$1" got
-  got=$(files "$pat" "${gargs[@]}")
+  got=$(files_nc "$pat" "${gargs[@]}")
   if [ "$got" = "$want" ]; then
     ok "$desc ($want)"
   else

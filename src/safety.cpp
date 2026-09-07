@@ -17,7 +17,7 @@ void safety_set_dosing(bool on) { g_dosing = on; }
 
 void safety_tick(void) {
   if (!g_dosing) hal_pump_write(false);  /* idle ACTIVELY re-asserts OFF, every pass */
-  hal_wdt_feed();                        /* the ONE feeder in the program */
+  hal_wdt_feed();                        /* the only feeder outside the hardware layer */
 }
 
 void safety_wait_ms(uint32_t ms) {
