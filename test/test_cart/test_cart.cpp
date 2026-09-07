@@ -7,7 +7,6 @@
 #include "config.h"
 #include "exec.h"
 #include "netfsm.h"
-#include "report.h"
 #include "sensors.h"
 #include "sim.h"
 

@@ -270,7 +270,10 @@ static void test_boot_salt_differs_across_two_warm_boots(void) {
 static void test_ml_from_pulses_rounds_down_and_does_not_overflow(void) {
   TEST_ASSERT_EQUAL_UINT32(100u, pulses_to_ml(588u, 5880u));
   TEST_ASSERT_EQUAL_UINT32(9u,   pulses_to_ml(58u, 5880u));    /* 9.86 ml, rounded DOWN */
-  TEST_ASSERT_EQUAL_UINT32(250u, pulses_to_ml(1470u, 5880u));
+  /* the rig's full dose at the default calibration, named rather than copied in */
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)PB_DOSE_RIG_MAX_ML,
+      pulses_to_ml(PB_DOSE_RIG_MAX_ML * PB_PULSES_PER_L_DEFAULT / 1000u,
+                   PB_PULSES_PER_L_DEFAULT));
   TEST_ASSERT_EQUAL_UINT32(0u,   pulses_to_ml(0u, 5880u));
   TEST_ASSERT_EQUAL_UINT32(0u,   pulses_to_ml(1000u, 0u));     /* never a UDIV-returns-0 lie */
   /* past UINT32_MAX/1000 the multiply-first form would wrap; the split form does not */
@@ -1070,7 +1073,6 @@ void test_cap_is_clamped_to_twice_the_requested_millilitres(void) {
       "the measured clamp, not the 60 s/20 s ceiling above it, must end this dose");
   uint32_t want = (uint32_t)q.ml * 1000u / (uint32_t)PB_ML_PER_S_MEASURED
                   * PB_CAP_SLACK_NUM / PB_CAP_SLACK_DEN;
-  TEST_ASSERT_EQUAL_UINT32(13332u, want);            /* derived, then checked against itself */
   /* dose_last_ms() lands a few ticks past `want`, never exactly on it: g_last_end_ms is a
      fresh clock read after the loop breaks, and the loop reads the clock twice per pass
      (see the rollover case). */

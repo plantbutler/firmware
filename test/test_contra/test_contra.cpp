@@ -1,13 +1,11 @@
 /* test_contra.cpp: the float/flow contradiction latch -- when it sets, what it refuses, what survives a reset, and how it reaches the wire. */
 #include <unity.h>
 #include <string.h>
-#include "../support/bodies.h"
 #include "../support/harness.h"
 #include "cart.h"
 #include "cli.h"
 #include "config.h"
 #include "exec.h"
-#include "netfsm.h"
 #include "report.h"
 #include "safety.h"
 #include "sim.h"
