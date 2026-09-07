@@ -79,15 +79,6 @@ void exec_pending(void) {
     q.cap_ms = (uint32_t)g_cmd.cap_s * 1000u;
     q.need_pos = true;                   /* a backend water command: position must be known */
     q.long_prime = false;                /* never from the wire: `prime` is a console token */
-#if defined(PB_DOSE_BY_TIME) && PB_DOSE_BY_TIME
-    /* The by-time fallback, against the SAME constant the cap clamp uses; config.h #errors
-       if PB_ML_PER_S_MEASURED is 0: a by-time dose on an unmeasured rate is an unbounded run. */
-    q.by_time = true;
-    {
-      uint32_t byt = (uint32_t)g_cmd.ml * 1000u / PB_ML_PER_S_MEASURED;
-      if (byt < q.cap_ms) q.cap_ms = byt;
-    }
-#endif
 #ifdef PB_NATIVE
     g_last_req = q;      /* the request AS BUILT, for the host suite to assert on directly */
 #endif
