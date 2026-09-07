@@ -1,4 +1,5 @@
 /* test_cli.cpp: the console line reader and commands, and the two screen renderers, on the host. */
+#include "../support/bodies.h"
 #include "../support/harness.h"
 #include "cart.h"
 #include "cli.h"
@@ -206,14 +207,14 @@ static void test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_
   char out[2048];
   size_t n = feed("status\n", out, sizeof out);
   out[n] = '\0';
-  TEST_ASSERT_NOT_NULL(strstr(out, "granted=5592ms"));
-  TEST_ASSERT_NOT_NULL(strstr(out, "alive=yes"));
+  TEST_ASSERT_TRUE(pb_has_tok(out, "granted=5592ms"));
+  TEST_ASSERT_TRUE(pb_has_tok(out, "alive=yes"));
   TEST_ASSERT_NOT_NULL(strstr(out, "WDT, not IWDT"));
-  TEST_ASSERT_NOT_NULL(strstr(out, "pump_on_level="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "pump_on_level="));
   sim_wdt_stop();
   n = feed("status\n", out, sizeof out);
   out[n] = '\0';
-  TEST_ASSERT_NOT_NULL(strstr(out, "alive=no"));
+  TEST_ASSERT_TRUE(pb_has_tok(out, "alive=no"));
 }
 
 /* Both banners, both states. The needle for the latched case is the whole sentence: the raw
@@ -315,7 +316,7 @@ static void test_no_float_formatting_appears_in_any_printed_line(void) {
   (void)sim_serial_tx(out, sizeof out);
   cli_print_dose_summary();
   n = sim_serial_tx(out, sizeof out); out[n] = '\0';
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, " mls="), out);   /* the exemption under test */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_key(out, "mls="), out);   /* the exemption under test */
   line = strtok(out, "\n");
   while (line) {
     scan_line_for_float_formatting_(line);
@@ -348,7 +349,7 @@ static void test_a_non_matching_byte_is_pushed_to_the_line_buffer_unread(void) {
   TEST_ASSERT_FALSE(cli_stop_requested());   /* not a stop, and not consumed either */
   cli_poll();                                /* reads the pushback FIRST */
   size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "granted="), out);   /* status actually ran */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_key(out, "granted="), out);   /* status actually ran */
 }
 
 /* dry on typed mid-dose sets the latch and raises the stop request: the word means the same
@@ -517,9 +518,9 @@ static void test_dose_summary_line_prints_r_ok_only_for_a_successful_dose(void) 
   (void)sim_serial_tx(out, sizeof out);
   cli_print_dose_summary();
   size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, " r=ok"), out);
-  TEST_ASSERT_NULL_MESSAGE(strstr(out, " r=none"), out);   /* err_of(DOSE_OK) is "none" on
-                                                               the wire; the SUMMARY must say ok */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(out, "r=ok"), out);
+  TEST_ASSERT_FALSE_MESSAGE(pb_has_tok(out, "r=none"), out);   /* err_of(DOSE_OK) is "none" on
+                                                                   the wire; the SUMMARY must say ok */
 
   /* And the negative: a refused dose prints its real token, never "ok". */
   pb_advance(PB_DOSE_MIN_GAP_MS + 1u);      /* clear the 10 s cooldown between callers */
@@ -528,8 +529,8 @@ static void test_dose_summary_line_prints_r_ok_only_for_a_successful_dose(void) 
   (void)sim_serial_tx(out, sizeof out);
   cli_print_dose_summary();
   n = sim_serial_tx(out, sizeof out); out[n] = '\0';
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, " r=float"), out);
-  TEST_ASSERT_NULL_MESSAGE(strstr(out, " r=ok"), out);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(out, "r=float"), out);
+  TEST_ASSERT_FALSE_MESSAGE(pb_has_tok(out, "r=ok"), out);
 }
 
 static void test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls(void) {
@@ -543,11 +544,11 @@ static void test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls(void) {
   TEST_ASSERT_TRUE(cli_dispatch("pump 4000"));
   size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "dose outlet="), out);
-  TEST_ASSERT_NOT_NULL(strstr(out, " ms="));
-  TEST_ASSERT_NOT_NULL(strstr(out, " pulses="));
-  TEST_ASSERT_NOT_NULL(strstr(out, " ml="));
-  TEST_ASSERT_NOT_NULL(strstr(out, " mls="));
-  TEST_ASSERT_NOT_NULL(strstr(out, " r="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "ms="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "pulses="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "ml="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "mls="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "r="));
   /* mls is integer tenths printed around a literal dot: the float conversions are banned */
   const char *mls = strstr(out, " mls=");
   TEST_ASSERT_NOT_NULL(strchr(mls, '.'));

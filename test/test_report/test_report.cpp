@@ -35,24 +35,6 @@ static void fresh_sweep(void) {
 
 static uint16_t build(void) { report_stamp(); return report_build(g_buf, sizeof g_buf); }
 
-/* whole-token match: "ch1=8001" must not be found inside "ch11=8001" */
-static bool has_tok(const char *tok) {
-  size_t n = strlen(tok);
-  for (const char *p = strstr(g_buf, tok); p; p = strstr(p + n, tok)) {
-    bool left  = (p == g_buf) || p[-1] == ' ';
-    bool right = (p[n] == ' ' || p[n] == '\n' || p[n] == '\0');
-    if (left && right) return true;
-  }
-  return false;
-}
-
-static bool has_key(const char *key) {   /* key includes the '=' */
-  size_t n = strlen(key);
-  for (const char *p = strstr(g_buf, key); p; p = strstr(p + n, key))
-    if (p == g_buf || p[-1] == ' ') return true;
-  return false;
-}
-
 static void test_report_carries_c_t_and_the_valid_channels(void) {
   fresh_sweep();
   TEST_ASSERT_TRUE(build() > 0);
@@ -60,10 +42,10 @@ static void test_report_carries_c_t_and_the_valid_channels(void) {
   snprintf(t, sizeof t, "t=%lu", (unsigned long)report_t_wire());
   char c[16];
   snprintf(c, sizeof c, "c=%u", (unsigned)PB_CONTROLLER);
-  TEST_ASSERT_TRUE(has_tok(c));
-  TEST_ASSERT_TRUE(has_tok(t));
-  TEST_ASSERT_TRUE(has_tok("ch0=8000"));
-  TEST_ASSERT_TRUE(has_tok("ch5=8005"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, c));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, t));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "ch0=8000"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "ch5=8005"));
   TEST_ASSERT_EQUAL_CHAR('\n', g_buf[strlen(g_buf) - 1]);
 }
 
@@ -71,8 +53,8 @@ static void test_report_always_carries_at_least_one_diagnostic_channel(void) {
   sim_set_i2c_fail(true);                 /* a wedged bus empties the mux mask entirely */
   (void)sensors_sweep();
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_FALSE(has_key("ch0="));
-  TEST_ASSERT_TRUE(has_key("ch203="));    /* butler 400s a report with no chN= at all */
+  TEST_ASSERT_FALSE(pb_has_key(g_buf, "ch0="));
+  TEST_ASSERT_TRUE(pb_has_key(g_buf, "ch203="));    /* butler 400s a report with no chN= at all */
 }
 
 static void test_report_omits_a_channel_whose_read_failed_rather_than_sending_zero(void) {
@@ -80,8 +62,8 @@ static void test_report_omits_a_channel_whose_read_failed_rather_than_sending_ze
   sim_set_i2c_fail(true);
   (void)sensors_sweep();
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_FALSE(has_key("ch2="));
-  TEST_ASSERT_FALSE(has_tok("ch2=0"));
+  TEST_ASSERT_FALSE(pb_has_key(g_buf, "ch2="));
+  TEST_ASSERT_FALSE(pb_has_tok(g_buf, "ch2=0"));
 }
 
 static void test_report_omits_the_wired_channels_and_says_stuck_when_the_canary_matches(void) {
@@ -91,20 +73,20 @@ static void test_report_omits_the_wired_channels_and_says_stuck_when_the_canary_
   /* every failed sweep returns false, and the report must still be legal on one */
   TEST_ASSERT_FALSE(sensors_sweep());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_FALSE(has_key("ch0="));
-  TEST_ASSERT_FALSE(has_key("ch4="));
-  TEST_ASSERT_TRUE(has_tok("err=stuck"));
-  TEST_ASSERT_TRUE(has_key("ch200="));
+  TEST_ASSERT_FALSE(pb_has_key(g_buf, "ch0="));
+  TEST_ASSERT_FALSE(pb_has_key(g_buf, "ch4="));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "err=stuck"));
+  TEST_ASSERT_TRUE(pb_has_key(g_buf, "ch200="));
 }
 
 static void test_report_float_is_the_debounced_tank_verdict_anded_with_not_contra(void) {
   fresh_sweep();
   sim_set_float(true);
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("float=1"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "float=1"));
   sim_set_float(false);
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("float=0"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "float=0"));
 }
 
 /* pb_latch_contra() is a real contradicting dose, the latch's only setter, and leaves the
@@ -116,7 +98,7 @@ static void test_report_float_is_zero_under_the_contradiction_latch_even_though_
   TEST_ASSERT_TRUE(safety_float_ok_debounced());   /* the raw debounce alone says OK */
   TEST_ASSERT_TRUE(safety_contra());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("float=0"));            /* ANDed with !contra */
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "float=0"));            /* ANDed with !contra */
 }
 
 static void test_report_float_is_only_ever_zero_or_one(void) {
@@ -124,9 +106,9 @@ static void test_report_float_is_only_ever_zero_or_one(void) {
   for (int i = 0; i < 6; ++i) {                  /* a float flapping at the waterline */
     sim_set_float(i % 2 == 0);
     TEST_ASSERT_TRUE(build() > 0);
-    TEST_ASSERT_TRUE(has_tok("float=0") || has_tok("float=1"));
-    TEST_ASSERT_FALSE(has_tok("float=2"));       /* _int_in(v,"float",0,2) is HALF-open */
-    TEST_ASSERT_FALSE(has_tok("float=-1"));
+    TEST_ASSERT_TRUE(pb_has_tok(g_buf, "float=0") || pb_has_tok(g_buf, "float=1"));
+    TEST_ASSERT_FALSE(pb_has_tok(g_buf, "float=2"));       /* _int_in(v,"float",0,2) is HALF-open */
+    TEST_ASSERT_FALSE(pb_has_tok(g_buf, "float=-1"));
   }
 }
 
@@ -135,7 +117,7 @@ static void test_repeated_float_refusals_drive_float_to_zero_on_the_wire(void) {
   sim_set_float(true);
   for (int i = 0; i < PB_FLOAT_FLAP_LIMIT + 1; ++i) safety_float_refusal_count(true);
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("float=0"));          /* even though the tank samples OK */
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "float=0"));          /* even though the tank samples OK */
 }
 
 static void test_a_granted_dose_clears_the_float_refusal_counter(void) {
@@ -144,7 +126,7 @@ static void test_a_granted_dose_clears_the_float_refusal_counter(void) {
   for (int i = 0; i < PB_FLOAT_FLAP_LIMIT + 1; ++i) safety_float_refusal_count(true);
   safety_float_refusal_count(false);             /* any granted dose clears it */
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("float=1"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "float=1"));
 }
 
 /* ---- the three latches on the wire: ch207 contra, ch210 the float flap, ch211 dry. The
@@ -157,9 +139,9 @@ static void test_ch210_and_ch211_are_zero_on_a_clean_boot(void) {
   TEST_ASSERT_FALSE(safety_float_flap());
   TEST_ASSERT_FALSE(safety_dry());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);
 }
 
 /* The flap trips on the PB_FLOAT_FLAP_LIMIT-th consecutive refusal and clears only on a
@@ -173,10 +155,10 @@ static void test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dos
   TEST_ASSERT_FALSE(safety_dry());
   TEST_ASSERT_FALSE(safety_contra());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);   /* the flap is not the dry latch */
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);   /* nor the contradiction */
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);   /* unchanged: the flap still forces it */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);   /* the flap is not the dry latch */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);   /* nor the contradiction */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=0"), g_buf);   /* unchanged: the flap still forces it */
 
   pb_advance(PB_BOOT_GAP_MS + 1u);
   pulses_begin();
@@ -188,10 +170,10 @@ static void test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dos
   TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q), "arrange: a granted dose");
   TEST_ASSERT_FALSE(safety_float_flap());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=1"), g_buf);
 }
 
 /* The dry latch is a pos= term, not a float= term: ch211=1 rides beside float=1. */
@@ -202,15 +184,15 @@ static void test_ch211_is_one_while_the_dry_latch_stands(void) {
   TEST_ASSERT_FALSE(safety_float_flap());
   TEST_ASSERT_FALSE(safety_contra());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);   /* the dry latch is not the flap */
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);   /* nor the contradiction */
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=1"), g_buf);   /* dry is not a float= term */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);   /* the dry latch is not the flap */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);   /* nor the contradiction */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=1"), g_buf);   /* dry is not a float= term */
   safety_dry_set(false);                           /* `dry off`: the only way back */
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=0"), g_buf);
 }
 
 /* The contradiction alone: an emitter reading flap || contra on ch210, or dry || contra on
@@ -221,10 +203,10 @@ static void test_ch207_alone_leaves_ch210_and_ch211_at_zero(void) {
   TEST_ASSERT_FALSE(safety_float_flap());
   TEST_ASSERT_FALSE(safety_dry());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);   /* the contradiction is not the flap */
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);   /* nor the dry latch */
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=0"), g_buf);   /* the contradiction is not the flap */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);   /* nor the dry latch */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=0"), g_buf);
 }
 
 /* Both up on one report catches an emitter in which one latch masks the other. dry off then
@@ -237,13 +219,13 @@ static void test_ch210_and_ch211_are_both_one_when_both_latches_stand(void) {
   TEST_ASSERT_TRUE(safety_float_flap());
   TEST_ASSERT_TRUE(safety_dry());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);       /* the flap forces it; dry does not */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=0"), g_buf);       /* the flap forces it; dry does not */
   safety_dry_set(false);
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=0"), g_buf);
 }
 
 static void test_report_pos_is_unknown_while_the_going_live_flag_is_set(void) {
@@ -251,8 +233,8 @@ static void test_report_pos_is_unknown_while_the_going_live_flag_is_set(void) {
   fresh_sweep();
   TEST_ASSERT_EQUAL_INT(1, PB_REPORT_POS_UNKNOWN);   /* ships at 1 */
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("pos=unknown"));
-  TEST_ASSERT_FALSE(has_tok("pos=ok"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "pos=unknown"));
+  TEST_ASSERT_FALSE(pb_has_tok(g_buf, "pos=ok"));
 #else
   TEST_IGNORE_MESSAGE("going-live arm: [env:native_live] sets the flag to 0; see native");
 #endif
@@ -270,7 +252,7 @@ static void test_report_pos_is_unknown_while_the_dry_latch_is_set(void) {
   TEST_ASSERT_TRUE(cart_begin());
   TEST_ASSERT_FALSE(cart_pos_known());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);   /* no home seen since boot */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "pos=unknown"), g_buf);   /* no home seen since boot */
 
   sim_set_screw_pulse_ms(2);
   sim_set_home_region(0, 40);
@@ -279,19 +261,19 @@ static void test_report_pos_is_unknown_while_the_dry_latch_is_set(void) {
   TEST_ASSERT_TRUE(cart_pos_known());
   TEST_ASSERT_TRUE(sensors_i2c_healthy());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=ok"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "pos=ok"), g_buf);
 
   safety_dry_set(true);
   TEST_ASSERT_TRUE(cart_pos_known());              /* dry moves nothing: only the word changes */
   TEST_ASSERT_TRUE(sensors_i2c_healthy());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
-  TEST_ASSERT_FALSE_MESSAGE(has_tok("pos=ok"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=1"), g_buf);
+  TEST_ASSERT_FALSE_MESSAGE(pb_has_tok(g_buf, "pos=ok"), g_buf);
 
   safety_dry_set(false);                           /* `dry off`: the only way back */
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=ok"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "pos=ok"), g_buf);
 #endif
 }
 
@@ -308,14 +290,14 @@ static void test_report_pos_is_unknown_after_the_expander_goes_unhealthy(void) {
   sim_set_cart_at(PB_PULSES_HOME_TO_1 + 4u * PB_PULSES_PER_GATE);
   TEST_ASSERT_TRUE_MESSAGE(cart_home(), "arrange: a homed cart");
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=ok"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "pos=ok"), g_buf);
 
   sim_set_i2c_fail(true);
   for (uint8_t i = 0; i < PB_I2C_FAIL_LIMIT; ++i) (void)sensors_select(0);
   TEST_ASSERT_FALSE(sensors_i2c_healthy());
   TEST_ASSERT_TRUE(cart_pos_known());              /* the cart has not moved: only the bus is gone */
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "pos=unknown"), g_buf);
 #endif
 }
 
@@ -325,7 +307,7 @@ static void test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated(void)
   TEST_ASSERT_EQUAL_INT(0, PB_PULSES_PER_GATE);
   TEST_ASSERT_FALSE(cart_pos_known());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("pos=unknown"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "pos=unknown"));
 #else
   TEST_IGNORE_MESSAGE("calibrated arm: PB_PULSES_PER_GATE != 0; see native");
 #endif
@@ -335,32 +317,32 @@ static void test_report_omits_flow_ml_when_there_is_no_ack(void) {
   fresh_sweep();
   report_clear_ack();
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_FALSE(has_key("ack="));
-  TEST_ASSERT_FALSE(has_key("flow_ml="));
+  TEST_ASSERT_FALSE(pb_has_key(g_buf, "ack="));
+  TEST_ASSERT_FALSE(pb_has_key(g_buf, "flow_ml="));
 }
 
 static void test_report_never_emits_ack_without_flow_ml(void) {
   fresh_sweep();
   report_set_ack(17, 0, "float");        /* a refusal: flow_ml is 0, and MUST be present */
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("ack=17"));
-  TEST_ASSERT_TRUE(has_tok("flow_ml=0"));
-  TEST_ASSERT_TRUE(has_tok("err=float"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "ack=17"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "flow_ml=0"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "err=float"));
 }
 
 static void test_report_never_emits_ack_zero(void) {
   fresh_sweep();
   report_set_ack(0, 0, "none");          /* ack is _int_in(v,"ack",1,2**63): 0 400s the report */
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_FALSE(has_key("ack="));
+  TEST_ASSERT_FALSE(pb_has_key(g_buf, "ack="));
 }
 
 static void test_report_ack_id_survives_above_sixty_five_thousand(void) {
   fresh_sweep();
   report_set_ack(4294967295u, 1000, "none");
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("ack=4294967295"));
-  TEST_ASSERT_TRUE(has_tok("flow_ml=1000"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "ack=4294967295"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "flow_ml=1000"));
 }
 
 /* No report may be built while the ack slot reads err=recv: butler would mark the command
@@ -377,9 +359,9 @@ static void test_report_build_refuses_while_the_ack_slot_still_reads_recv(void) 
                                                 the real result */
   TEST_ASSERT_TRUE(report_may_build());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("ack=23"));
-  TEST_ASSERT_TRUE(has_tok("flow_ml=248"));
-  TEST_ASSERT_FALSE(has_tok("err=recv"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "ack=23"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "flow_ml=248"));
+  TEST_ASSERT_FALSE(pb_has_tok(g_buf, "err=recv"));
 }
 
 static void test_report_t_is_unsigned_at_and_above_two_to_the_thirty_one(void) {
@@ -393,7 +375,7 @@ static void test_report_t_is_unsigned_at_and_above_two_to_the_thirty_one(void) {
     TEST_ASSERT_EQUAL_UINT32(targets[i], report_t_wire());
     char t[32];
     snprintf(t, sizeof t, "t=%lu", (unsigned long)targets[i]);
-    TEST_ASSERT_TRUE(has_tok(t));
+    TEST_ASSERT_TRUE(pb_has_tok(g_buf, t));
     TEST_ASSERT_NULL(strstr(g_buf, "t=-"));   /* a signed conversion here 400s every
                                                  report, forever */
   }
@@ -446,7 +428,7 @@ static void test_a_saturated_diagnostic_counter_stays_inside_max_raw(void) {
   TEST_ASSERT_TRUE(build() > 0);
   char clamp[24];
   snprintf(clamp, sizeof clamp, "ch205=%lu", (unsigned long)PB_DIAG_CLAMP);
-  TEST_ASSERT_TRUE(has_tok(clamp));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, clamp));
 }
 
 /* Every index, ch210 and ch211 included: through report_build() the latches are booleans and
@@ -462,7 +444,7 @@ static void test_every_diagnostic_channel_is_clamped_on_the_wire_the_two_latches
   for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) {
     char tok[24];
     snprintf(tok, sizeof tok, "ch%lu=%lu", (unsigned long)(200u + i), (unsigned long)PB_DIAG_CLAMP);
-    TEST_ASSERT_TRUE_MESSAGE(has_tok(tok), g_buf);
+    TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, tok), g_buf);
   }
   TEST_ASSERT_EQUAL_UINT16((uint16_t)(PB_DIAG_CHANNELS * 13), n);   /* " chNNN=999999" x 12 */
 
@@ -488,14 +470,14 @@ static void test_ch205_counts_leak_pulses_and_err_leak_reaches_the_wire(void) {
   pulses_leak_poll(false);
   TEST_ASSERT_TRUE(pulses_leak_count() > 0u);
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_FALSE(has_tok("ch205=0"));
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=leak"), g_buf);
+  TEST_ASSERT_FALSE(pb_has_tok(g_buf, "ch205=0"));
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "err=leak"), g_buf);
 }
 
 static void test_ch204_is_zero_before_d5_has_ever_changed_not_a_sentinel(void) {
   fresh_sweep();
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("ch204=0"));  /* never -1, "unknown" or "never": _int_in 400s those */
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "ch204=0"));  /* never -1, "unknown" or "never": _int_in 400s those */
 }
 
 static void test_report_err_token_never_contains_whitespace(void) {
@@ -511,7 +493,7 @@ static void test_report_err_token_never_contains_whitespace(void) {
   safety_set_err("resetmid");
   report_clear_ack();
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("err=resetmid"));
+  TEST_ASSERT_TRUE(pb_has_tok(g_buf, "err=resetmid"));
 }
 
 static void test_report_refuses_to_send_on_truncation_and_says_txcap(void) {
@@ -537,7 +519,7 @@ static void test_a_break_inside_the_stack_margin_latches_err_heap(void) {
   TEST_ASSERT_FALSE(report_heap_ok());
   report_clear_ack();
   TEST_ASSERT_TRUE(build() > 0);                       /* a report saying heap beats no report */
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=heap"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "err=heap"), g_buf);
 }
 
 /* PB_BODY_WORST_SUM is a hand sum of every field at its widest; this builds that body and
@@ -552,13 +534,13 @@ static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
   sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt() - 1u));   /* jump, never 2^31 steps */
   report_set_ack(4294967295u, PB_DOSE_MAX_ML, "resetmid");
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("t=4294967295"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch0=16383"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch5=16383"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ack=4294967295"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("flow_ml=1000"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=resetmid"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "t=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch0=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch5=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ack=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "flow_ml=1000"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "err=resetmid"), g_buf);
   TEST_ASSERT_TRUE(strlen(g_buf) < PB_BODY_CAP);
 
   /* the diagnostic block as built: from the first diagnostic to the space before float= */
@@ -628,22 +610,22 @@ static void test_report_build_fits_the_buffer_with_every_host_drivable_field_at_
 
   char clamp[24];
   snprintf(clamp, sizeof clamp, "ch204=%lu", (unsigned long)PB_DIAG_CLAMP);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok(clamp), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, clamp), g_buf);
   snprintf(clamp, sizeof clamp, "ch205=%lu", (unsigned long)PB_DIAG_CLAMP);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok(clamp), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("t=4294967295"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch0=16383"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch5=16383"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, clamp), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "t=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch0=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch5=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch207=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "float=0"), g_buf);
   /* the wider word on every arm: the flag forces it here, the dry latch and no home seen do
      under native_live */
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("ack=4294967295"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("flow_ml=1000"), g_buf);
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=resetmid"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "ack=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "flow_ml=1000"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(g_buf, "err=resetmid"), g_buf);
 }
 
 /* backend/fake_device.py's build_report() is the shape butler was written against:

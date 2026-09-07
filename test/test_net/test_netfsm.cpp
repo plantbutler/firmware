@@ -784,7 +784,7 @@ static void test_a_stop_command_is_acked(void) {
   TEST_ASSERT_FALSE(report_ack_is_recv());
   report_stamp();
   char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
-  TEST_ASSERT_NOT_NULL(strstr(b, " ack=31 flow_ml=0 err=stop"));
+  TEST_ASSERT_TRUE(pb_has_tok(b, "ack=31 flow_ml=0 err=stop"));
 }
 
 static void test_a_failed_goto_still_acks(void) {
@@ -796,7 +796,7 @@ static void test_a_failed_goto_still_acks(void) {
   exec_pending();
   report_stamp();
   char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
-  TEST_ASSERT_NOT_NULL(strstr(b, " ack=17 flow_ml=0 err=goto"));
+  TEST_ASSERT_TRUE(pb_has_tok(b, "ack=17 flow_ml=0 err=goto"));
 }
 
 static void test_an_out_of_range_outlet_acks_range_and_never_reaches_the_cart(void) {
@@ -805,9 +805,9 @@ static void test_an_out_of_range_outlet_acks_range_and_never_reaches_the_cart(vo
      the compare. The check runs before the cart is consulted, so it holds on every arm. */
   static const struct { const char *body; const char *want; } k[] = {
     { "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=51 water=0 ml=100 cap_s=10\n",
-      " ack=51 flow_ml=0 err=range" },
+      "ack=51 flow_ml=0 err=range" },
     { "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=52 water=6 ml=100 cap_s=10\n",
-      " ack=52 flow_ml=0 err=range" },
+      "ack=52 flow_ml=0 err=range" },
   };
   for (unsigned i = 0; i < sizeof k / sizeof k[0]; ++i) {
     pb_test_setup();
@@ -818,8 +818,8 @@ static void test_an_out_of_range_outlet_acks_range_and_never_reaches_the_cart(vo
     exec_pending();
     report_stamp();
     char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
-    TEST_ASSERT_NOT_NULL(strstr(b, k[i].want));
-    TEST_ASSERT_NULL(strstr(b, "err=goto"));   /* it never got as far as the cart */
+    TEST_ASSERT_TRUE(pb_has_tok(b, k[i].want));
+    TEST_ASSERT_FALSE(pb_has_tok(b, "err=goto"));   /* it never got as far as the cart */
   }
 }
 
@@ -840,8 +840,8 @@ static void test_every_terminal_path_in_exec_pending_sets_an_ack(void) {
     TEST_ASSERT_FALSE(report_ack_is_recv());
     report_stamp();
     char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
-    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, " ack="), "a terminal path left no ack");
-    TEST_ASSERT_NOT_NULL(strstr(b, " flow_ml="));
+    TEST_ASSERT_TRUE_MESSAGE(pb_has_key(b, "ack="), "a terminal path left no ack");
+    TEST_ASSERT_TRUE(pb_has_key(b, "flow_ml="));
   }
 }
 
@@ -855,7 +855,7 @@ static void test_refused_dose_acks_with_flow_ml_zero_and_an_err_token(void) {
   exec_pending();
   report_stamp();
   char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
-  TEST_ASSERT_NOT_NULL(strstr(b, "flow_ml=0"));   /* an ACKED refusal charges the pot 0 ml */
+  TEST_ASSERT_TRUE(pb_has_tok(b, "flow_ml=0"));   /* an ACKED refusal charges the pot 0 ml */
 }
 
 static void test_pending_ack_rides_the_next_report_after_every_discard_path(void) {
@@ -870,7 +870,7 @@ static void test_pending_ack_rides_the_next_report_after_every_discard_path(void
   uint16_t n = 0;
   const char *tx = (const char *)link_fake_sent(&n);
   TEST_ASSERT_TRUE(n > 0);
-  TEST_ASSERT_NOT_NULL(strstr(tx, " ack=17 "));                 /* still on the next one */
+  TEST_ASSERT_TRUE(pb_has_tok(tx, "ack=17"));                   /* still on the next one */
 }
 
 static void test_err_recv_never_reaches_the_wire(void) {
@@ -881,7 +881,7 @@ static void test_err_recv_never_reaches_the_wire(void) {
   uint16_t n = 0;
   const char *tx = (const char *)link_fake_sent(&n);
   TEST_ASSERT_TRUE(n > 0);
-  TEST_ASSERT_NULL(strstr(tx, "err=recv"));
+  TEST_ASSERT_FALSE(pb_has_tok(tx, "err=recv"));
 }
 
 /* Under PB_PULSES_PER_GATE == 0 cart_goto() always fails, so the dose and its summary line
@@ -968,9 +968,9 @@ static void test_a_granted_backend_dose_acks_the_millilitres_that_actually_flowe
   report_stamp();
   char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
   char want[24];
-  snprintf(want, sizeof want, " flow_ml=%u", (unsigned)dose_flow_ml());
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, want), b);      /* the HONEST millilitres, on the wire */
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(b, " ack=17"), b);
+  snprintf(want, sizeof want, "flow_ml=%u", (unsigned)dose_flow_ml());
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(b, want), b);      /* the HONEST millilitres, on the wire */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(b, "ack=17"), b);
 #endif
 }
 
