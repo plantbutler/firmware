@@ -22,6 +22,9 @@ skipped=()
 fail() { printf 'FAIL  %s\n' "$*" >&2; fails=$((fails + 1)); }
 ok()   { printf 'ok    %s\n' "$*"; oks=$((oks + 1)); }
 
+# built <env>: that environment has compiled at least one object. The directory alone is not
+# proof: the idedata step below creates it with only a json file in it.
+built() { [ -n "$(find ".pio/build/$1" -name '*.o' -print -quit 2>/dev/null)" ]; }
 # skip <n-invariants> <what> <how to run it>; n keeps ok + FAIL + skipped equal to TOTAL below.
 skip() {
   skips=$((skips + $1))
@@ -233,19 +236,19 @@ check_files 2 'PB_BRINGUP' src lib -- \
 
 # Nothing under src/ includes a lib/Network header, so the dependency finder alone never
 # builds it; only the object (under a hashed lib<n>/ dir, hence find) proves lib_deps did.
-if [ -d .pio/build/uno_r4_wifi ]; then
+if built uno_r4_wifi; then
   expect 1 "$(find .pio/build/uno_r4_wifi -name 'link_wifi.cpp.o' 2>/dev/null | wc -l | tr -d ' ')" \
     "uno_r4_wifi compiles lib/Network's driver (link_wifi.cpp.o present)"
 else
   skip 1 'uno_r4_wifi builds lib/Network' 'pio run -e uno_r4_wifi'
 fi
-if [ -d .pio/build/uno_r4_wifi_bringup ]; then
+if built uno_r4_wifi_bringup; then
   expect 1 "$(find .pio/build/uno_r4_wifi_bringup -name 'link_wifi.cpp.o' 2>/dev/null | wc -l | tr -d ' ')" \
     "uno_r4_wifi_bringup compiles lib/Network's driver (link_wifi.cpp.o present)"
 else
   skip 1 'uno_r4_wifi_bringup builds lib/Network' 'pio run -e uno_r4_wifi_bringup'
 fi
-if [ -d .pio/build/uno_r4_wifi_test ]; then
+if built uno_r4_wifi_test; then
   expect 1 "$(find .pio/build/uno_r4_wifi_test -name 'link_wifi.cpp.o' 2>/dev/null | wc -l | tr -d ' ')" \
     "uno_r4_wifi_test compiles lib/Network's driver (link_wifi.cpp.o present)"
 else
@@ -290,7 +293,7 @@ else
 fi
 
 # PIN_PUMP_EN is a macro and leaves no symbol; only the compiled file set proves no pump driver.
-if [ -d .pio/build/uno_r4_wifi_sim ]; then
+if built uno_r4_wifi_sim; then
   expect 0 "$([ -e .pio/build/uno_r4_wifi_sim/src/hal_uno.cpp.o ] && echo 1 || echo 0)" \
     "the sim env compiles no pump driver (hal_uno.cpp absent, or D6 could be driven with 12 V on COM)"
   expect 1 "$([ -e .pio/build/uno_r4_wifi_sim/src/hal_sim.cpp.o ] && echo 1 || echo 0)" \
