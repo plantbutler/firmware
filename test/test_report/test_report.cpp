@@ -169,14 +169,20 @@ static void test_ch210_and_ch211_are_zero_on_a_clean_boot(void) {
 /* The flap trips on the PB_FLOAT_FLAP_LIMIT-th consecutive float refusal (safety.h: the
    predicate is >=) and is cleared on dose_end_ml_()'s path, which only a GRANTED dose
    reaches -- so the clear below is a real dose_run() that flows to its target, the same
-   fixture test_dose.cpp drives DOSE_OK with, not the accessor called with false. */
+   fixture test_dose.cpp drives DOSE_OK with, not the accessor called with false.
+
+   The sibling is asserted at 0 at both points (spec §5 A4): with only ch210=1 checked, an
+   emitter that put `flap || dry` on BOTH channels passed this file whole. Run and reverted:
+   that merge now fails here on ch211=0, and the dry case below fails it on ch210=0. */
 static void test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dose(void) {
   fresh_sweep();
   sim_set_float(true);
   for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);
   TEST_ASSERT_TRUE(safety_float_flap());
+  TEST_ASSERT_FALSE(safety_dry());
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);   /* the flap is not the dry latch */
   TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);   /* unchanged: the flap still forces it */
 
   pb_advance(PB_BOOT_GAP_MS + 1u);
@@ -190,22 +196,50 @@ static void test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dos
   TEST_ASSERT_FALSE(safety_float_flap());
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("float=1"), g_buf);
 }
 
 /* With the tank reading OK, ch211=1 rides beside float=1: the dry latch is in pos='s formula
    (test_report_pos_is_unknown_while_the_dry_latch_is_set), not in float='s. Pinned because
    AGENTS.md and report.cpp's own comment once grouped all three latches as float='s
-   explainers -- an `&& !safety_dry()` added to the fl line on that reading fails here. */
+   explainers -- an `&& !safety_dry()` added to the fl line on that reading fails here.
+   ch210 is asserted at 0 beside it, for the reason the flap case above gives. */
 static void test_ch211_is_one_while_the_dry_latch_stands(void) {
   fresh_sweep();
   sim_set_float(true);
   safety_dry_set(true);
+  TEST_ASSERT_FALSE(safety_float_flap());
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);   /* the dry latch is not the flap */
   TEST_ASSERT_TRUE_MESSAGE(has_tok("float=1"), g_buf);   /* dry is not a float= term */
   safety_dry_set(false);                           /* `dry off`: the only way back */
   TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
+}
+
+/* Both latches up on ONE report, both channels 1 (spec §5 A4's other half). The two cases
+   above never latch both, so an emitter in which one latch MASKS the other -- ch210 as
+   `flap && !dry`, or ch211 as `dry && !flap` -- read correctly in each of them and passed
+   this file whole; either masking now fails here on the channel it zeroes. `dry off` then
+   drops only ch211: the flap is still standing, and the wire still says so. */
+static void test_ch210_and_ch211_are_both_one_when_both_latches_stand(void) {
+  fresh_sweep();
+  sim_set_float(true);
+  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);
+  safety_dry_set(true);
+  TEST_ASSERT_TRUE(safety_float_flap());
+  TEST_ASSERT_TRUE(safety_dry());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);       /* the flap forces it; dry does not */
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);   /* dry forces this one */
+  safety_dry_set(false);
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
 }
 
@@ -915,6 +949,7 @@ int main(void) {
   RUN_TEST(test_ch210_and_ch211_are_zero_on_a_clean_boot);
   RUN_TEST(test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dose);
   RUN_TEST(test_ch211_is_one_while_the_dry_latch_stands);
+  RUN_TEST(test_ch210_and_ch211_are_both_one_when_both_latches_stand);
   RUN_TEST(test_report_pos_is_unknown_while_the_going_live_flag_is_set);
   RUN_TEST(test_report_pos_is_unknown_while_the_dry_latch_is_set);
   RUN_TEST(test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated);
