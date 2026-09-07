@@ -18,7 +18,14 @@
 static char g_buf[PB_BODY_CAP];
 static char g_blk[PB_BODY_CAP];     /* the diagnostic block alone, at its clamp width */
 
-void setUp(void)    { pb_test_setup(); sensors_begin(); memset(g_buf, 0, sizeof g_buf); }
+/* cart_begin() here for the reason test_cart.cpp calls it at the top of every case: cart.cpp's
+   g_home_seen/g_pos_valid are process-lifetime and sim_reset() does not reach them, so a case
+   that homes the cart (the pos= cases under native_live) would otherwise leave pos=ok and
+   ch208=1 standing for every case after it. Unseen while the flag forced pos=unknown. */
+void setUp(void) {
+  pb_test_setup(); sensors_begin(); (void)cart_begin();
+  memset(g_buf, 0, sizeof g_buf);
+}
 void tearDown(void) { pb_test_teardown(); }
 
 /* A clean sweep: six wired channels with distinct values, and a canary that matches none. */
@@ -236,7 +243,6 @@ static void test_ch210_and_ch211_are_both_one_when_both_latches_stand(void) {
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);       /* the flap forces it; dry does not */
-  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);   /* dry forces this one */
   safety_dry_set(false);
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
@@ -244,19 +250,86 @@ static void test_ch210_and_ch211_are_both_one_when_both_latches_stand(void) {
 }
 
 static void test_report_pos_is_unknown_while_the_going_live_flag_is_set(void) {
+#if PB_REPORT_POS_UNKNOWN
   fresh_sweep();
   TEST_ASSERT_EQUAL_INT(1, PB_REPORT_POS_UNKNOWN);   /* ships defined — §4.6 */
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE(has_tok("pos=unknown"));
   TEST_ASSERT_FALSE(has_tok("pos=ok"));
+#else
+  TEST_IGNORE_MESSAGE("going-live arm: [env:native_live] sets the flag to 0; see native");
+#endif
 }
 
+/* The dry term of pos_ok, `!safety_dry() && cart_pos_known() && sensors_i2c_healthy()`
+   (report.cpp; spec §2.10, §4.6: otherwise water_rules queues doses the board will refuse
+   and ack, paging HIGH once per cooldown, forever). It can be seen under [env:native_live]
+   and NOWHERE else: every other env has PB_REPORT_POS_UNKNOWN at 1, where the #if arm says
+   unknown before the formula is reached, and [env:native] with the flag off would still not
+   do, because cart_pos_known() is a compile-time false while the pitch is uncalibrated. So
+   this case ran vacuous from the day it was written -- dropping `!safety_dry() &&` from
+   report.cpp passed it, and passed the two later assertions that repeated it -- and the flag
+   guard below is what makes that visible as IGNORED rather than PASSED. Under native_live:
+   a homed cart says pos=ok, `dry on` turns that into unknown with the cart not moved and the
+   bus still healthy, and `dry off` gives it back. The first report, before the home, pins the
+   middle term the same way. */
 static void test_report_pos_is_unknown_while_the_dry_latch_is_set(void) {
+#if PB_REPORT_POS_UNKNOWN || PB_PULSES_PER_GATE == 0
+  TEST_IGNORE_MESSAGE("pos=ok is unreachable here (flag on, or uncalibrated); see native_live");
+#else
   fresh_sweep();
-  safety_dry_set(true);
+  TEST_ASSERT_TRUE(cart_begin());
+  TEST_ASSERT_FALSE(cart_pos_known());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("pos=unknown"));
-  safety_dry_set(false);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);   /* no home seen since boot */
+
+  sim_set_screw_pulse_ms(2);
+  sim_set_home_region(0, 40);
+  sim_set_cart_at(PB_PULSES_HOME_TO_1 + 4u * PB_PULSES_PER_GATE);   /* over gate five */
+  TEST_ASSERT_TRUE_MESSAGE(cart_home(), "arrange: a homed cart");
+  TEST_ASSERT_TRUE(cart_pos_known());
+  TEST_ASSERT_TRUE(sensors_i2c_healthy());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=ok"), g_buf);
+
+  safety_dry_set(true);
+  TEST_ASSERT_TRUE(cart_pos_known());              /* dry moves nothing: only the word changes */
+  TEST_ASSERT_TRUE(sensors_i2c_healthy());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  TEST_ASSERT_FALSE_MESSAGE(has_tok("pos=ok"), g_buf);
+
+  safety_dry_set(false);                           /* `dry off`: the only way back */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=ok"), g_buf);
+#endif
+}
+
+/* The last term of the same formula, in the same arm: PB_I2C_FAIL_LIMIT failed expander
+   transfers (test_sensors.cpp's idiom) take sensors_i2c_healthy() down without moving the
+   cart, and pos= follows it to unknown. Pinned beside the dry case because the whole #else
+   arm was compiled nowhere before native_live existed, so no term of it had ever run. */
+static void test_report_pos_is_unknown_after_the_expander_goes_unhealthy(void) {
+#if PB_REPORT_POS_UNKNOWN || PB_PULSES_PER_GATE == 0
+  TEST_IGNORE_MESSAGE("pos=ok is unreachable here (flag on, or uncalibrated); see native_live");
+#else
+  fresh_sweep();
+  TEST_ASSERT_TRUE(cart_begin());
+  sim_set_screw_pulse_ms(2);
+  sim_set_home_region(0, 40);
+  sim_set_cart_at(PB_PULSES_HOME_TO_1 + 4u * PB_PULSES_PER_GATE);
+  TEST_ASSERT_TRUE_MESSAGE(cart_home(), "arrange: a homed cart");
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=ok"), g_buf);
+
+  sim_set_i2c_fail(true);
+  for (uint8_t i = 0; i < PB_I2C_FAIL_LIMIT; ++i) (void)sensors_select(0);
+  TEST_ASSERT_FALSE(sensors_i2c_healthy());
+  TEST_ASSERT_TRUE(cart_pos_known());              /* the cart has not moved: only the bus is gone */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
+#endif
 }
 
 static void test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated(void) {
@@ -640,6 +713,8 @@ static void test_report_build_fits_the_buffer_with_every_host_drivable_field_at_
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);
+  /* the WIDER word, on every arm: the flag forces it here, and under native_live the dry
+     latch and no-home-since-boot each do */
   TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("ack=4294967295"), g_buf);
   TEST_ASSERT_TRUE_MESSAGE(has_tok("flow_ml=1000"), g_buf);
@@ -1025,6 +1100,7 @@ int main(void) {
   RUN_TEST(test_ch210_and_ch211_are_both_one_when_both_latches_stand);
   RUN_TEST(test_report_pos_is_unknown_while_the_going_live_flag_is_set);
   RUN_TEST(test_report_pos_is_unknown_while_the_dry_latch_is_set);
+  RUN_TEST(test_report_pos_is_unknown_after_the_expander_goes_unhealthy);
   RUN_TEST(test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated);
   RUN_TEST(test_report_omits_flow_ml_when_there_is_no_ack);
   RUN_TEST(test_report_never_emits_ack_without_flow_ml);

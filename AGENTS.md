@@ -21,9 +21,11 @@ make compiledb       # compile_commands.json for clangd
 Five environments. `uno_r4_wifi` is the one left running; `uno_r4_wifi_bringup` is for
 bring-up 0-7d and is never left running; `uno_r4_wifi_test` runs the on-device suites;
 `uno_r4_wifi_sim` has no pump driver and no network stack; `native` runs the host suites.
-Four further environments — `native_bench`, `native_cal`, `native_measured`,
-`native_nosimcli` — are `native` plus exactly one flag each, and exist only so that four
-suites can be compiled a second time. Nothing uses `PLATFORMIO_BUILD_FLAGS`.
+Five further environments exist only so that a suite can be compiled a second time under
+the other arm of an `#if`: `native_bench`, `native_cal`, `native_measured` and
+`native_nosimcli` are `native` plus exactly one flag each, and `native_live` is `native_cal`
+plus `-DPB_REPORT_POS_UNKNOWN=0` — the going-live arm of `pos=`, stacked on the calibrated
+cart because `pos=ok` is unreachable without it. Nothing uses `PLATFORMIO_BUILD_FLAGS`.
 
 A fresh clone does not build until you create `include/secrets.h` (gitignored). Copy
 `include/secrets.h.example` and fill it in — it is the list, and it says "six names, no
