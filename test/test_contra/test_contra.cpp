@@ -1,13 +1,11 @@
 /* test_contra.cpp: the float/flow contradiction latch -- when it sets, what it refuses, what survives a reset, and how it reaches the wire. */
 #include <unity.h>
 #include <string.h>
-#include "../support/bodies.h"
 #include "../support/harness.h"
 #include "cart.h"
 #include "cli.h"
 #include "config.h"
 #include "exec.h"
-#include "netfsm.h"
 #include "report.h"
 #include "safety.h"
 #include "sim.h"
@@ -32,17 +30,6 @@ void test_latch_sets_when_the_float_said_ok_and_no_pulse_ever_arrived(void) {
 void test_latch_overrides_err_to_contra_on_the_dose_that_sets_it(void) {
   pb_latch_contra();
   TEST_ASSERT_EQUAL_STRING("contra", safety_last_err());
-}
-
-/* The float dropped: the two sensors agree that the tank ran out. Ordinary abort. */
-void test_latch_does_not_set_when_the_float_dropped_mid_dose(void) {
-  pb_advance(PB_BOOT_GAP_MS + 1u);
-  sim_set_float(true); sim_set_flow_ml_s(0);
-  sim_set_float_at_ms(500u, false);          /* the fake drops D5 mid-dose */
-  dose_req_t q = {0}; q.by_time = true;
-  q.cap_ms = PB_PRIME_MS_DEFAULT + PB_STALL_MS_DEFAULT + 1000u;
-  TEST_ASSERT_EQUAL(DOSE_ABORT_FLOAT, dose_run(&q));
-  TEST_ASSERT_FALSE(safety_contra());
 }
 
 /* Water was moving and then stopped -- a hose off a pot, a tank sucked dry mid-dose: the
@@ -122,9 +109,7 @@ void test_latch_refuses_every_subsequent_dose_including_a_console_one(void) {
 void test_latch_does_not_refuse_homing(void) {
   pb_latch_contra();
   safety_dry_set(true);                       /* both latches, at once */
-  sim_set_screw_pulse_ms(2);
-  sim_set_home_region(0u, 40u);
-  sim_set_cart_at(600u);
+  pb_arrange_homeable_cart(600u);
   TEST_ASSERT_TRUE(cart_home());
   TEST_ASSERT_TRUE(cart_parked());
   TEST_ASSERT_TRUE(safety_contra());          /* and homing did not clear it */
@@ -155,15 +140,16 @@ void test_latch_is_not_cleared_by_dry_off_or_by_a_successful_home(void) {
   pb_latch_contra();
   TEST_ASSERT_TRUE(cli_dispatch("dry off"));
   TEST_ASSERT_TRUE(safety_contra());
-  sim_set_screw_pulse_ms(2); sim_set_home_region(0u, 40u); sim_set_cart_at(600u);
+  pb_arrange_homeable_cart(600u);
   TEST_ASSERT_TRUE(cart_home());
   TEST_ASSERT_TRUE(safety_contra());
 }
 
-/* Dropping the float at 500 ms, as the mid-dose case above does, leaves elapsed < prime_ms,
-   so that case passes even without the latch's own fresh float read. Dropping it exactly at
-   the prime boundary makes every other latch condition hold -- DOSE_ABORT_FLOAT, elapsed
-   past prime_ms, zero pulses -- so that fresh read is the only thing between this dose and
+/* The float dropped: the two sensors agree that the tank ran out, so this is an ordinary
+   abort and never the latch. Dropped at 500 ms it would leave elapsed < prime_ms, and the
+   dose would pass this even without the latch's own fresh float read; dropped exactly at
+   the prime boundary every other latch condition holds -- DOSE_ABORT_FLOAT, elapsed past
+   prime_ms, zero pulses -- so that fresh read is the only thing between this dose and
    contra=1. */
 void test_latch_does_not_set_when_the_float_drops_at_the_prime_boundary(void) {
   pb_advance(PB_BOOT_GAP_MS + 1u);
@@ -179,10 +165,6 @@ void test_latch_does_not_set_when_the_float_drops_at_the_prime_boundary(void) {
 }
 
 static void test_boot_self_home_runs_under_both_latches(void) {
-  /* The cart's position statics have no teardown reset: an earlier case in this binary that
-     homed for real would leave cart_parked() true before exec_pending() ever runs here.
-     cart_begin() is the only reset. */
-  cart_begin();
   /* Contra first, then dry: the ladder refuses a dry dose rungs above where a granted dose
      could ever set contra, so the other order never latches at all. */
   pb_latch_contra();
@@ -214,7 +196,6 @@ int main(void) {
   UNITY_BEGIN();
   RUN_TEST(test_latch_sets_when_the_float_said_ok_and_no_pulse_ever_arrived);
   RUN_TEST(test_latch_overrides_err_to_contra_on_the_dose_that_sets_it);
-  RUN_TEST(test_latch_does_not_set_when_the_float_dropped_mid_dose);
   RUN_TEST(test_latch_does_not_set_when_flow_started_and_then_stalled);
   RUN_TEST(test_latch_does_not_set_when_the_dose_was_stopped_before_the_prime_window);
   RUN_TEST(test_latch_uses_the_doses_own_prime_window_not_the_configured_default);

@@ -1,6 +1,6 @@
 /* test_cli.cpp: the console line reader and commands, and the two screen renderers, on the host. */
+#include "../support/bodies.h"
 #include "../support/harness.h"
-#include "cart.h"
 #include "cli.h"
 #include "config.h"
 #include "hal.h"
@@ -10,6 +10,7 @@
 #include "safety.h"
 #include "sim.h"
 #include "ui.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unity.h>
@@ -134,6 +135,22 @@ static void test_ui_poll_is_a_noop_in_a_pass_where_a_modem_command_ran(void) {
 
 static void drain_tx(void) { char b[2048]; sim_serial_tx(b, sizeof b); }
 
+/* A dose that reaches its target. The printer ships in both binaries, and the console's pump
+   and calib are by time and never reach DOSE_OK, so a direct dose is the only route to the
+   summary line -- and so to its r=ok branch and its mls= field. The request is returned
+   because a caller may run it again to reach a refusal. */
+static dose_req_t arrange_granted_dose_(void) {
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  sim_set_float(true);
+  sim_set_flow_ml_s(85u);
+  dose_req_t q = {0};
+  q.ml = (uint16_t)PB_DOSE_RIG_MAX_ML;
+  q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  q.long_prime = true;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q), "arrange: a granted dose reaching target");
+  return q;
+}
+
 /* cli_poll() reads at most 32 bytes per call and the overlong-line case pushes ~136, so one
    call would never reach the newline; loop, with a fixed bound. */
 static size_t feed(const char *line, char *out, size_t cap) {
@@ -206,14 +223,16 @@ static void test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_
   char out[2048];
   size_t n = feed("status\n", out, sizeof out);
   out[n] = '\0';
-  TEST_ASSERT_NOT_NULL(strstr(out, "granted=5592ms"));
-  TEST_ASSERT_NOT_NULL(strstr(out, "alive=yes"));
+  char granted[32];
+  snprintf(granted, sizeof granted, "granted=%lums", (unsigned long)PB_WDT_GRANTED_MS);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(out, granted), granted);
+  TEST_ASSERT_TRUE(pb_has_tok(out, "alive=yes"));
   TEST_ASSERT_NOT_NULL(strstr(out, "WDT, not IWDT"));
-  TEST_ASSERT_NOT_NULL(strstr(out, "pump_on_level="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "pump_on_level="));
   sim_wdt_stop();
   n = feed("status\n", out, sizeof out);
   out[n] = '\0';
-  TEST_ASSERT_NOT_NULL(strstr(out, "alive=no"));
+  TEST_ASSERT_TRUE(pb_has_tok(out, "alive=no"));
 }
 
 /* Both banners, both states. The needle for the latched case is the whole sentence: the raw
@@ -301,21 +320,12 @@ static void test_no_float_formatting_appears_in_any_printed_line(void) {
     line = strtok(0, "\n");
   }
 
-  /* status alone never prints mls=, so the exemption went unexercised above. A real dose to
-     DOSE_OK is the only route to the summary line: the console's pump and calib are by time
-     and never reach it. */
-  pb_advance(PB_BOOT_GAP_MS + 1u);
-  sim_set_float(true);
-  sim_set_flow_ml_s(85u);
-  dose_req_t q = {0};
-  q.ml = (uint16_t)PB_DOSE_RIG_MAX_ML;
-  q.cap_ms = PB_DOSE_CAP_MS_MAX;
-  q.long_prime = true;
-  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q), "arrange: a granted dose reaching target");
+  /* status alone never prints mls=, so the exemption went unexercised above */
+  (void)arrange_granted_dose_();
   (void)sim_serial_tx(out, sizeof out);
   cli_print_dose_summary();
   n = sim_serial_tx(out, sizeof out); out[n] = '\0';
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, " mls="), out);   /* the exemption under test */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_key(out, "mls="), out);   /* the exemption under test */
   line = strtok(out, "\n");
   while (line) {
     scan_line_for_float_formatting_(line);
@@ -348,7 +358,7 @@ static void test_a_non_matching_byte_is_pushed_to_the_line_buffer_unread(void) {
   TEST_ASSERT_FALSE(cli_stop_requested());   /* not a stop, and not consumed either */
   cli_poll();                                /* reads the pushback FIRST */
   size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "granted="), out);   /* status actually ran */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_key(out, "granted="), out);   /* status actually ran */
 }
 
 /* dry on typed mid-dose sets the latch and raises the stop request: the word means the same
@@ -500,26 +510,17 @@ static void test_noinit_pattern_writes_the_known_word_and_recomputes_the_checksu
 #endif
 }
 
-/* r=ok for DOSE_OK and the real token otherwise, never the wire's "none". The printer ships in
-   both binaries, and the console's pump and calib are by time and never reach DOSE_OK, so a
-   direct dose is the only route to that branch. */
+/* r=ok for DOSE_OK and the real token otherwise, never the wire's "none". */
 static void test_dose_summary_line_prints_r_ok_only_for_a_successful_dose(void) {
   pb_test_setup();
-  pb_advance(PB_BOOT_GAP_MS + 1u);
-  sim_set_float(true);
-  sim_set_flow_ml_s(85u);
-  dose_req_t q = {0};
-  q.ml = (uint16_t)PB_DOSE_RIG_MAX_ML;
-  q.cap_ms = PB_DOSE_CAP_MS_MAX;
-  q.long_prime = true;
-  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q), "arrange: a granted dose reaching target");
+  dose_req_t q = arrange_granted_dose_();
   char out[512];
   (void)sim_serial_tx(out, sizeof out);
   cli_print_dose_summary();
   size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, " r=ok"), out);
-  TEST_ASSERT_NULL_MESSAGE(strstr(out, " r=none"), out);   /* err_of(DOSE_OK) is "none" on
-                                                               the wire; the SUMMARY must say ok */
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(out, "r=ok"), out);
+  TEST_ASSERT_FALSE_MESSAGE(pb_has_tok(out, "r=none"), out);   /* err_of(DOSE_OK) is "none" on
+                                                                   the wire; the SUMMARY must say ok */
 
   /* And the negative: a refused dose prints its real token, never "ok". */
   pb_advance(PB_DOSE_MIN_GAP_MS + 1u);      /* clear the 10 s cooldown between callers */
@@ -528,8 +529,8 @@ static void test_dose_summary_line_prints_r_ok_only_for_a_successful_dose(void) 
   (void)sim_serial_tx(out, sizeof out);
   cli_print_dose_summary();
   n = sim_serial_tx(out, sizeof out); out[n] = '\0';
-  TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, " r=float"), out);
-  TEST_ASSERT_NULL_MESSAGE(strstr(out, " r=ok"), out);
+  TEST_ASSERT_TRUE_MESSAGE(pb_has_tok(out, "r=float"), out);
+  TEST_ASSERT_FALSE_MESSAGE(pb_has_tok(out, "r=ok"), out);
 }
 
 static void test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls(void) {
@@ -543,11 +544,11 @@ static void test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls(void) {
   TEST_ASSERT_TRUE(cli_dispatch("pump 4000"));
   size_t n = sim_serial_tx(out, sizeof out); out[n] = '\0';
   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "dose outlet="), out);
-  TEST_ASSERT_NOT_NULL(strstr(out, " ms="));
-  TEST_ASSERT_NOT_NULL(strstr(out, " pulses="));
-  TEST_ASSERT_NOT_NULL(strstr(out, " ml="));
-  TEST_ASSERT_NOT_NULL(strstr(out, " mls="));
-  TEST_ASSERT_NOT_NULL(strstr(out, " r="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "ms="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "pulses="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "ml="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "mls="));
+  TEST_ASSERT_TRUE(pb_has_key(out, "r="));
   /* mls is integer tenths printed around a literal dot: the float conversions are banned */
   const char *mls = strstr(out, " mls=");
   TEST_ASSERT_NOT_NULL(strchr(mls, '.'));

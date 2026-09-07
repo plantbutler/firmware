@@ -7,7 +7,6 @@
 #include "config.h"
 #include "exec.h"
 #include "netfsm.h"
-#include "report.h"
 #include "sensors.h"
 #include "sim.h"
 
@@ -34,10 +33,7 @@ void test_home_from_outlet_five_actually_reaches_home(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: goto is compiled out");
 #else
-  TEST_ASSERT_TRUE(cart_begin());
-  sim_set_screw_pulse_ms(2);
-  sim_set_home_region(0, 40);
-  sim_set_cart_at(PB_PULSES_HOME_TO_1 + 4u * PB_PULSES_PER_GATE);   /* over gate five */
+  pb_arrange_homeable_cart(PB_PULSES_HOME_TO_1 + 4u * PB_PULSES_PER_GATE);   /* over gate five */
   TEST_ASSERT_TRUE(cart_home());
   TEST_ASSERT_TRUE(cart_parked());
   TEST_ASSERT_EQUAL_UINT32(0u, cart_pulses());
@@ -72,9 +68,7 @@ void test_position_is_unknown_after_boot_until_homed(void) {
    that needs the pitch too, so this holds only in the uncalibrated arm. */
 void test_pos_is_never_ok_before_calibration(void) {
 #if PB_PULSES_PER_GATE == 0
-  TEST_ASSERT_TRUE(cart_begin());
-  sim_set_screw_pulse_ms(2);
-  sim_set_home_region(0, 40);
+  pb_arrange_homeable_cart(0u);
   TEST_ASSERT_TRUE(cart_home());
   TEST_ASSERT_FALSE(cart_pos_known());
 #else
@@ -88,10 +82,7 @@ void test_goto_counts_pulses_not_milliseconds(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: goto is compiled out");
 #else
-  TEST_ASSERT_TRUE(cart_begin());
-  sim_set_home_region(0, 40);
-
-  sim_set_screw_pulse_ms(2);
+  pb_arrange_homeable_cart(0u);
   TEST_ASSERT_TRUE(cart_home());
   uint32_t t0 = hal_millis();
   TEST_ASSERT_TRUE(cart_goto(2));
@@ -116,9 +107,7 @@ void test_home_zeroes_the_count_only_when_the_hall_asserts(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("g_pulses can only be moved off zero by cart_goto(), which is compiled out");
 #else
-  TEST_ASSERT_TRUE(cart_begin());
-  sim_set_screw_pulse_ms(2);
-  sim_set_home_region(0, 40);
+  pb_arrange_homeable_cart(0u);
   TEST_ASSERT_TRUE(cart_home());
   TEST_ASSERT_TRUE(cart_goto(3));
   uint32_t before = cart_pulses();
@@ -132,9 +121,7 @@ void test_home_zeroes_the_count_only_when_the_hall_asserts(void) {
 
 /* "Not home" would drive the cart blind into the end of the screw. */
 void test_an_i2c_error_on_the_home_hall_is_unknown_not_not_home(void) {
-  TEST_ASSERT_TRUE(cart_begin());
-  sim_set_screw_pulse_ms(2);
-  sim_set_home_region(0, 40);
+  pb_arrange_homeable_cart(0u);
   sim_set_i2c_fail(true);
   TEST_ASSERT_FALSE(cart_home());
   TEST_ASSERT_EQUAL_STRING("i2c", cart_err());
@@ -144,9 +131,8 @@ void test_an_i2c_error_on_the_home_hall_is_unknown_not_not_home(void) {
 /* The clock starts within PB_MOVE_CAP_MS of the wrap and the hall is out of reach, so the
    deadline is the only way this can end. */
 void test_move_deadline_holds_across_a_millis_rollover(void) {
-  TEST_ASSERT_TRUE(cart_begin());
-  sim_set_screw_pulse_ms(2);
-  sim_set_home_region(9000u, 9001u);
+  pb_arrange_homeable_cart(0u);
+  sim_set_home_region(9000u, 9001u);      /* and then the hall out of reach */
   sim_set_clock_ms(0xFFFFF000u);
   uint32_t t0 = hal_millis();
   TEST_ASSERT_FALSE(cart_home());
@@ -157,10 +143,8 @@ void test_move_deadline_holds_across_a_millis_rollover(void) {
 }
 
 void test_home_that_times_out_leaves_position_unknown(void) {
-  TEST_ASSERT_TRUE(cart_begin());
-  sim_set_screw_pulse_ms(2);
-  sim_set_home_region(9000u, 9001u);
-  sim_set_cart_at(600u);
+  pb_arrange_homeable_cart(600u);
+  sim_set_home_region(9000u, 9001u);      /* and then the hall out of reach */
   TEST_ASSERT_FALSE(cart_home());
   TEST_ASSERT_EQUAL_STRING("timeout", cart_err());
   TEST_ASSERT_FALSE(cart_pos_known());
@@ -171,9 +155,7 @@ void test_stall_aborts_within_the_stall_window_and_loses_position(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: goto is compiled out");
 #else
-  TEST_ASSERT_TRUE(cart_begin());
-  sim_set_screw_pulse_ms(2);
-  sim_set_home_region(0, 40);
+  pb_arrange_homeable_cart(0u);
   TEST_ASSERT_TRUE(cart_home());
   sim_set_stall(true);
   uint32_t t0 = hal_millis();
@@ -206,10 +188,7 @@ void test_servo_is_stopped_on_every_exit_path(void) {
   const char *names[] = { "ok", "stall", "timeout", "i2c" };
   for (unsigned k = 0; k < 4u; ++k) {
     pb_test_setup();
-    TEST_ASSERT_TRUE(cart_begin());
-    sim_set_screw_pulse_ms(2);
-    sim_set_home_region(0, 40);
-    sim_set_cart_at(600u);
+    pb_arrange_homeable_cart(600u);
     if (k == 1u) sim_set_stall(true);
     if (k == 2u) sim_set_home_region(9000u, 9001u);
     if (k == 3u) sim_set_i2c_fail(true);
@@ -220,21 +199,14 @@ void test_servo_is_stopped_on_every_exit_path(void) {
   }
 }
 
-static void test_the_cart_is_parked_off_every_outlet_after_every_command_including_a_failed_goto(void) {
-  pb_test_setup();
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);   /* water=3; goto will fail */
-  net_begin(); exec_begin();
-  pb_net_passes(14, 100);
-  exec_pending();
-  TEST_ASSERT_TRUE(cart_parked());
-}
-
-static void test_the_cart_is_parked_after_a_stop_command_and_after_an_out_of_range_outlet(void) {
-  const char *bodies[2]; size_t lens[2];
-  bodies[0] = k_stop_200;         lens[0] = sizeof k_stop_200 - 1u;
-  bodies[1] = k_out_of_range_200; lens[1] = sizeof k_out_of_range_200 - 1u;
-  for (unsigned i = 0; i < 2; ++i) {
+/* Every command leaves the cart off every outlet: one that waters and whose goto fails, one
+   that stops, and one naming an outlet the board refuses. */
+static void test_the_cart_is_parked_after_every_command_including_a_failed_goto(void) {
+  const char *bodies[3]; size_t lens[3];
+  bodies[0] = k_cmd_200;          lens[0] = sizeof k_cmd_200 - 1u;   /* water=3; goto will fail */
+  bodies[1] = k_stop_200;         lens[1] = sizeof k_stop_200 - 1u;
+  bodies[2] = k_out_of_range_200; lens[2] = sizeof k_out_of_range_200 - 1u;
+  for (unsigned i = 0; i < 3; ++i) {
     pb_test_setup();
     link_fake_reset(); link_fake_set_state(LINK_UP);
     link_fake_queue_response(bodies[i], lens[i]);
@@ -259,7 +231,6 @@ int main(void) {
   RUN_TEST(test_stall_aborts_within_the_stall_window_and_loses_position);
   RUN_TEST(test_goto_rejects_an_outlet_outside_one_to_five);
   RUN_TEST(test_servo_is_stopped_on_every_exit_path);
-  RUN_TEST(test_the_cart_is_parked_off_every_outlet_after_every_command_including_a_failed_goto);
-  RUN_TEST(test_the_cart_is_parked_after_a_stop_command_and_after_an_out_of_range_outlet);
+  RUN_TEST(test_the_cart_is_parked_after_every_command_including_a_failed_goto);
   return UNITY_END();
 }

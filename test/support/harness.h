@@ -6,6 +6,7 @@
 #include <unity.h>
 
 #ifdef PB_SIM
+#include "cart.h"
 #include "cli.h"
 #include "exec.h"
 #include "netfsm.h"
@@ -25,13 +26,19 @@ static inline void pb_test_setup(void) {
 
 /* Every reset belongs here, not at the end of whichever case dirtied the state: Unity
    aborts a failing TEST_ASSERT_* with a longjmp straight into tearDown(), skipping every
-   line after it in the case body, and each of these is a process-lifetime static in another
-   translation unit that sim_reset() (hal_sim.cpp's own statics only) never touches.
-   tearDown() is the one place Unity guarantees runs however the case ended. The dose
-   cooldown reset to 0 reads as "no dose has ended yet", so the cooldown rung skips its check
-   outright instead of every case having to land its clock clear of the previous case's
-   leftover. report_clear_ack() and exec_begin() are production entry points that reset
-   exactly these statics and nothing else, so they need no test-only twin.
+   line after it in the case body, and most of these are process-lifetime statics in another
+   translation unit that sim_reset() (hal_sim.cpp's own statics only) never touches: the
+   dosing flag, the flap counter, the console's stop pushback, the dose cooldown, the dry
+   latch, the calibration (safety_force_bad_cal_() zeroes it), the bus health and cached
+   readings, the meter's leak flag, the cart's position, the ack, the retry budget and the
+   executive. tearDown() is the one place Unity guarantees runs however the case ended. The
+   dose cooldown reset to 0 reads as "no dose has ended yet", so the cooldown rung skips its
+   check outright instead of every case having to land its clock clear of the previous
+   case's leftover. sensors_begin(), cart_begin(), report_clear_ack() and exec_begin() are
+   production entry points that reset exactly these statics, so they need no test-only twin.
+   The two injector resets are hal_sim statics that the next setUp's sim_reset() clears as
+   well; they are here so teardown hands back the rig it was given, and so sensors_begin()
+   re-probes a working bus.
    Host-only: the _test_reset_ helpers do not exist in a device build. */
 static inline void pb_test_teardown(void) {
   sim_events_clear();
@@ -39,14 +46,38 @@ static inline void pb_test_teardown(void) {
   safety_float_refusal_count(false);
   cli_stop_clear();
   safety_reset_dose_cooldown_();
-  sensors_test_reset_health_();
+  safety_dry_set(false);
+  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);
+  sim_set_i2c_fail(false);
+  sim_flow_storm(0u);
+  (void)sensors_begin();
   pulses_test_reset_leak_();
+  (void)cart_begin();
   report_clear_ack();
   netfsm_test_reset_retry_();
   exec_begin();
 }
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }
+
+/* The rig nearly every dose case starts from: past the boot gap, the meter's tumbling
+   window rebased, the float reading OK and the pump delivering ml_s once it runs (0: a dry
+   line). What a case then changes is its own one line. */
+static inline void pb_arrange_dosable(uint16_t ml_s) {
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(ml_s);
+}
+
+/* A cart that can home: position statics reset, a screw that turns at 2 ms a pulse, the
+   home hall answering over pulses 0..40, and the cart standing at `at`. */
+static inline void pb_arrange_homeable_cart(uint32_t at) {
+  TEST_ASSERT_TRUE_MESSAGE(cart_begin(), "arrange: cart_begin()");
+  sim_set_screw_pulse_ms(2u);
+  sim_set_home_region(0u, 40u);
+  sim_set_cart_at(at);
+}
 
 static inline uint32_t pb_count(sim_ev_kind_t kind) {
   const sim_ev_t *ev; size_t n = sim_events(&ev); uint32_t hits = 0;
