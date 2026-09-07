@@ -1,5 +1,5 @@
-/* include/ui.h -- the two pure renderers and the coarsened painter (spec §5).
-   ui.cpp includes neither safety.h nor anything that can assert D6: spec §9 greps for it. */
+/* ui.h: the two pure renderers and the coarsened painter. ui.cpp includes neither
+   safety.h nor anything that can assert D6; the invariant check greps for it. */
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
@@ -7,7 +7,7 @@
 typedef struct {
   char        build[8];        /* "bench" | "bringup" | "sim" */
   char        controller[16];
-  uint32_t    uptime_min;      /* MINUTES, not seconds -- spec §5's bus rule */
+  uint32_t    uptime_min;      /* MINUTES, not seconds: the bus rule */
   bool        pos_known;
   uint8_t     pos;
   uint32_t    screw_pulses;
@@ -33,11 +33,10 @@ typedef struct {
 void ui_render(const ui_state_t *s, char rows[8][17]);
 void ui_render_lcd(const ui_state_t *s, char rows[2][17]);
 void ui_poll(const ui_state_t *s);
-/* net_poll() calls this DIRECTLY, in any pass that issued a modem command (task 24).
-   netfsm.cpp may include ui.h -- §9's grep over netfsm.cpp is safety.h|dose_run|
-   hal_pump_write, and ui.h is none of those. The alternative, main.cpp reading
-   net_modem_ran_this_pass() and forwarding it, was rejected: it puts a rule that exists
-   to bound ONE pass into a different translation unit from the pass that broke it. */
+/* net_poll() calls this DIRECTLY, in any pass that issued a modem command; netfsm.cpp may
+   include ui.h. The alternative, main.cpp forwarding net_modem_ran_this_pass(), was
+   rejected: it puts a rule that exists to bound ONE pass into a different translation
+   unit from the pass that broke it. */
 void ui_modem_ran(void);
 
 #ifdef PB_NATIVE
