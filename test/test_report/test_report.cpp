@@ -573,6 +573,79 @@ static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
   TEST_ASSERT_TRUE(PB_CONTROLLER_WIRE + 2u + PB_BODY_WORST_FIXED <= PB_BODY_CAP);
 }
 
+/* The runtime half of the case above. That one pins the table by SUBSTITUTING the diagnostic
+   block; this one builds the widest body report_build() itself can produce on the host, from
+   the real producers, and proves it reaches the wire: not dropped as txcap, under
+   PB_BODY_CAP, no longer than the table, every clamp applied on a value that actually
+   overflowed. What the host can drive: ch204 (the float-change age -- a clock jump of
+   ~2^32 ms puts it a thousandfold past the clamp), ch205 (the leak count, stormed past the
+   clamp as test_a_saturated_diagnostic_counter_stays_inside_max_raw does), ch209 to the
+   fake's whole 16384 reload (five digits: its ceiling, one short of the clamp), and the three
+   latches at 1 on one report -- ch207 by a real contradicting dose, ch210 by
+   PB_FLOAT_FLAP_LIMIT refusals, ch211 by `dry on` -- which no other case builds. What it
+   cannot, and why the equality stays with the case above: ch200..ch202 are constants in
+   hal_sim.cpp; ch203 gains three errors per PB_I2C_BACKOFF_MS of fake time and has no
+   setter; ch206 is a uint16_t whose only host writer is a seam-2 call check.sh keeps out of
+   this file; ch208 is a boolean. Those fields leave the body some forty bytes short of the
+   table, so the bound here is an inequality on the real path, not a second copy of the sum. */
+static void test_report_build_fits_the_buffer_with_every_host_drivable_field_at_its_widest(void) {
+  for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch) sim_set_channel(ch, 16383);  /* 14-bit maximum */
+  sim_set_channel(PB_CANARY_CHANNEL, 1);
+  sim_set_float(false);
+  TEST_ASSERT_TRUE(sensors_sweep());
+  sim_set_float(true);
+  TEST_ASSERT_TRUE(sensors_sweep());             /* a float change is on record: ch204 counts */
+
+  pb_latch_contra();                             /* ch207: float OK, no flow, a real dose */
+  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);   /* ch210 */
+  safety_dry_set(true);                                                            /* ch211 */
+
+  pulses_leak_poll(false);                       /* ch205: past the clamp, pump off, as loop() polls */
+  sim_flow_storm(2000);
+  for (int i = 0; i < 100 && pulses_leak_count() <= (uint32_t)PB_DIAG_CLAMP; ++i) {
+    sim_advance(10000);
+    pulses_leak_poll(false);
+  }
+  sim_flow_storm(0);
+  TEST_ASSERT_TRUE(pulses_leak_count() > (uint32_t)PB_DIAG_CLAMP);
+
+  sim_wdt_rate_hz(1000000u);                     /* ch209: the counter drains to 0 inside the probe */
+  (void)hal_wdt_alive();
+  sim_wdt_rate_hz(2929u);
+  TEST_ASSERT_TRUE(hal_wdt_last_delta() >= 10000u);   /* five digits: the whole reload */
+
+  /* Parked ONE step short, as the case above explains -- and nothing that reads the clock may
+     run between here and build(): sensors_float_change_age_s() is one hal_millis() call, and
+     asserting it here stamped t=0. Its clamp is read off the wire below instead. */
+  sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt() - 1u));   /* t= widest; ch204 past the clamp */
+  report_set_ack(4294967295u, PB_DOSE_MAX_ML, "resetmid");
+
+  const uint16_t n = build();
+  TEST_ASSERT_TRUE_MESSAGE(n > 0, "the widest host body was dropped as txcap");
+  TEST_ASSERT_EQUAL_UINT16(n, (uint16_t)strlen(g_buf));
+  TEST_ASSERT_TRUE(n < PB_BODY_CAP);
+  char c[16];
+  const int cw = snprintf(c, sizeof c, "c=%u", (unsigned)PB_CONTROLLER);
+  TEST_ASSERT_TRUE_MESSAGE(n <= (size_t)cw + PB_BODY_WORST_SUM, g_buf);   /* never longer than the table */
+
+  char clamp[24];
+  snprintf(clamp, sizeof clamp, "ch204=%lu", (unsigned long)PB_DIAG_CLAMP);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok(clamp), g_buf);
+  snprintf(clamp, sizeof clamp, "ch205=%lu", (unsigned long)PB_DIAG_CLAMP);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok(clamp), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("t=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch0=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch5=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ack=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("flow_ml=1000"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=resetmid"), g_buf);
+}
+
 /* backend/fake_device.py's build_report() is the shape butler was written against:
    "c= t= chN=... float= pos= ack= flow_ml=", space-joined, one trailing newline. Ours adds
    ch200..ch211 and err=; strip those and the two must be byte-identical. */
@@ -969,6 +1042,7 @@ int main(void) {
   RUN_TEST(test_report_refuses_to_send_on_truncation_and_says_txcap);
   RUN_TEST(test_a_break_inside_the_stack_margin_latches_err_heap);
   RUN_TEST(test_report_fits_the_buffer_at_maximum_field_widths);
+  RUN_TEST(test_report_build_fits_the_buffer_with_every_host_drivable_field_at_its_widest);
   RUN_TEST(test_report_matches_the_fake_device_shape);
   RUN_TEST(test_response_parses_next_only);
   RUN_TEST(test_response_parses_a_water_command);

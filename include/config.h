@@ -235,7 +235,10 @@ commit the number, and delete -DPB_ALLOW_UNCALIBRATED from [env:uno_r4_wifi]."
    hal_sim.cpp and four are booleans, so no host case reaches that width through
    report_build() itself), and asserts the total EQUALS PB_BODY_WORST_SUM. A thirteenth
    channel, a wider token or a hand-edit of the number below fails that case, which is what
-   "updated, not loosened" has to mean for a constant nothing else measures.
+   "updated, not loosened" has to mean for a constant nothing else measures. Its runtime
+   twin builds the widest body the host producers CAN make through report_build() -- ch204
+   and ch205 past the clamp, the three latches up at once -- and proves it reaches the wire
+   under the cap.
 
    The old PB_BODY_CAP of 288 therefore had NO margin at all: any PB_CONTROLLER longer
    than six characters overflowed, and the failure mode is err=txcap with the report
