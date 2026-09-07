@@ -30,7 +30,7 @@ Bring-up and bench work, each a different binary:
 make bringup       # pump, cal, servo, home, goto, hang commands compiled in; never left running
 make sim           # no pump driver, no network: drive the rig by hand. Unplug the 12 V supply first
 make calib         # bring-up binary plus the monitor; type calib to measure the pulses per litre
-make test-device   # the on-board test suite; needs the board and a slow HTTP listener
+make test-device   # the on-board suite; needs the board and a slow web server (see below)
 ```
 
 ## Environments
@@ -58,13 +58,13 @@ Two seams, each a header of plain functions with a board and a host implementati
 | `src/safety.cpp` | the only writer of the pump pin and the only watchdog feeder; the float debounce, the latches, `dose_run()` |
 | `src/netfsm.cpp` | the report and response state machine, one bounded network step per pass |
 | `src/report.cpp`, `src/exec.cpp` | the `k=v` report body; the one command per round trip that comes back |
-| `src/sensors.cpp`, `src/pulses.cpp` | the sensor multiplexer and I2C health; the flow and screw pulse counters |
-| `src/cli.cpp`, `src/ui.cpp` | the serial console (commands in the `k_commands` table); the two screens |
-| `src/noinit.cpp` | the bytes that survive a warm reset: the latches and a checksum |
+| `src/sensors.cpp`, `src/pulses.cpp` | the sensor multiplexer and the health of the two-wire bus the sensors and screens share; the flow and screw pulse counters |
+| `src/cli.cpp`, `src/ui.cpp` | the serial console (commands in the `k_commands` table); the two small screens |
+| `src/noinit.cpp` | the few bytes that survive a reset: the latches, plus a check value that catches a half-written one |
 | `src/hal_uno.cpp`, `src/hal_sim.cpp` | the hardware seam on the board and on the host |
 | `src/link_fake.cpp`, `lib/Network` | the network seam on the host and on the board |
 | `lib/Manifold` | the cart: a servo moving a magnet along a lead screw, counted in pulses |
-| `lib/Screen` | the OLED and the 16x2 LCD (address 0x27 or 0x3F, probed) |
+| `lib/Screen` | the two screens: a small dot-matrix panel and a 16x2 character display, each probed for its address |
 | `include/config.h` | every tunable, with the derivation of each limit |
 | `include/pins.h` | the wiring contract; no pin number lives anywhere else |
 | `test/` | one directory per suite; `test/support` holds the shared fixture |
@@ -79,5 +79,8 @@ the same number.
 - A power cycle clears the latches: they live in memory that survives a reset, not a power cut. A
   latched rig stays latched until a person reads `status` and decides.
 - A report interval under about 60 s stutters while a dose runs: a dose blocks for up to 60 s.
-- After a power event, look for gaps in the readings: the boot counter restarts, and two boots
-  can collide on the same timestamp inside the backend's duplicate window.
+- After a power event, look for gaps in the readings. The board has no clock, so it stamps each
+  report with its own uptime plus a per-boot offset. A power cut restarts that offset, two boots
+  can then stamp the same number, and the backend treats the second as a repeat and drops it.
+- `make test-device` needs something on the backend's address and port that accepts a connection,
+  waits about three seconds and then answers. It proves the board survives a slow reply.

@@ -9,7 +9,9 @@ entries 4 (the wire), 5 (what the firmware may decide) and 7 (safety) are what t
 
 `make check` runs 34 invariants; the ones below are the ones you will meet.
 
-- `src/safety.cpp` is the only writer of the pump pin and the only caller of the watchdog feeder.
+- `src/safety.cpp` is the only writer of the pump pin, and the only place that tells the
+  watchdog the program is alive. The watchdog is the timer that reboots the board if nothing
+  does.
   `dose_run()` has exactly one call site in `src/cli.cpp`.
 - The board library header is included only by `src/hal_uno.cpp`, `src/sim_console.cpp` and
   `lib/Screen`. Everything else reaches hardware through `include/hal.h`.
@@ -24,7 +26,8 @@ entries 4 (the wire), 5 (what the firmware may decide) and 7 (safety) are what t
 
 ## Traps
 
-- `make test` needs `include/secrets.h` even though the host never uses the values.
+- `make test` needs `include/secrets.h`: the values are compiled in even where nothing reads
+  them, so a missing file is a compile error rather than a runtime one.
 - `make check` exits 2 until `make build-all` has run. A build counts when it has objects.
 - `build_src_filter` replaces the base list; an environment that overrides it must repeat every
   exclusion it still wants.
