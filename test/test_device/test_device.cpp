@@ -20,8 +20,12 @@ static void test_wifi_begin_returns_within_two_seconds(void) {
 
 static void test_sock_open_from_a_stale_socket_completes_within_the_wdt_window(void) {
   while (link_state() != LINK_UP && hal_millis() < 30000u) { safety_tick(); }
-  TEST_ASSERT_EQUAL_INT(LINK_UP, link_state());
-  TEST_ASSERT_TRUE(sock_open());          /* leave it open and abandon it on purpose */
+  TEST_ASSERT_EQUAL_INT_MESSAGE(LINK_UP, link_state(),
+      "the link never came up in 30 s: check WIFI_SSID and WIFI_PASS in include/secrets.h and "
+      "that the access point is in range of the board");
+  /* left open and abandoned on purpose: the re-open below is what this case times */
+  TEST_ASSERT_TRUE_MESSAGE(sock_open(),
+      "nothing accepted a connection on HOST_NAME:HTTP_PORT (include/secrets.h)");
   /* No safety_tick() between the close and the re-open, deliberately: the device setup does
      not start the dog. Do not move hal_wdt_start() into it -- these two ATs (up to
      2 x PB_NET_STEP_MS) would then run unfed, and a slow round trip would reset the board
@@ -35,10 +39,14 @@ static void test_sock_open_from_a_stale_socket_completes_within_the_wdt_window(v
   TEST_ASSERT_LESS_THAN_UINT32(PB_WDT_GRANTED_MS, took);
 }
 
-/* Needs a deliberately slow responder on HOST_NAME:HTTP_PORT -- e.g. a listener that
-   accepts, waits three seconds, then answers -- running on the laptop before this suite. */
+/* The responder has to be deliberately slow -- accept, wait three seconds, then answer -- or
+   the loop below returns on its first read and proves nothing about a RECV pass that outlives
+   the watchdog grant. The elapsed time is asserted after the loop, so a fast one fails here
+   rather than passing quietly on no assertion of its own. */
 static void test_a_recv_pass_against_a_slow_responder_completes_within_the_wdt_window(void) {
-  TEST_ASSERT_TRUE(sock_open());
+  TEST_ASSERT_TRUE_MESSAGE(sock_open(),
+      "no listener on HOST_NAME:HTTP_PORT (include/secrets.h): before this suite, start one on "
+      "that host and port that accepts, waits three seconds, then answers");
   static const char req[] =
     "GET / HTTP/1.1\r\nHost: slow\r\nConnection: close\r\n\r\n";
   TEST_ASSERT_TRUE(sock_write((const uint8_t *)req, sizeof req - 1) > 0);
@@ -50,7 +58,11 @@ static void test_a_recv_pass_against_a_slow_responder_completes_within_the_wdt_w
     n = sock_read(rx, sizeof rx);
     TEST_ASSERT_LESS_THAN_UINT32(PB_WDT_GRANTED_MS, hal_millis() - t0);
   }
+  const uint32_t took = hal_millis() - t0;
   sock_close();
+  TEST_ASSERT_GREATER_OR_EQUAL_UINT32_MESSAGE(1000u, took,
+      "the listener on HOST_NAME:HTTP_PORT answered inside a second: it is an ordinary "
+      "responder, not the deliberately slow one this case needs");
 }
 
 static void test_wdt_alive_returns_true_on_real_silicon(void) {
