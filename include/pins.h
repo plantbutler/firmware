@@ -2,9 +2,9 @@
    number. Source of truth: cad/wiring/nets.py and the pin table it generates. */
 #pragma once
 
-/* The relay is active-high. Its polarity used to be a build flag with no default, so that a
-   board could not be flashed before someone had READ THE MODULE; the flag is still demanded
-   for that reason, and `status` prints the compiled level so bring-up can confirm it. */
+/* The relay is active-high, measured at bring-up. The build must still say so: a board is
+   not flashed before someone has read the relay module, and `status` prints the compiled
+   level so bring-up can confirm it. */
 #ifndef PB_RELAY_ACTIVE_HIGH
 #  error "Define PB_RELAY_ACTIVE_HIGH in platformio.ini build_flags after you have READ THE MODULE."
 #endif
