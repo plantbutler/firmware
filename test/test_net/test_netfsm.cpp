@@ -96,16 +96,42 @@ static void test_sock_write_records_the_bytes_and_the_write_count(void) {
   sock_close();
 }
 
-static void pump_passes(uint8_t n) { pb_net_passes(n, 0u); }
 static const char *k200 =
   "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\n\r\nnext=60\n";
 
+/* The FSM as setup() leaves it: sensors ready to sweep, link down, the first report due. */
+static void arrange_net_(void) { sensors_begin(); net_begin(); }
+
+/* Joined and parked in NET_IDLE with both refreshes still pending. */
+static void arrange_idle_(void) {
+  arrange_net_();
+  int guard = 0;
+  while (net_state() != NET_IDLE && guard++ < 40) pb_net_passes(1, 100);
+  TEST_ASSERT_EQUAL_MESSAGE(NET_IDLE, net_state(), "arrange: the FSM never joined");
+}
+
+/* A joined link with the backend's answer already queued, the FSM and exec fresh: the shape
+   of every command round trip. */
+static void arrange_up_with_response_(const char *raw) {
+  link_fake_reset(); link_fake_set_state(LINK_UP);
+  link_fake_queue_response(raw, strlen(raw));
+  net_begin(); exec_begin();
+}
+
+/* A first round trip is twelve passes: DOWN, JOIN_ISSUE, JOIN_WAIT, IDLE and its two
+   refresh-only passes, then SOCK_CLOSE, CONNECT, SEND, RECV, CLOSE, SOCK_CLOSE back to IDLE.
+   Idle passes are no-ops until the interval elapses, so two more is margin, not a second trip. */
+static const uint16_t k_round_trip_passes_      = 12;
+static const uint16_t k_round_trip_with_margin_ = k_round_trip_passes_ + 2;
+
+static constexpr uint32_t k_backoff_ladder_[] = PB_NET_BACKOFF_MS;
+/* past the first backoff rung, with slack for the pass that spent the timed-out AT */
+static const uint32_t k_past_first_backoff_ms_ = k_backoff_ladder_[0] + 500u;
+
 static void test_http_post_carries_host_token_and_content_length(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_queue_response(k200, strlen(k200));
-  pump_passes(10);   /* ten passes reach SEND: two refresh-only passes (signal, then address)
-                        precede NET_IDLE's first real one */
+  pb_net_passes(k_round_trip_passes_, 0);
   uint16_t n = 0;
   const char *tx = (const char *)link_fake_sent(&n);
   TEST_ASSERT_TRUE(n > 0);
@@ -122,10 +148,9 @@ static void test_http_post_carries_host_token_and_content_length(void) {
 }
 
 static void test_report_content_length_matches_the_bytes_actually_written(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_queue_response(k200, strlen(k200));
-  pump_passes(10);   /* ten passes reach SEND, as above */
+  pb_net_passes(k_round_trip_passes_, 0);
   uint16_t n = 0;
   const char *tx = (const char *)link_fake_sent(&n);
   const char *hdr = strstr(tx, "Content-Length: ");
@@ -135,20 +160,16 @@ static void test_report_content_length_matches_the_bytes_actually_written(void) 
   TEST_ASSERT_EQUAL_UINT32((uint32_t)claimed, (uint32_t)(n - (uint16_t)(body - tx)));
 }
 
-/* A first round trip is twelve passes: DOWN, JOIN_ISSUE, JOIN_WAIT, IDLE and its two
-   refresh-only passes, then SOCK_CLOSE, CONNECT, SEND, RECV, CLOSE, SOCK_CLOSE back to IDLE.
-   Fourteen leaves margin; idle passes are no-ops until the interval elapses. */
 static void test_socket_is_closed_on_success_error_timeout_and_a_failed_open(void) {
-  sensors_begin();
   /* success */
-  net_begin(); link_fake_queue_response(k200, strlen(k200));
-  pump_passes(14);
+  arrange_net_(); link_fake_queue_response(k200, strlen(k200));
+  pb_net_passes(k_round_trip_with_margin_, 0);
   TEST_ASSERT_EQUAL(NET_IDLE, net_state());
   TEST_ASSERT_TRUE(sock_open());          /* opens only because the socket was closed */
   sock_close();
   /* a failed open */
   net_begin(); link_fake_fail_open(true);
-  pump_passes(14);
+  pb_net_passes(k_round_trip_with_margin_, 0);
   link_fake_fail_open(false);
   TEST_ASSERT_TRUE(sock_open());          /* false if the failed open had not closed */
   sock_close();
@@ -161,8 +182,7 @@ static void test_socket_is_closed_on_success_error_timeout_and_a_failed_open(voi
 }
 
 static void test_connect_is_never_issued_without_a_close_in_a_prior_pass(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_queue_response(k200, strlen(k200));
   net_state_t prev = net_state();
   for (int i = 0; i < 24; ++i) {
@@ -174,8 +194,7 @@ static void test_connect_is_never_issued_without_a_close_in_a_prior_pass(void) {
 }
 
 static void test_no_pass_issues_more_than_two_at_commands(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_queue_response(k200, strlen(k200));
   for (int i = 0; i < 40; ++i) {
     link_fake_pass_begin();
@@ -185,8 +204,7 @@ static void test_no_pass_issues_more_than_two_at_commands(void) {
 }
 
 static void test_every_error_exit_transitions_to_sock_close_rather_than_closing_inline(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_fail_open(true);
   for (int i = 0; i < 24; ++i) {
     link_fake_pass_begin();
@@ -203,8 +221,7 @@ static void test_every_error_exit_transitions_to_sock_close_rather_than_closing_
 }
 
 static void test_sock_read_calls_neither_available_nor_connected(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_queue_response(k200, strlen(k200));
   for (int i = 0; i < 40; ++i) {
     link_fake_pass_begin();
@@ -221,10 +238,9 @@ static const char *k400 =
   "next=60\ncmd=1 water=3 ml=250 cap_s=30\n";
 
 static void test_response_is_never_parsed_from_a_four_hundred_body(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_queue_response(k400, strlen(k400));
-  pump_passes(12);   /* twelve: a full first round trip */
+  pb_net_passes(k_round_trip_passes_, 0);
   cmd_t c;
   TEST_ASSERT_FALSE(net_take_command(&c));      /* a 400 body echoes our own tokens back */
   TEST_ASSERT_EQUAL_UINT16(400, net_last_status());
@@ -234,13 +250,12 @@ static void test_response_is_never_parsed_from_a_four_hundred_body(void) {
 /* Round 2 is due only after the 60 s interval round 1's next=60 set, and its empty response
    then runs out a 5 s RECV deadline; only passes with a real time step cross both. */
 static void test_stale_bytes_in_the_rx_buffer_cannot_become_a_command(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   /* round 1: a complete 200 carrying a command */
   const char *with_cmd =
     "HTTP/1.1 200 OK\r\nContent-Length: 38\r\n\r\nnext=60\ncmd=5 water=3 ml=250 cap_s=30\n";
   link_fake_queue_response(with_cmd, strlen(with_cmd));
-  pump_passes(12);   /* twelve: a full first round trip */
+  pb_net_passes(k_round_trip_passes_, 0);
   cmd_t c;
   TEST_ASSERT_TRUE(net_take_command(&c));
   TEST_ASSERT_EQUAL_UINT32(5, c.id);
@@ -266,10 +281,9 @@ static void poke_net_from_inside_the_dose(void) {
 }
 
 static void test_poll_is_a_noop_while_the_pump_is_asserted(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_queue_response(k200, strlen(k200));
-  pump_passes(4);                              /* park the FSM somewhere with work to do */
+  pb_net_passes(4, 0);                         /* park the FSM somewhere with work to do */
   const net_state_t before = net_state();
   sim_set_float(true);
   sim_set_flow_ml_s(30);
@@ -329,8 +343,7 @@ static void test_a_join_deadline_is_not_expired_early_by_the_clock_rollover(void
 
 static void test_a_recv_deadline_is_not_expired_early_by_the_clock_rollover(void) {
   sim_set_clock_ms(0xF0000000u);
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   for (int i = 0; i < 24 && net_state() != NET_SEND; ++i) net_poll(false);
   TEST_ASSERT_EQUAL(NET_SEND, net_state());
 
@@ -367,7 +380,7 @@ static void test_a_backoff_wait_still_waits_across_the_clock_rollover(void) {
   net_poll(false);
   TEST_ASSERT_EQUAL(NET_DOWN, net_state());
 
-  pb_advance(2500);                            /* now the 2 s backoff really has elapsed */
+  pb_advance(k_past_first_backoff_ms_);        /* now the 2 s backoff really has elapsed */
   net_poll(false);                             /* the deferred tear-down spends this pass */
   TEST_ASSERT_EQUAL(NET_DOWN, net_state());
   net_poll(false);
@@ -385,21 +398,42 @@ static int run_passes(int n, uint32_t ms_each) {
   return sends;
 }
 
-static void test_an_exchange_that_produced_no_bytes_is_retried_exactly_once(void) {
-  sensors_begin();
-  net_begin();
-  link_fake_queue_response("", 0);        /* the server says nothing at all */
-  const int sends = run_passes(120, 200); /* 24 s: two RECV deadlines, inside the 30 s window */
-  TEST_ASSERT_EQUAL_INT(2, sends);        /* the original and ONE retry */
-  TEST_ASSERT_EQUAL_UINT32(0, net_reports_ok());
+/* Retry-eligible is exactly two shapes, no bytes at all and a complete 503; any other bytes
+   mean the request landed, and a retry would kill a command the board never saw. 120 passes
+   x 200 ms is 24 s: two RECV deadlines for the silent exchange, inside the 30 s retry window
+   and short of the 60 s interval, so no second report joins the count. */
+static void test_a_report_is_retried_once_only_when_nothing_arrived_or_the_backend_rolled_back(void) {
+  static const struct { const char *response; int sends; uint16_t status; const char *why; } rows[] = {
+    { "", 2, 0,
+      "the server said nothing at all: the original and ONE retry" },
+    { "HTTP/1.1 2", 1, 0,
+      "bytes arrived and the answer never completed: never retried" },
+    { "HTTP/1.1 200 OK\r\nContent-Length: 38\r\n\r\nnext=60\ncmd=5 wat", 1, 0,
+      "a truncation is bytes that ARRIVED: never retried, and a half-read reply never waters" },
+    { "HTTP/1.1 400 Bad Request\r\nContent-Length: 5\r\n\r\nnope\n", 1, 400,
+      "a 400 is never retried" },
+    { "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\n\r\noops\n", 1, 500,
+      "a 500 carries no rollback guarantee: not a 503, not retried" },
+    { "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\nbusy\n", 2, 503,
+      "the backend answers 503 when it rolled everything back: retried once" },
+  };
+  for (unsigned i = 0; i < sizeof rows / sizeof rows[0]; ++i) {
+    setUp();                                   /* a cold fixture per row, as a case gets */
+    arrange_net_();
+    link_fake_queue_response(rows[i].response, strlen(rows[i].response));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(rows[i].sends, run_passes(120, 200), rows[i].why);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(rows[i].status, net_last_status(), rows[i].why);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, net_reports_ok(), rows[i].why);
+    cmd_t c;
+    TEST_ASSERT_FALSE_MESSAGE(net_take_command(&c), rows[i].why);
+  }
 }
 
 static void test_a_retry_is_abandoned_rather_than_sent_outside_the_dedup_window(void) {
   sim_reset(true);                        /* warm: the boot counter advances, so the salt
                                              is non-zero and t= is above 2^31 */
-  sensors_begin();
+  arrange_net_();
   TEST_ASSERT_NOT_EQUAL(0, hal_boot_salt());
-  net_begin();
   link_fake_queue_response("", 0);
   /* inside the window: the retry IS sent */
   TEST_ASSERT_EQUAL_INT(2, run_passes(120, 200));
@@ -424,54 +458,8 @@ static void test_a_retry_is_abandoned_rather_than_sent_outside_the_dedup_window(
   TEST_ASSERT_EQUAL_INT(1, sends);        /* ABANDONED: never sent outside the dedup window */
 }
 
-static void test_a_response_that_produced_any_bytes_is_never_retried(void) {
-  sensors_begin();
-  net_begin();
-  link_fake_queue_response("HTTP/1.1 2", 10);      /* bytes arrived; the answer never completed */
-  TEST_ASSERT_EQUAL_INT(1, run_passes(120, 200));
-}
-
-static void test_a_truncated_reply_is_never_retried(void) {
-  sensors_begin();
-  net_begin();
-  const char *cut = "HTTP/1.1 200 OK\r\nContent-Length: 38\r\n\r\nnext=60\ncmd=5 wat";
-  link_fake_queue_response(cut, strlen(cut));
-  TEST_ASSERT_EQUAL_INT(1, run_passes(120, 200));  /* a truncation is bytes that ARRIVED */
-  cmd_t c;
-  TEST_ASSERT_FALSE(net_take_command(&c));         /* and a half-read reply never waters */
-}
-
-static void test_a_four_hundred_is_never_retried(void) {
-  sensors_begin();
-  net_begin();
-  const char *b = "HTTP/1.1 400 Bad Request\r\nContent-Length: 5\r\n\r\nnope\n";
-  link_fake_queue_response(b, strlen(b));
-  TEST_ASSERT_EQUAL_INT(1, run_passes(60, 200));
-  TEST_ASSERT_EQUAL_UINT16(400, net_last_status());
-}
-
-static void test_a_five_hundred_is_not_retried(void) {
-  sensors_begin();
-  net_begin();
-  const char *b = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\n\r\noops\n";
-  link_fake_queue_response(b, strlen(b));
-  TEST_ASSERT_EQUAL_INT(1, run_passes(60, 200));   /* no rollback guarantee: not a 503 */
-  TEST_ASSERT_EQUAL_UINT16(500, net_last_status());
-}
-
-static void test_a_five_oh_three_is_retried_once(void) {
-  sensors_begin();
-  net_begin();
-  const char *b = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\nbusy\n";
-  link_fake_queue_response(b, strlen(b));
-  TEST_ASSERT_EQUAL_INT(2, run_passes(60, 200));   /* the backend answers 503 when it
-                                                      rolled everything back */
-  TEST_ASSERT_EQUAL_UINT16(503, net_last_status());
-}
-
 static void test_report_body_is_byte_identical_on_the_retry(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   const char *b = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\nbusy\n";
   link_fake_queue_response(b, strlen(b));
   static uint8_t first[PB_TX_CAP];
@@ -493,159 +481,55 @@ static void test_report_body_is_byte_identical_on_the_retry(void) {
   TEST_ASSERT_EQUAL_INT(2, sends);
 }
 
-static void test_a_modem_timeout_poisons_the_link_and_counts_a_desync(void) {
-  sensors_begin();
-  net_begin();
-  link_fake_queue_response(k200, strlen(k200));
-  /* walk to the first state that issues an AT, then time it out */
+/* A modem timeout in any state that issues an AT must fire both halves of the poison: the
+   drop, at once -- NET_DOWN, the cached signal and address gone, a bare send failure's retry
+   NOT armed -- and the modem reset, a desync counted, on its own pass after the backoff,
+   because the timed-out pass already spent two round trips and a third would exceed the
+   watchdog grant. Either half alone leaves a bug. `nth` picks the pass among those that
+   start in `state`: NET_SOCK_CLOSE's first never opened a socket and costs 0 ATs, so it
+   cannot time out; NET_IDLE's first two are the signal and the address refresh, one AT each. */
+static void expect_a_timeout_in_(net_state_t state, unsigned nth, const char *response) {
+  arrange_net_();
+  if (response) link_fake_queue_response(response, strlen(response));
+  unsigned seen = 0;
   for (int i = 0; i < 40; ++i) {
-    link_fake_pass_begin();
-    const net_state_t before = net_state();
-    if (before == NET_CONNECT) {
+    if (net_state() == state && ++seen == nth) {
+      const uint16_t desyncs = link_desyncs();
+      const uint16_t resets  = link_fake_reset_count();
       link_fake_timeout_next();
-      const uint16_t desyncs_before = link_desyncs();
-      const uint16_t resets_before = link_fake_reset_count();
-      net_poll(false);
-      /* the tear-down is deferred: this pass spent two round trips and a third would exceed the
-         watchdog grant */
-      TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
-      TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
-      /* it lands on the pass after the backoff, before any rejoin */
-      pb_advance(2500);   /* past the first backoff rung */
-      net_poll(false);
-      TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());   /* rides out as ch206 */
-      TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
-      TEST_ASSERT_EQUAL(NET_DOWN, net_state());       /* still down: the rejoin is the NEXT pass */
+      pb_net_passes(1, 100);                             /* the state's own AT times out */
       TEST_ASSERT_EQUAL(NET_DOWN, net_state());
-      /* and the next pass issues nothing at all while the backoff runs */
-      link_fake_pass_begin();
-      net_poll(false);
-      TEST_ASSERT_EQUAL_UINT16(0, link_fake_at_count());
+      TEST_ASSERT_EQUAL_INT8(0, net_rssi());
+      TEST_ASSERT_EQUAL_STRING("0.0.0.0", net_ip());
+      TEST_ASSERT_EQUAL_UINT16(desyncs, link_desyncs());    /* the reset is deferred */
+      TEST_ASSERT_EQUAL_UINT16(resets, link_fake_reset_count());
+      pb_advance(k_past_first_backoff_ms_);
+      pb_net_passes(1, 0);                               /* the deferred tear-down */
+      TEST_ASSERT_EQUAL_UINT16(desyncs + 1, link_desyncs());   /* rides out as ch206 */
+      TEST_ASSERT_EQUAL_UINT16(resets + 1, link_fake_reset_count());
+      TEST_ASSERT_EQUAL(NET_DOWN, net_state());          /* the rejoin is the NEXT pass */
+      pb_net_passes(1, 0);
+      TEST_ASSERT_EQUAL(NET_JOIN_ISSUE, net_state());
+      TEST_ASSERT_EQUAL_UINT16(0, link_fake_at_count());  /* and it issues nothing yet */
       return;
     }
-    net_poll(false);
-    sim_advance(50);
+    pb_net_passes(1, 100);
   }
-  TEST_FAIL_MESSAGE("the FSM never reached NET_CONNECT");
+  TEST_FAIL_MESSAGE("the FSM never reached the state to poison");
 }
 
-/* One case per state that issues an AT: a modem timeout there must fire both halves of the
-   poison, the reset (a desync counted) and the drop (NET_DOWN); either alone leaves a bug. */
-
-static void test_a_modem_timeout_in_join_wait_poisons_the_link(void) {
-  sensors_begin();
-  net_begin();
-  net_poll(false);                              /* NET_DOWN -> NET_JOIN_ISSUE */
-  net_poll(false);                              /* issues the join -> NET_JOIN_WAIT */
-  TEST_ASSERT_EQUAL(NET_JOIN_WAIT, net_state());
-  link_fake_timeout_next();                     /* times out link_state()'s OWN AT this pass */
-  const uint16_t desyncs_before = link_desyncs();
-  const uint16_t resets_before = link_fake_reset_count();
-  net_poll(false);
-  /* deferred: the tear-down would put this pass over the watchdog grant */
-  TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
-  TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
-  pb_advance(2500);                              /* past the first backoff rung */
-  net_poll(false);
-  TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
-  TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
-  TEST_ASSERT_EQUAL(NET_DOWN, net_state());      /* not left in JOIN_WAIT for the 5 s
-                                                    deadline to catch later */
-}
-
-static void test_a_modem_timeout_in_sock_close_poisons_the_link(void) {
-  sensors_begin();
-  net_begin();
-  link_fake_queue_response(k200, strlen(k200));
-  /* the first NET_SOCK_CLOSE of a report never opened a socket and costs 0 ATs, so it cannot
-     time out; the one after NET_CLOSE, with the socket still allocated, can */
-  bool seen_close = false;
-  for (int i = 0; i < 40; ++i) {
-    link_fake_pass_begin();
-    const net_state_t before = net_state();
-    if (before == NET_CLOSE) seen_close = true;
-    if (seen_close && before == NET_SOCK_CLOSE) {
-      link_fake_timeout_next();
-      const uint16_t desyncs_before = link_desyncs();
-      const uint16_t resets_before = link_fake_reset_count();
-      net_poll(false);
-      /* deferred: the tear-down would put this pass over the watchdog grant */
-      TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
-      TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
-      TEST_ASSERT_EQUAL(NET_DOWN, net_state());
-      pb_advance(2500);                            /* past the first backoff rung */
-      net_poll(false);
-      TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
-      TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
-      TEST_ASSERT_EQUAL(NET_DOWN, net_state());  /* still down: the rejoin is the NEXT pass */
-      return;
-    }
-    net_poll(false);
-  }
-  TEST_FAIL_MESSAGE("never reached the socket-allocated NET_SOCK_CLOSE");
-}
-
-static void test_a_modem_timeout_in_send_poisons_the_link(void) {
-  sensors_begin();
-  net_begin();
-  link_fake_queue_response(k200, strlen(k200));
-  for (int i = 0; i < 40; ++i) {
-    link_fake_pass_begin();
-    const net_state_t before = net_state();
-    if (before == NET_SEND) {
-      link_fake_timeout_next();
-      const uint16_t desyncs_before = link_desyncs();
-      const uint16_t resets_before = link_fake_reset_count();
-      net_poll(false);
-      /* deferred: the tear-down would put this pass over the watchdog grant */
-      TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
-      TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
-      pb_advance(2500);                            /* past the first backoff rung */
-      net_poll(false);
-      TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
-      TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
-      TEST_ASSERT_EQUAL(NET_DOWN, net_state());   /* not NET_SOCK_CLOSE with a retry armed --
-                                                      that is what a bare send failure does */
-      return;
-    }
-    net_poll(false);
-  }
-  TEST_FAIL_MESSAGE("the FSM never reached NET_SEND");
-}
-
-static void test_a_modem_timeout_in_recv_poisons_the_link(void) {
-  sensors_begin();
-  net_begin();
-  link_fake_queue_response(k200, strlen(k200));
-  for (int i = 0; i < 40; ++i) {
-    link_fake_pass_begin();
-    const net_state_t before = net_state();
-    if (before == NET_RECV) {
-      link_fake_timeout_next();     /* sock_read()'s own AT times out: r < 0, not r == 0 */
-      const uint16_t desyncs_before = link_desyncs();
-      const uint16_t resets_before = link_fake_reset_count();
-      net_poll(false);
-      /* deferred: the tear-down would put this pass over the watchdog grant */
-      TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
-      TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
-      pb_advance(2500);                            /* past the first backoff rung */
-      net_poll(false);
-      TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
-      TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
-      TEST_ASSERT_EQUAL(NET_DOWN, net_state());   /* not NET_SOCK_CLOSE with a retry armed --
-                                                      that is what the deadline-expiry exit does */
-      return;
-    }
-    net_poll(false);
-  }
-  TEST_FAIL_MESSAGE("the FSM never reached NET_RECV");
-}
+static void test_a_modem_timeout_in_join_wait_poisons_the_link(void)  { expect_a_timeout_in_(NET_JOIN_WAIT, 1, NULL); }
+static void test_a_modem_timeout_in_connect_poisons_the_link(void)    { expect_a_timeout_in_(NET_CONNECT, 1, k200); }
+static void test_a_modem_timeout_in_send_poisons_the_link(void)       { expect_a_timeout_in_(NET_SEND, 1, k200); }
+static void test_a_modem_timeout_in_recv_poisons_the_link(void)       { expect_a_timeout_in_(NET_RECV, 1, k200); }
+static void test_a_modem_timeout_in_sock_close_poisons_the_link(void) { expect_a_timeout_in_(NET_SOCK_CLOSE, 2, k200); }
+static void test_a_timeout_in_the_signal_refresh_poisons_the_link(void)  { expect_a_timeout_in_(NET_IDLE, 1, NULL); }
+static void test_a_timeout_in_the_address_refresh_poisons_the_link(void) { expect_a_timeout_in_(NET_IDLE, 2, NULL); }
 
 /* Two report cycles with no net_begin() between them: NET_IDLE must reset the spent retry,
    or the second report is abandoned after one send. */
 static void test_each_report_gets_its_own_single_retry(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_queue_response("", 0);              /* round 1: the server never answers at all */
   const int sends1 = run_passes(120, 200);      /* 24 s: two RECV deadlines, inside the
                                                    30 s retry window */
@@ -672,13 +556,8 @@ static void test_was_timeout_boundary_is_inclusive(void) {
 }
 
 static void test_link_drop_returns_to_joining_with_exponential_backoff(void) {
-  static const uint32_t ladder[] = PB_NET_BACKOFF_MS;
-  sensors_begin();
-  net_begin();
-  /* join, then pull the AP out from under it */
-  for (int i = 0; i < 8 && net_state() != NET_IDLE; ++i) { link_fake_pass_begin(); net_poll(false); }
-  TEST_ASSERT_EQUAL(NET_IDLE, net_state());
-  link_fake_drop_link();
+  arrange_idle_();
+  link_fake_drop_link();                       /* pull the AP out from under the join */
   uint32_t seen[3] = {0, 0, 0};
   for (int rung = 0; rung < 3; ++rung) {
     /* drive until the FSM parks in NET_DOWN, then measure how long it waits */
@@ -696,14 +575,13 @@ static void test_link_drop_returns_to_joining_with_exponential_backoff(void) {
        "the join itself failed" the fake has, and it climbs the same ladder */
     link_fake_timeout_next();
   }
-  TEST_ASSERT_TRUE(seen[0] <= ladder[0] + 200);
+  TEST_ASSERT_TRUE(seen[0] <= k_backoff_ladder_[0] + 200);
   TEST_ASSERT_TRUE(seen[1] > seen[0]);
   TEST_ASSERT_TRUE(seen[2] > seen[1]);
 }
 
 static void test_a_poisoned_close_does_not_leave_starvation_armed_for_the_next_report(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
 
   /* arm the starvation flag: a clean, no-timeout open failure on the first attempt and on
      the retry is the only way NET_CONNECT sets it */
@@ -729,18 +607,14 @@ static void test_a_poisoned_close_does_not_leave_starvation_armed_for_the_next_r
 }
 
 static void test_an_ack_is_set_the_moment_a_command_is_received(void) {
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
-  net_begin(); exec_begin();
-  pb_net_passes(12, 100);
+  arrange_up_with_response_(k_cmd_200);
+  pb_net_passes(k_round_trip_passes_, 100);
   TEST_ASSERT_TRUE(report_ack_is_recv());     /* (id, flow_ml = 0, err = "recv") on RECEIPT */
   TEST_ASSERT_FALSE(report_may_build());
 }
 
 static void test_command_is_not_executed_in_the_pass_that_received_it(void) {
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
-  net_begin(); exec_begin();
+  arrange_up_with_response_(k_cmd_200);
   for (int i = 0; i < 40; ++i) {
     link_fake_pass_begin();
     net_poll(false);
@@ -753,10 +627,8 @@ static void test_command_is_not_executed_in_the_pass_that_received_it(void) {
 }
 
 static void test_command_is_surfaced_only_once_per_round_trip(void) {
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
-  net_begin(); exec_begin();
-  pb_net_passes(12, 100);
+  arrange_up_with_response_(k_cmd_200);
+  pb_net_passes(k_round_trip_passes_, 100);
   cmd_t c;
   TEST_ASSERT_TRUE(net_take_command(&c));
   TEST_ASSERT_EQUAL_UINT32(17, c.id);
@@ -764,10 +636,8 @@ static void test_command_is_surfaced_only_once_per_round_trip(void) {
 }
 
 static void test_no_report_is_built_between_receiving_a_command_and_executing_it(void) {
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
-  net_begin(); exec_begin();
-  pb_net_passes(12, 100);
+  arrange_up_with_response_(k_cmd_200);
+  pb_net_passes(k_round_trip_passes_, 100);
   /* the write count, not the last buffer: the question is whether anything at all was sent */
   uint16_t writes = link_fake_write_count();
   pb_advance(120000);                          /* two report intervals go by */
@@ -776,10 +646,8 @@ static void test_no_report_is_built_between_receiving_a_command_and_executing_it
 }
 
 static void test_a_stop_command_is_acked(void) {
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_stop_200, strlen(k_stop_200));
-  net_begin(); exec_begin();
-  pb_net_passes(14, 100);
+  arrange_up_with_response_(k_stop_200);
+  pb_net_passes(k_round_trip_with_margin_, 100);
   exec_pending();
   TEST_ASSERT_FALSE(report_ack_is_recv());
   report_stamp();
@@ -789,10 +657,8 @@ static void test_a_stop_command_is_acked(void) {
 
 static void test_a_failed_goto_still_acks(void) {
   /* PB_PULSES_PER_GATE == 0 compiles cart_goto() to a refusal: the shipped configuration */
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
-  net_begin(); exec_begin();
-  pb_net_passes(14, 100);
+  arrange_up_with_response_(k_cmd_200);
+  pb_net_passes(k_round_trip_with_margin_, 100);
   exec_pending();
   report_stamp();
   char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
@@ -811,10 +677,8 @@ static void test_an_out_of_range_outlet_acks_range_and_never_reaches_the_cart(vo
   };
   for (unsigned i = 0; i < sizeof k / sizeof k[0]; ++i) {
     pb_test_setup();
-    link_fake_reset(); link_fake_set_state(LINK_UP);
-    link_fake_queue_response(k[i].body, strlen(k[i].body));
-    net_begin(); exec_begin();
-    pb_net_passes(14, 100);
+    arrange_up_with_response_(k[i].body);
+    pb_net_passes(k_round_trip_with_margin_, 100);
     exec_pending();
     report_stamp();
     char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
@@ -832,10 +696,8 @@ static void test_every_terminal_path_in_exec_pending_sets_an_ack(void) {
   };
   for (unsigned i = 0; i < 4; ++i) {
     pb_test_setup();
-    link_fake_reset(); link_fake_set_state(LINK_UP);
-    link_fake_queue_response(bodies[i], strlen(bodies[i]));
-    net_begin(); exec_begin();
-    pb_net_passes(14, 100);
+    arrange_up_with_response_(bodies[i]);
+    pb_net_passes(k_round_trip_with_margin_, 100);
     exec_pending();
     TEST_ASSERT_FALSE(report_ack_is_recv());
     report_stamp();
@@ -848,10 +710,8 @@ static void test_every_terminal_path_in_exec_pending_sets_an_ack(void) {
 static void test_refused_dose_acks_with_flow_ml_zero_and_an_err_token(void) {
   static const char k[] =
     "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=51 water=3 ml=999 cap_s=10\n";
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k, strlen(k));
-  net_begin(); exec_begin();
-  pb_net_passes(14, 100);
+  arrange_up_with_response_(k);
+  pb_net_passes(k_round_trip_with_margin_, 100);
   exec_pending();
   report_stamp();
   char b[PB_BODY_CAP]; (void)report_build(b, sizeof b);
@@ -860,10 +720,8 @@ static void test_refused_dose_acks_with_flow_ml_zero_and_an_err_token(void) {
 
 static void test_pending_ack_rides_the_next_report_after_every_discard_path(void) {
   static const char k_400[] = "HTTP/1.1 400 Bad Request\r\nContent-Length: 3\r\n\r\nno\n";
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
-  net_begin(); exec_begin();
-  pb_net_passes(14, 100);
+  arrange_up_with_response_(k_cmd_200);
+  pb_net_passes(k_round_trip_with_margin_, 100);
   exec_pending();                       /* ack=17 is now real */
   link_fake_queue_response(k_400, strlen(k_400));
   pb_net_passes(30, 2500);                 /* that report 400s and is discarded */
@@ -874,9 +732,7 @@ static void test_pending_ack_rides_the_next_report_after_every_discard_path(void
 }
 
 static void test_err_recv_never_reaches_the_wire(void) {
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
-  net_begin(); exec_begin();
+  arrange_up_with_response_(k_cmd_200);
   pb_net_passes(60, 2500);                 /* many intervals; exec runs, then reports resume */
   uint16_t n = 0;
   const char *tx = (const char *)link_fake_sent(&n);
@@ -897,10 +753,8 @@ static void test_a_backend_dose_prints_the_per_dose_summary_line(void) {
   cart_begin();
   sim_set_screw_pulse_ms(2);
   sim_set_home_region(0, 40);
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);
-  net_begin(); exec_begin();
-  pb_net_passes(14, 100);
+  arrange_up_with_response_(k_cmd_200);
+  pb_net_passes(k_round_trip_with_margin_, 100);
   char out[512]; (void)sim_serial_tx(out, sizeof out);
   exec_pending();
   size_t n = sim_serial_tx(out, sizeof out); out[n] = 0;
@@ -920,10 +774,8 @@ static void test_a_backend_command_never_sets_hang(void) {
   cart_begin();                    /* same reason as the summary-line case immediately above */
   sim_set_screw_pulse_ms(2);
   sim_set_home_region(0, 40);
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);
-  net_begin(); exec_begin();
-  pb_net_passes(14, 100);
+  arrange_up_with_response_(k_cmd_200);
+  pb_net_passes(k_round_trip_with_margin_, 100);
   uint32_t f0 = sim_feeds();
   pb_advance(PB_HANG_MS * 3u);
   exec_pending();
@@ -953,10 +805,8 @@ static void test_a_granted_backend_dose_acks_the_millilitres_that_actually_flowe
   /* 85 ml/s is 499 pulses/s at the meter's 5880/L, so ml=100 (588 pulses) lands in about
      1.2 s, inside cap_s=10 and under PB_FLOW_MAX_HZ */
   sim_set_flow_ml_s(85);
-  link_fake_reset(); link_fake_set_state(LINK_UP);
-  link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);
-  net_begin(); exec_begin();
-  pb_net_passes(14, 100);
+  arrange_up_with_response_(k_cmd_200);
+  pb_net_passes(k_round_trip_with_margin_, 100);
   pb_advance(PB_BOOT_GAP_MS + 1u);           /* or the ladder answers boot, not water */
   exec_pending();
 
@@ -975,8 +825,7 @@ static void test_a_granted_backend_dose_acks_the_millilitres_that_actually_flowe
 }
 
 static void test_the_cached_accessors_fill_after_a_join_and_cost_nothing(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   /* Before any join the cache must read as "no link" rather than as leftovers. */
   TEST_ASSERT_EQUAL_UINT8(0, net_link());
   TEST_ASSERT_EQUAL_INT8(0, net_rssi());
@@ -996,8 +845,7 @@ static void test_the_cached_accessors_fill_after_a_join_and_cost_nothing(void) {
 }
 
 static void test_a_dropped_link_clears_the_cached_signal_and_address(void) {
-  sensors_begin();
-  net_begin();
+  arrange_net_();
   link_fake_queue_response(k200, strlen(k200));
   pb_net_passes(20, 100);
   TEST_ASSERT_EQUAL_STRING("192.168.1.42", net_ip());        /* armed, so the clear is visible */
@@ -1021,14 +869,8 @@ static void test_a_dropped_link_clears_the_cached_signal_and_address(void) {
    implementing that is the return that ends the RSSI pass. Each refresh writes its own fixed
    value, so which pass each answer arrived in is observable. */
 static void test_the_signal_and_address_refreshes_never_share_a_pass(void) {
-  sensors_begin();
-  net_begin();
-
-  /* one pass at a time, to the transition into NET_IDLE: it arms both refreshes and does
-     neither */
-  int guard = 0;
-  while (net_state() != NET_IDLE && guard++ < 40) pb_net_passes(1, 100);
-  TEST_ASSERT_EQUAL_MESSAGE(NET_IDLE, net_state(), "arrange: the FSM never joined");
+  arrange_idle_();                             /* the transition into NET_IDLE arms both
+                                                  refreshes and does neither */
   TEST_ASSERT_EQUAL_INT8_MESSAGE(0, net_rssi(), "arrange: nothing may be refreshed yet");
   TEST_ASSERT_EQUAL_STRING_MESSAGE("0.0.0.0", net_ip(), "arrange: nothing may be refreshed yet");
 
@@ -1041,46 +883,6 @@ static void test_the_signal_and_address_refreshes_never_share_a_pass(void) {
   pb_net_passes(1, 100);                       /* the address refresh, in a pass of its own */
   TEST_ASSERT_EQUAL_STRING_MESSAGE("192.168.1.42", net_ip(),
       "the address refresh did not run in the pass after the signal refresh");
-}
-
-/* Both refresh passes carry the timeout-then-poison pairing every AT-issuing pass has; the
-   fake charges one AT for each, so a timeout in either must tear the session down like any
-   other. */
-static void arrange_idle_(void) {
-  sensors_begin();
-  net_begin();
-  int guard = 0;
-  while (net_state() != NET_IDLE && guard++ < 40) pb_net_passes(1, 100);
-  TEST_ASSERT_EQUAL_MESSAGE(NET_IDLE, net_state(), "arrange: the FSM never joined");
-}
-
-static void test_a_timeout_in_the_signal_refresh_poisons_the_link(void) {
-  arrange_idle_();
-  const uint16_t desyncs = link_desyncs();
-  link_fake_timeout_next();
-  pb_net_passes(1, 100);                       /* the signal refresh, and it times out */
-  TEST_ASSERT_EQUAL_MESSAGE(NET_DOWN, net_state(),
-      "a modem timeout in the signal refresh did not poison the link");
-  TEST_ASSERT_EQUAL_INT8(0, net_rssi());
-  pb_advance(2500);                            /* past the first backoff rung */
-  pb_net_passes(1, 100);                       /* the deferred tear-down */
-  TEST_ASSERT_EQUAL_UINT16_MESSAGE(desyncs + 1, link_desyncs(), "the session was not torn down");
-}
-
-static void test_a_timeout_in_the_address_refresh_poisons_the_link(void) {
-  arrange_idle_();
-  pb_net_passes(1, 100);                       /* the signal refresh, cleanly */
-  TEST_ASSERT_EQUAL_INT8_MESSAGE(-52, net_rssi(), "arrange: the signal refresh did not run");
-  const uint16_t desyncs = link_desyncs();
-  link_fake_timeout_next();
-  pb_net_passes(1, 100);                       /* the address refresh, and it times out */
-  TEST_ASSERT_EQUAL_MESSAGE(NET_DOWN, net_state(),
-      "a modem timeout in the address refresh did not poison the link: on the board this is "
-      "the pass that used to spend up to 125 s inside WiFi.localIP() against a 5592 ms grant");
-  TEST_ASSERT_EQUAL_STRING("0.0.0.0", net_ip());
-  pb_advance(2500);
-  pb_net_passes(1, 100);
-  TEST_ASSERT_EQUAL_UINT16_MESSAGE(desyncs + 1, link_desyncs(), "the session was not torn down");
 }
 
 int main(void) {
@@ -1105,19 +907,14 @@ int main(void) {
   RUN_TEST(test_a_join_deadline_is_not_expired_early_by_the_clock_rollover);
   RUN_TEST(test_a_backoff_wait_still_waits_across_the_clock_rollover);
   RUN_TEST(test_a_recv_deadline_is_not_expired_early_by_the_clock_rollover);
-  RUN_TEST(test_an_exchange_that_produced_no_bytes_is_retried_exactly_once);
+  RUN_TEST(test_a_report_is_retried_once_only_when_nothing_arrived_or_the_backend_rolled_back);
   RUN_TEST(test_a_retry_is_abandoned_rather_than_sent_outside_the_dedup_window);
-  RUN_TEST(test_a_response_that_produced_any_bytes_is_never_retried);
-  RUN_TEST(test_a_truncated_reply_is_never_retried);
-  RUN_TEST(test_a_four_hundred_is_never_retried);
-  RUN_TEST(test_a_five_hundred_is_not_retried);
-  RUN_TEST(test_a_five_oh_three_is_retried_once);
   RUN_TEST(test_report_body_is_byte_identical_on_the_retry);
-  RUN_TEST(test_a_modem_timeout_poisons_the_link_and_counts_a_desync);
   RUN_TEST(test_a_modem_timeout_in_join_wait_poisons_the_link);
-  RUN_TEST(test_a_modem_timeout_in_sock_close_poisons_the_link);
+  RUN_TEST(test_a_modem_timeout_in_connect_poisons_the_link);
   RUN_TEST(test_a_modem_timeout_in_send_poisons_the_link);
   RUN_TEST(test_a_modem_timeout_in_recv_poisons_the_link);
+  RUN_TEST(test_a_modem_timeout_in_sock_close_poisons_the_link);
   RUN_TEST(test_each_report_gets_its_own_single_retry);
   RUN_TEST(test_a_poisoned_close_does_not_leave_starvation_armed_for_the_next_report);
   RUN_TEST(test_was_timeout_boundary_is_inclusive);
