@@ -77,12 +77,13 @@ static void note_memory_(void) {
   if (h > g_hwm_max)   g_hwm_max = h;
 }
 
-static void cmd_i2c_(void) {          /* expect 0x20, 0x3C, and the LCD at 0x27 or 0x3F */
+static bool cmd_i2c_(const char *) {  /* expect 0x20, 0x3C, and the LCD at 0x27 or 0x3F */
   char scan[96];
   sensors_scan(scan, sizeof scan);
   hal_serial_write("i2c: ");
   hal_serial_write(scan);
   hal_serial_write("\n");
+  return true;
 }
 
 static void print_mux_(uint8_t ch) {                /* select, >=1 ms, read twice, keep 2nd */
@@ -122,37 +123,50 @@ static void cmd_hall_line_(void) {
   hal_serial_write(b);
 }
 
-static void cmd_flow_(void) {
+static bool cmd_hall_(const char *) {
+  g_hall_stream = true; g_hall_next_ms = 0;
+  return true;
+}
+
+static bool cmd_flow_(const char *) {
   char b[64];
   snprintf(b, sizeof b, "flow hz=%lu total=%lu leak=%lu\n",
            (unsigned long)pulses_flow_rate(), (unsigned long)pulses_flow(),
            (unsigned long)pulses_leak_count());
   hal_serial_write(b);
+  return true;
 }
 
-/* Every command this binary has and only those: a help that hid `dry off` would leave an
-   operator latched after a mid-dose reset with no word for the way back. */
-static void cmd_help_(void) {
-  hal_serial_write(
-    "i2c              scan the bus (expect 0x20 0x3C, and the LCD at 0x27 or 0x3F)\n"
-    "mux <0-15>|all   select, settle, read twice, print the second (14-bit raw)\n"
-    "hall             stream screw/home/float at 5 Hz; any key stops it\n"
-    "flow             pulses/second and total since reset\n"
-    "status           everything this board knows about itself\n"
-    "stop             cut a dose in progress\n"
-    "dry on|off       the dry latch: on refuses every dose, off is the only way back\n"
-    "clear contra     release the contradiction latch (float said OK, meter saw nothing)\n"
-    "help             this\n");
-#if PB_BRINGUP
-  hal_serial_write(
-    "servo <1000-2000> <ms>     drive the servo at that pulse width for <= cap ms, then stop\n"
-    "home                       run toward home until HALL_HOME, bounded, zero the count\n"
-    "goto <1-5>                 step to the outlet counting screw pulses, bounded\n"
-    "pump <ms> [prime] [hang]   assert D6 for <= cap ms; prime widens the no-flow window\n"
-    "calib                      one fixed 10 s primed dose into a jug (bring-up 7b)\n"
-    "cal <pulses per litre>     set the meter calibration, 1000..20000 (7b's number)\n"
-    "noinit pattern             write the canary, then `pump 3000 hang` (bring-up 7c')\n");
-#endif
+static bool cmd_status_(const char *) { cli_print_status(); return true; }
+
+static bool cmd_dry_on_(const char *) {
+  safety_dry_set(true);
+  hal_serial_write("dry=1 - every dose refused until `dry off`\n");
+  return true;
+}
+
+static bool cmd_dry_off_(const char *) {
+  safety_dry_set(false);
+  hal_serial_write("dry=0\n");
+  return true;
+}
+
+static bool cmd_clear_contra_(const char *) {
+  if (safety_contra_clear())
+    hal_serial_write("contra cleared - the last dose said float OK and the meter saw "
+                     "nothing. If you have not found out why, you have not fixed it.\n");
+  else
+    hal_serial_write("contra=0 already\n");
+  return true;
+}
+
+/* A dose in progress never reaches here: the dosing loop blocks and matches the word
+   byte-wise itself. This is the idle console's answer, so `stop` is never `? unknown`, and
+   it clears a stale request so the NEXT dose is not aborted by a stop typed before it. */
+static bool cmd_stop_(const char *) {
+  cli_stop_clear();
+  hal_serial_write("stop: no dose running\n");
+  return true;
 }
 
 void cli_begin(void) {
@@ -298,75 +312,76 @@ static void cli_run_dose_(uint32_t ms, bool long_prime, bool hang) {
   cli_print_dose_summary();
 }
 
-/* Every command here is compiled out of the binary that runs unattended, and make check
-   proves it on the preprocessed source of this file, not on this #if. */
-static bool cli_dispatch_bringup_(const char *line) {
-  if (strncmp(line, "servo ", 6) == 0) {
-    const char *sp = strchr(line + 6, ' ');
-    uint32_t us = 0u, ms = 0u;
-    if (!sp || !parse_u32_range_(line + 6, sp, &us) || !parse_u32_(sp + 1, &ms) ||
-        us < 1000u || us > 2000u || ms == 0u) {
-      hal_serial_write("usage: servo <1000-2000> <ms>\n");
-      return true;
-    }
-    if (ms > PB_SERVO_CAP_MS) ms = PB_SERVO_CAP_MS;  /* a typo may not run the screw forever */
-    cart_jog((int16_t)us, ms);
-    hal_serial_write("servo done\n");
+/* Every command from here to the #endif is compiled out of the binary that runs unattended,
+   and make check proves it on the preprocessed source of this file, not on this #if. */
+static bool cmd_servo_(const char *arg) {
+  const char *sp = strchr(arg, ' ');
+  uint32_t us = 0u, ms = 0u;
+  if (!sp || !parse_u32_range_(arg, sp, &us) || !parse_u32_(sp + 1, &ms) ||
+      us < 1000u || us > 2000u || ms == 0u) {
+    hal_serial_write("usage: servo <1000-2000> <ms>\n");
     return true;
   }
-  if (strcmp(line, "home") == 0) {
-    if (cart_home()) hal_serial_write("home ok\n");                 /* ONE traverse */
-    else { hal_serial_write("home FAILED: ");
-           hal_serial_write(cart_err()); hal_serial_write("\n"); }
-    return true;
-  }
-  if (strncmp(line, "goto ", 5) == 0) {
-    uint32_t o = 0u;
-    if (!parse_u32_(line + 5, &o) || o < 1u || o > PB_OUTLETS) {
-      hal_serial_write("goto: outlet must be 1..5\n");
-      return true;
-    }
-    if (cart_goto((uint8_t)o)) hal_serial_write("goto ok\n");
-    else { hal_serial_write("goto FAILED: ");
-           hal_serial_write(cart_err()); hal_serial_write("\n"); }
-    return true;
-  }
+  if (ms > PB_SERVO_CAP_MS) ms = PB_SERVO_CAP_MS;  /* a typo may not run the screw forever */
+  cart_jog((int16_t)us, ms);
+  hal_serial_write("servo done\n");
+  return true;
+}
 
-  if (strncmp(line, "pump", 4) == 0) {
-    uint32_t ms = 0u;
-    const char *arg = line + 4;
-    if (*arg != ' ' || !parse_u32_range_(arg + 1, token_end_(arg + 1), &ms) || ms == 0u) {
-      hal_serial_write("usage: pump <ms> [prime] [hang]\n");
-      return true;
-    }
-    bool prime = false, hang = false;
-    cli_pump_flags_(arg + 1, &prime, &hang);
-    cli_run_dose_(ms, prime, hang);
+static bool cmd_home_(const char *) {
+  if (cart_home()) hal_serial_write("home ok\n");                 /* ONE traverse */
+  else { hal_serial_write("home FAILED: ");
+         hal_serial_write(cart_err()); hal_serial_write("\n"); }
+  return true;
+}
+
+static bool cmd_goto_(const char *arg) {
+  uint32_t o = 0u;
+  if (!parse_u32_(arg, &o) || o < 1u || o > PB_OUTLETS) {
+    hal_serial_write("goto: outlet must be 1..5\n");
     return true;
   }
-  if (strcmp(line, "calib") == 0) { cli_run_dose_(10000u, true, false); return true; }
-  if (strncmp(line, "cal ", 4) == 0) {
-    /* A cal of 0 would make target = 0 for every later command: each dose ignores its
-       millilitre target and runs the full cap, pulses_to_ml divides by zero, and the
-       Cortex-M4's UDIV returns 0 without DIV_0_TRP -- the flood happens and the report
-       says nothing came out. The dosing entry point re-checks the same range. */
-    uint32_t v = 0u;
-    if (!parse_u32_(line + 4, &v) || v < PB_PULSES_PER_L_MIN || v > PB_PULSES_PER_L_MAX ||
-        !cfg_pulses_per_l_set((uint16_t)v)) {
-      hal_serial_write("cal: pulses_per_l must be 1000..20000\n");
-      return true;
-    }
-    cli_printf_u32("pulses_per_l=%lu\n", (uint32_t)cfg_pulses_per_l_get());
+  if (cart_goto((uint8_t)o)) hal_serial_write("goto ok\n");
+  else { hal_serial_write("goto FAILED: ");
+         hal_serial_write(cart_err()); hal_serial_write("\n"); }
+  return true;
+}
+
+static bool cmd_pump_(const char *arg) {
+  uint32_t ms = 0u;
+  if (*arg != ' ' || !parse_u32_range_(arg + 1, token_end_(arg + 1), &ms) || ms == 0u) {
+    hal_serial_write("usage: pump <ms> [prime] [hang]\n");
     return true;
   }
-  if (strcmp(line, "noinit pattern") == 0) {
-    g_nv.pattern = 0xC0FFEE01u;
-    noinit_commit();
-    hal_serial_write("noinit pattern written. Now: `pump 3000 hang`, wait for the reset, "
-                     "then `status` - the pattern AND the checksum must both survive.\n");
+  bool prime = false, hang = false;
+  cli_pump_flags_(arg + 1, &prime, &hang);
+  cli_run_dose_(ms, prime, hang);
+  return true;
+}
+
+static bool cmd_calib_(const char *) { cli_run_dose_(10000u, true, false); return true; }
+
+/* A cal of 0 would make target = 0 for every later command: each dose ignores its
+   millilitre target and runs the full cap, pulses_to_ml divides by zero, and the
+   Cortex-M4's UDIV returns 0 without DIV_0_TRP -- the flood happens and the report
+   says nothing came out. The dosing entry point re-checks the same range. */
+static bool cmd_cal_(const char *arg) {
+  uint32_t v = 0u;
+  if (!parse_u32_(arg, &v) || v < PB_PULSES_PER_L_MIN || v > PB_PULSES_PER_L_MAX ||
+      !cfg_pulses_per_l_set((uint16_t)v)) {
+    hal_serial_write("cal: pulses_per_l must be 1000..20000\n");
     return true;
   }
-  return false;
+  cli_printf_u32("pulses_per_l=%lu\n", (uint32_t)cfg_pulses_per_l_get());
+  return true;
+}
+
+static bool cmd_noinit_pattern_(const char *) {
+  g_nv.pattern = 0xC0FFEE01u;
+  noinit_commit();
+  hal_serial_write("noinit pattern written. Now: `pump 3000 hang`, wait for the reset, "
+                   "then `status` - the pattern AND the checksum must both survive.\n");
+  return true;
 }
 #endif /* PB_BRINGUP */
 
@@ -431,43 +446,72 @@ static bool cmd_sim_(const char *a) {
 }
 #endif /* PB_SIM_CLI */
 
-bool cli_dispatch(const char *line) {
-  if (strcmp(line, "i2c")    == 0) { cmd_i2c_();    return true; }
-  if (strncmp(line, "mux ", 4) == 0) return cmd_mux_(line + 4);
-  if (strcmp(line, "hall")   == 0) { g_hall_stream = true; g_hall_next_ms = 0; return true; }
-  if (strcmp(line, "flow")   == 0) { cmd_flow_();   return true; }
-  if (strcmp(line, "status") == 0) { cli_print_status(); return true; }
-  if (strcmp(line, "help")   == 0) { cmd_help_();   return true; }
-  if (strcmp(line, "dry on")  == 0) {
-    safety_dry_set(true);
-    hal_serial_write("dry=1 - every dose refused until `dry off`\n");
-    return true;
-  }
-  if (strcmp(line, "dry off") == 0) {
-    safety_dry_set(false);
-    hal_serial_write("dry=0\n");
-    return true;
-  }
-  if (strcmp(line, "clear contra") == 0) {     /* two literal tokens, no abbreviation */
-    if (safety_contra_clear())
-      hal_serial_write("contra cleared - the last dose said float OK and the meter saw "
-                       "nothing. If you have not found out why, you have not fixed it.\n");
-    else
-      hal_serial_write("contra=0 already\n");
-    return true;
-  }
-  if (strcmp(line, "stop") == 0) {
-    /* A dose in progress never reaches here: the dosing loop blocks and matches the word
-       byte-wise itself. This arm is the idle console's answer, so `stop` is never
-       `? unknown`, and it clears a stale request so the NEXT dose is not aborted by a
-       stop typed before it. */
-    cli_stop_clear();
-    hal_serial_write("stop: no dose running\n");
-    return true;
-  }
+/* The console in one place: a command is a row here and nothing else. `word` must be the
+   whole line, or only its head when `exact` is false, and the handler gets what follows the
+   word. `help` prints the rows in this order, so a command cannot exist without its line: a
+   help that hid `dry off` would leave an operator latched after a mid-dose reset with no
+   word for the way back. */
+struct console_cmd_t {
+  const char *word;
+  bool        exact;
+  bool      (*run)(const char *arg);
+  const char *help;                     /* NULL only where the row above names this form */
+};
+
+static bool cmd_help_(const char *);
+
+static const console_cmd_t k_commands[] = {
+  { "i2c", true, cmd_i2c_,
+    "i2c              scan the bus (expect 0x20 0x3C, and the LCD at 0x27 or 0x3F)\n" },
+  { "mux ", false, cmd_mux_,
+    "mux <0-15>|all   select, settle, read twice, print the second (14-bit raw)\n" },
+  { "hall", true, cmd_hall_,
+    "hall             stream screw/home/float at 5 Hz; any key stops it\n" },
+  { "flow", true, cmd_flow_,
+    "flow             pulses/second and total since reset\n" },
+  { "status", true, cmd_status_,
+    "status           everything this board knows about itself\n" },
+  { "stop", true, cmd_stop_,
+    "stop             cut a dose in progress\n" },
+  { "dry on", true, cmd_dry_on_,
+    "dry on|off       the dry latch: on refuses every dose, off is the only way back\n" },
+  { "dry off", true, cmd_dry_off_, NULL },
+  { "clear contra", true, cmd_clear_contra_,
+    "clear contra     release the contradiction latch (float said OK, meter saw nothing)\n" },
+  { "help", true, cmd_help_,
+    "help             this\n" },
 #if PB_BRINGUP
-  if (cli_dispatch_bringup_(line)) return true;
+  { "servo ", false, cmd_servo_,
+    "servo <1000-2000> <ms>     drive the servo at that pulse width for <= cap ms, then stop\n" },
+  { "home", true, cmd_home_,
+    "home                       run toward home until HALL_HOME, bounded, zero the count\n" },
+  { "goto ", false, cmd_goto_,
+    "goto <1-5>                 step to the outlet counting screw pulses, bounded\n" },
+  { "pump", false, cmd_pump_,           /* the bare word, so `pump` alone gets the usage line */
+    "pump <ms> [prime] [hang]   assert D6 for <= cap ms; prime widens the no-flow window\n" },
+  { "calib", true, cmd_calib_,
+    "calib                      one fixed 10 s primed dose into a jug (bring-up 7b)\n" },
+  { "cal ", false, cmd_cal_,
+    "cal <pulses per litre>     set the meter calibration, 1000..20000 (7b's number)\n" },
+  { "noinit pattern", true, cmd_noinit_pattern_,
+    "noinit pattern             write the canary, then `pump 3000 hang` (bring-up 7c')\n" },
 #endif
+};
+static const size_t k_command_count = sizeof k_commands / sizeof k_commands[0];
+
+static bool cmd_help_(const char *) {
+  for (size_t i = 0; i < k_command_count; ++i)
+    if (k_commands[i].help) hal_serial_write(k_commands[i].help);
+  return true;
+}
+
+bool cli_dispatch(const char *line) {
+  for (size_t i = 0; i < k_command_count; ++i) {
+    const console_cmd_t *c = &k_commands[i];
+    size_t n = strlen(c->word);
+    bool hit = c->exact ? strcmp(line, c->word) == 0 : strncmp(line, c->word, n) == 0;
+    if (hit) return c->run(line + n);
+  }
 #if PB_SIM_CLI
   if (strncmp(line, "sim ", 4) == 0) return cmd_sim_(line + 4);
 #endif
