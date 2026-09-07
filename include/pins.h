@@ -2,17 +2,11 @@
    number. Source of truth: cad/wiring/nets.py and the pin table it generates. */
 #pragma once
 
-/* There is NO default relay polarity: a board cannot be flashed before someone has READ
-   THE MODULE. `status` prints the compiled level so bring-up can confirm it. EXACTLY ONE
-   of the two, not "at least one": defining both makes PUMP_ON_PFS_LEVEL and
-   PUMP_OFF_PFS_LEVEL below resolve to the same value, so PUMP_ON and PUMP_OFF would drive
-   the pin identically and the pump's rest level would be a coin toss. */
-#if !defined(PB_RELAY_ACTIVE_LOW) && !defined(PB_RELAY_ACTIVE_HIGH)
-#  error "Relay polarity is unknown until bring-up 4a. Define PB_RELAY_ACTIVE_LOW or \
-PB_RELAY_ACTIVE_HIGH in platformio.ini build_flags after you have READ THE MODULE."
-#endif
-#if defined(PB_RELAY_ACTIVE_LOW) && defined(PB_RELAY_ACTIVE_HIGH)
-#  error "Define exactly one of PB_RELAY_ACTIVE_LOW / PB_RELAY_ACTIVE_HIGH."
+/* The relay is active-high. Its polarity used to be a build flag with no default, so that a
+   board could not be flashed before someone had READ THE MODULE; the flag is still demanded
+   for that reason, and `status` prints the compiled level so bring-up can confirm it. */
+#ifndef PB_RELAY_ACTIVE_HIGH
+#  error "Define PB_RELAY_ACTIVE_HIGH in platformio.ini build_flags after you have READ THE MODULE."
 #endif
 
 /* ---- direct pins (cad/wiring/README.md pin table) ---- */
@@ -44,13 +38,8 @@ PB_RELAY_ACTIVE_HIGH in platformio.ini build_flags after you have READ THE MODUL
    with 12 V on COM. */
 #ifdef PB_PUMP_OWNER
 #  define PIN_PUMP_EN 6
-#  ifdef PB_RELAY_ACTIVE_LOW
-     /* PFS level bits, not BSP_IO_LEVEL_*: these are ORed into a whole-word PmnPFS write.
-        IOPORT_CFG_PORT_OUTPUT_HIGH = 0x1, IOPORT_CFG_PORT_OUTPUT_LOW = 0 (r_ioport_api.h). */
-#    define PUMP_ON_PFS_LEVEL  0
-#    define PUMP_OFF_PFS_LEVEL IOPORT_CFG_PORT_OUTPUT_HIGH
-#  else
-#    define PUMP_ON_PFS_LEVEL  IOPORT_CFG_PORT_OUTPUT_HIGH
-#    define PUMP_OFF_PFS_LEVEL 0
-#  endif
+   /* PFS level bits, not BSP_IO_LEVEL_*: these are ORed into a whole-word PmnPFS write.
+      IOPORT_CFG_PORT_OUTPUT_HIGH = 0x1, IOPORT_CFG_PORT_OUTPUT_LOW = 0 (r_ioport_api.h). */
+#  define PUMP_ON_PFS_LEVEL  IOPORT_CFG_PORT_OUTPUT_HIGH
+#  define PUMP_OFF_PFS_LEVEL 0
 #endif

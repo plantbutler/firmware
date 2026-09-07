@@ -540,13 +540,8 @@ static void status_build_(void) {
            (unsigned)PB_CONTROLLER);
   hal_serial_write(b);
 
-#ifdef PB_RELAY_ACTIVE_LOW
-  const char *pol = "ACTIVE_LOW";
-#else
-  const char *pol = "ACTIVE_HIGH";
-#endif
-  snprintf(b, sizeof b, "pump_on_level=%u polarity=%s\n",
-           (unsigned)hal_pump_level_on(), pol);
+  snprintf(b, sizeof b, "pump_on_level=%u polarity=ACTIVE_HIGH\n",   /* fixed in pins.h */
+           (unsigned)hal_pump_level_on());
   hal_serial_write(b);
 }
 
