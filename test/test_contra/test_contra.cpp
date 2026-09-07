@@ -179,10 +179,6 @@ void test_latch_does_not_set_when_the_float_drops_at_the_prime_boundary(void) {
 }
 
 static void test_boot_self_home_runs_under_both_latches(void) {
-  /* The cart's position statics have no teardown reset: an earlier case in this binary that
-     homed for real would leave cart_parked() true before exec_pending() ever runs here.
-     cart_begin() is the only reset. */
-  cart_begin();
   /* Contra first, then dry: the ladder refuses a dry dose rungs above where a granted dose
      could ever set contra, so the other order never latches at all. */
   pb_latch_contra();

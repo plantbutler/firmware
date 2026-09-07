@@ -395,10 +395,9 @@ static const char *pb_result_name(unsigned rv) {
    false without running anything for a result this build cannot reach. No `default:` arm,
    so -Wall -Wextra reports an added enum value as a missing case rather than a vacuous pass.
 
-   Every arm whose dose reaches the pump loop advances the clock past PB_BOOT_GAP_MS first:
-   the cooldown rung reads g_last_end_ms, a safety.cpp static that pb_test_setup() does not
-   reset, and a dose ending above 10 s of this iteration's clock keeps every later
-   iteration's `hal_millis() - g_last_end_ms` a huge wrapped difference, never a small one. */
+   Every arm whose dose reaches the pump loop advances the clock past PB_BOOT_GAP_MS first,
+   or the boot rung answers instead; what an arm leaves behind, the loop's own
+   pb_test_teardown() call resets before the next arm runs. */
 static bool pb_drive_dose_to_result(dose_result_t want) {
   switch (want) {
     case DOSE_OK: {
@@ -452,7 +451,6 @@ static bool pb_drive_dose_to_result(dose_result_t want) {
       safety_force_bad_cal_();
       dose_req_t q = {0}; q.ml = 100u; q.cap_ms = 10000u;
       (void)dose_run(&q);
-      (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);  /* put it back for later arms */
       return true;
     }
     case DOSE_REFUSED_FLOAT: {
@@ -482,8 +480,6 @@ static bool pb_drive_dose_to_result(dose_result_t want) {
       for (uint8_t i = 0; i < PB_I2C_FAIL_LIMIT; ++i) (void)sensors_select(0u);
       dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
       (void)dose_run(&q);
-      sim_set_i2c_fail(false);
-      (void)sensors_begin();                             /* leave the bus healthy behind us */
       return true;
     }
     case DOSE_REFUSED_BUSY: {
@@ -510,7 +506,6 @@ static bool pb_drive_dose_to_result(dose_result_t want) {
       pb_advance(500u);
       dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
       (void)dose_run(&q);
-      sim_flow_storm(0u);                                /* quiet for whatever runs next */
       return true;
     }
     case DOSE_ABORT_CAP: {
@@ -563,8 +558,6 @@ static bool pb_drive_dose_to_result(dose_result_t want) {
                                                   cached healthy flag, so this dose starts */
       dose_req_t q = {0}; q.by_time = true; q.cap_ms = PB_DOSE_CAP_MS_MAX;
       (void)dose_run(&q);
-      sim_set_i2c_fail(false);
-      (void)sensors_begin();                  /* leave the bus healthy for whatever runs next */
       return true;
     }
     case DOSE_ABORT_STOP: {
@@ -599,6 +592,7 @@ void test_pump_is_off_on_every_exit_path(void) {
     TEST_ASSERT_EQUAL_MESSAGE((int)r, (int)dose_last_result(), pb_result_name(r));
     TEST_ASSERT_FALSE_MESSAGE(sim_pump_is_on(),  pb_result_name(r));
     TEST_ASSERT_FALSE_MESSAGE(safety_dosing(),   pb_result_name(r));
+    pb_test_teardown();             /* the arms share one process: each one ends as a case does */
   }
   /* Asserted, so a build that quietly stops driving an arm fails HERE. */
   TEST_ASSERT_EQUAL_UINT_MESSAGE(PB_DRIVABLE_RESULTS, driven, skipped);
@@ -610,13 +604,9 @@ void test_the_ladder_reports_the_more_specific_reason(void) {
   pb_test_setup();
   pb_advance(PB_BOOT_GAP_MS + 1u);
   sim_set_float(true);
-  safety_force_bad_cal_();                          /* see below */
+  safety_force_bad_cal_();
   dose_req_t r = {0}; r.ml = 9999u; r.cap_ms = 1000u;
-  dose_result_t got = dose_run(&r);
-  /* g_pulses_per_l is a safety.cpp static pb_test_setup() cannot reach: put it back before
-     the assertion, or a failure here leaves every later case refusing with cal */
-  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);
-  TEST_ASSERT_EQUAL(DOSE_REFUSED_CAL, got);               /* cal above range */
+  TEST_ASSERT_EQUAL(DOSE_REFUSED_CAL, dose_run(&r));      /* cal above range */
 }
 
 /* Ordering pair, half 2. An operator reading err=dry when the real reason was the
@@ -783,8 +773,7 @@ void test_dose_refused_when_the_cart_is_at_another_outlet(void) {
 
 /* The I2C bus carries the mux select lines and the home hall, so an unhealthy bus is a rig
    that cannot say where its cart is; PB_I2C_FAIL_LIMIT consecutive failed transfers is
-   unhealthy. sensors.cpp's counters are statics, so the bus goes back before the
-   assertion, on the failing path too. */
+   unhealthy. */
 void test_dose_refused_when_i2c_is_unhealthy(void) {
   pb_test_setup();
   pb_advance(PB_BOOT_GAP_MS + 1u);
@@ -793,10 +782,7 @@ void test_dose_refused_when_i2c_is_unhealthy(void) {
   sim_set_i2c_fail(true);
   for (uint8_t i = 0; i < PB_I2C_FAIL_LIMIT; ++i) (void)sensors_select(0u);
   dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
-  dose_result_t r = dose_run(&q);
-  sim_set_i2c_fail(false);
-  (void)sensors_begin();                          /* leave the bus healthy for the next case */
-  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_I2C, r,
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_I2C, dose_run(&q),
       "an unhealthy I2C bus must refuse with i2c");
 }
 
@@ -845,9 +831,7 @@ void test_dose_refused_when_the_idle_pulse_rate_is_nonzero(void) {
   sim_flow_storm(100u);                           /* D2 counting with the pump OFF */
   pb_advance(500u);
   dose_req_t q = {0}; q.by_time = true; q.cap_ms = 1000u;
-  dose_result_t r = dose_run(&q);
-  sim_flow_storm(0u);                             /* and the meter is quiet for the next case */
-  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_NOISE, r,
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_REFUSED_NOISE, dose_run(&q),
       "a non-zero idle pulse rate must refuse with noise, before D6 is ever asserted");
 }
 
@@ -977,7 +961,6 @@ void test_target_pulses_match_the_calibration_within_one_pulse(void) {
     TEST_ASSERT_TRUE_MESSAGE(got >= want && got <= want + 1u,
         "delivered pulses must be within one pulse of ml * cfg / 1000");
   }
-  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
 }
 
 /* Every bound in the loop is an unsigned difference, and the cap must straddle the wrap or
@@ -1228,7 +1211,6 @@ void test_the_rate_rules_are_evaluated_above_the_target_rule(void) {
   dose_req_t q = {0}; q.ml = 250u; q.cap_ms = PB_DOSE_CAP_MS_MAX; q.need_pos = false;
   TEST_ASSERT_EQUAL(DOSE_ABORT_NOISE, dose_run(&q));
   TEST_ASSERT_NOT_EQUAL(DOSE_OK, dose_last_result());
-  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
 }
 
 /* The same storm, stated as the consequence: no target is ever reached by noise. */
@@ -1243,7 +1225,6 @@ void test_a_storm_that_begins_AT_PUMP_ON_aborts_before_the_target_is_reached(voi
   dose_req_t q = {0}; q.ml = 250u; q.cap_ms = PB_DOSE_CAP_MS_MAX;
   TEST_ASSERT_EQUAL(DOSE_ABORT_NOISE, dose_run(&q));
   TEST_ASSERT_EQUAL_UINT16(0u, dose_flow_ml() > 250u ? 1u : 0u);   /* nothing was acked */
-  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
 }
 
 /* The two cases above prove the storm aborts, not the order: their 1250-pulse target needs
@@ -1265,7 +1246,6 @@ void test_the_rate_ceiling_alone_wins_the_race_against_the_target(void) {
   dose_req_t q = {0}; q.ml = 45u; q.cap_ms = PB_DOSE_CAP_MS_MAX;
   TEST_ASSERT_EQUAL_MESSAGE(DOSE_ABORT_NOISE, dose_run(&q),
       "the rate ceiling must win the race against the target rule, not lose it");
-  (void)cfg_pulses_per_l_set(PB_PULSES_PER_L_DEFAULT);   /* put it back for later cases */
 }
 
 /* The no-flow abort, half 1: a line that never primes. The pump runs the whole default
@@ -1419,8 +1399,6 @@ void test_dose_aborts_when_the_expander_read_fails_mid_dose(void) {
   TEST_ASSERT_EQUAL(DOSE_ABORT_POS, r);
   TEST_ASSERT_TRUE_MESSAGE(sim_pump_on_ms() <= (uint32_t)PB_POS_RECHECK_MS + 10u,
       "the bus failure must be caught within PB_POS_RECHECK_MS plus one iteration");
-  sim_set_i2c_fail(false);
-  (void)sensors_begin();                  /* leave the bus healthy for whatever runs next */
 }
 
 /* The last-resort abort, driven by real bytes through sim_serial_rx() while the loop spins,
@@ -1452,7 +1430,6 @@ void test_dry_on_typed_mid_dose_stops_it(void) {
   dose_result_t r = dose_run(&q);
   TEST_ASSERT_EQUAL(DOSE_ABORT_STOP, r);
   TEST_ASSERT_TRUE_MESSAGE(safety_dry(), "`dry on` typed mid-dose must latch the dry flag");
-  safety_dry_set(false);            /* leave it clean for whatever runs next */
 }
 
 /* What makes a 60 s dose legal under a 5592 ms grant, and the first assertion to fail if a
