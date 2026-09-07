@@ -122,9 +122,7 @@ void test_latch_refuses_every_subsequent_dose_including_a_console_one(void) {
 void test_latch_does_not_refuse_homing(void) {
   pb_latch_contra();
   safety_dry_set(true);                       /* both latches, at once */
-  sim_set_screw_pulse_ms(2);
-  sim_set_home_region(0u, 40u);
-  sim_set_cart_at(600u);
+  pb_arrange_homeable_cart(600u);
   TEST_ASSERT_TRUE(cart_home());
   TEST_ASSERT_TRUE(cart_parked());
   TEST_ASSERT_TRUE(safety_contra());          /* and homing did not clear it */
@@ -155,7 +153,7 @@ void test_latch_is_not_cleared_by_dry_off_or_by_a_successful_home(void) {
   pb_latch_contra();
   TEST_ASSERT_TRUE(cli_dispatch("dry off"));
   TEST_ASSERT_TRUE(safety_contra());
-  sim_set_screw_pulse_ms(2); sim_set_home_region(0u, 40u); sim_set_cart_at(600u);
+  pb_arrange_homeable_cart(600u);
   TEST_ASSERT_TRUE(cart_home());
   TEST_ASSERT_TRUE(safety_contra());
 }

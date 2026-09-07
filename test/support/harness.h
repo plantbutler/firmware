@@ -60,6 +60,25 @@ static inline void pb_test_teardown(void) {
 
 static inline void pb_advance(uint32_t ms) { sim_advance(ms); }
 
+/* The rig nearly every dose case starts from: past the boot gap, the meter's tumbling
+   window rebased, the float reading OK and the pump delivering ml_s once it runs (0: a dry
+   line). What a case then changes is its own one line. */
+static inline void pb_arrange_dosable(uint16_t ml_s) {
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_float(true);
+  sim_set_flow_ml_s(ml_s);
+}
+
+/* A cart that can home: position statics reset, a screw that turns at 2 ms a pulse, the
+   home hall answering over pulses 0..40, and the cart standing at `at`. */
+static inline void pb_arrange_homeable_cart(uint32_t at) {
+  TEST_ASSERT_TRUE_MESSAGE(cart_begin(), "arrange: cart_begin()");
+  sim_set_screw_pulse_ms(2u);
+  sim_set_home_region(0u, 40u);
+  sim_set_cart_at(at);
+}
+
 static inline uint32_t pb_count(sim_ev_kind_t kind) {
   const sim_ev_t *ev; size_t n = sim_events(&ev); uint32_t hits = 0;
   for (size_t i = 0; i < n; ++i) if (ev[i].kind == kind) hits++;
