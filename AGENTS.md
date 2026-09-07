@@ -21,9 +21,11 @@ make compiledb       # compile_commands.json for clangd
 Five environments. `uno_r4_wifi` is the one left running; `uno_r4_wifi_bringup` is for
 bring-up 0-7d and is never left running; `uno_r4_wifi_test` runs the on-device suites;
 `uno_r4_wifi_sim` has no pump driver and no network stack; `native` runs the host suites.
-Four further environments — `native_bench`, `native_cal`, `native_measured`,
-`native_nosimcli` — are `native` plus exactly one flag each, and exist only so that four
-suites can be compiled a second time. Nothing uses `PLATFORMIO_BUILD_FLAGS`.
+Five further environments exist only so that a suite can be compiled a second time under
+the other arm of an `#if`: `native_bench`, `native_cal`, `native_measured` and
+`native_nosimcli` are `native` plus exactly one flag each, and `native_live` is `native_cal`
+plus `-DPB_REPORT_POS_UNKNOWN=0` — the going-live arm of `pos=`, stacked on the calibrated
+cart because `pos=ok` is unreachable without it. Nothing uses `PLATFORMIO_BUILD_FLAGS`.
 
 A fresh clone does not build until you create `include/secrets.h` (gitignored). Copy
 `include/secrets.h.example` and fill it in — it is the list, and it says "six names, no
@@ -127,7 +129,10 @@ dedup window, which shows up as a missing row rather than as an error anywhere.
 - `src/netfsm.cpp` — the network state machine: one bounded link or socket step per pass,
   at most two AT commands in any of them.
 - `src/report.cpp` / `src/exec.cpp` — the `k=v` body, and the one bounded command per
-  round trip that comes back in the response.
+  round trip that comes back in the response. The body carries `ch0`..`ch5` and the twelve
+  diagnostics `ch200`..`ch211`; the board's three latches ride among them — `ch207` contra,
+  `ch210` the float flap, `ch211` dry. The first two say why a `float=` they never change
+  is 0; the dry latch is no `float=` term at all — it is what forces `pos=unknown`.
 - `src/sensors.cpp`, `src/pulses.cpp`, `src/cli.cpp`, `src/ui.cpp`, `src/noinit.cpp` — the
   mux and I2C health, the flow and screw meters, the console, the two panels, the latches.
 - `src/hal_uno.cpp` / `src/hal_sim.cpp` — seam 1's two implementations. The board one owns

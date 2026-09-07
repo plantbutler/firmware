@@ -50,7 +50,11 @@ static void test_the_body_worst_case_sum_fits_the_body_cap(void) {
 /* spec §4.6: this ships DEFINED, so no backend water command is ever queued until a
    deliberate later commit. */
 static void test_the_going_live_flag_ships_defined(void) {
+#if PB_REPORT_POS_UNKNOWN
   TEST_ASSERT_EQUAL_INT(1, PB_REPORT_POS_UNKNOWN);
+#else
+  TEST_IGNORE_MESSAGE("going-live arm: [env:native_live] sets the flag to 0; see native");
+#endif
 }
 
 /* §2.1: pinMode(D6, OUTPUT) latches PODR = 0 and drives the pin LOW, discarding a

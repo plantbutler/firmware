@@ -16,8 +16,16 @@
 #include "noinit.h"
 
 static char g_buf[PB_BODY_CAP];
+static char g_blk[PB_BODY_CAP];     /* the diagnostic block alone, at its clamp width */
 
-void setUp(void)    { pb_test_setup(); sensors_begin(); memset(g_buf, 0, sizeof g_buf); }
+/* cart_begin() here for the reason test_cart.cpp calls it at the top of every case: cart.cpp's
+   g_home_seen/g_pos_valid are process-lifetime and sim_reset() does not reach them, so a case
+   that homes the cart (the pos= cases under native_live) would otherwise leave pos=ok and
+   ch208=1 standing for every case after it. Unseen while the flag forced pos=unknown. */
+void setUp(void) {
+  pb_test_setup(); sensors_begin(); (void)cart_begin();
+  memset(g_buf, 0, sizeof g_buf);
+}
 void tearDown(void) { pb_test_teardown(); }
 
 /* A clean sweep: six wired channels with distinct values, and a canary that matches none. */
@@ -149,20 +157,208 @@ static void test_a_granted_dose_clears_the_float_refusal_counter(void) {
   TEST_ASSERT_TRUE(has_tok("float=1"));
 }
 
+/* ---- the latches on the wire (2026-09-07 latches-on-the-wire spec, §1): ch210 = the flap
+   latch (safety_float_flap()), ch211 = the dry latch (safety_dry()), beside ch207's contra
+   latch. float= is UNCHANGED -- still debounced AND !contra AND !flap -- so ch207 and ch210
+   say WHY it is 0, they do not change what it is; ch211 is not a float= term at all, it is
+   what forces pos=unknown (report.cpp's pos_ok). Absent on the wire reads as 0 to the
+   backend (an older board is "never latched"), so both must be PRESENT on a clean boot,
+   as 0. Three latches, three channels: every case below that stands one of them up reads
+   the OTHER TWO at 0 on the same report (spec §5 A4), ch207 included -- see the contra
+   case for why the third sibling is not optional. ---- */
+static void test_ch210_and_ch211_are_zero_on_a_clean_boot(void) {
+  fresh_sweep();
+  TEST_ASSERT_FALSE(safety_contra());
+  TEST_ASSERT_FALSE(safety_float_flap());
+  TEST_ASSERT_FALSE(safety_dry());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
+}
+
+/* The flap trips on the PB_FLOAT_FLAP_LIMIT-th consecutive float refusal (safety.h: the
+   predicate is >=) and is cleared on dose_end_ml_()'s path, which only a GRANTED dose
+   reaches -- so the clear below is a real dose_run() that flows to its target, the same
+   fixture test_dose.cpp drives DOSE_OK with, not the accessor called with false.
+
+   The sibling is asserted at 0 at both points (spec §5 A4): with only ch210=1 checked, an
+   emitter that put `flap || dry` on BOTH channels passed this file whole. Run and reverted:
+   that merge now fails here on ch211=0, and the dry case below fails it on ch210=0. */
+static void test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dose(void) {
+  fresh_sweep();
+  sim_set_float(true);
+  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);
+  TEST_ASSERT_TRUE(safety_float_flap());
+  TEST_ASSERT_FALSE(safety_dry());
+  TEST_ASSERT_FALSE(safety_contra());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);   /* the flap is not the dry latch */
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);   /* nor the contradiction */
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);   /* unchanged: the flap still forces it */
+
+  pb_advance(PB_BOOT_GAP_MS + 1u);
+  pulses_begin();
+  sim_set_flow_ml_s(85u);
+  dose_req_t q = {0};
+  q.ml = (uint16_t)PB_DOSE_RIG_MAX_ML;
+  q.cap_ms = PB_DOSE_CAP_MS_MAX;
+  q.long_prime = true;
+  TEST_ASSERT_EQUAL_MESSAGE(DOSE_OK, dose_run(&q), "arrange: a granted dose");
+  TEST_ASSERT_FALSE(safety_float_flap());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=1"), g_buf);
+}
+
+/* With the tank reading OK, ch211=1 rides beside float=1: the dry latch is in pos='s formula
+   (test_report_pos_is_unknown_while_the_dry_latch_is_set), not in float='s. Pinned because
+   AGENTS.md and report.cpp's own comment once grouped all three latches as float='s
+   explainers -- an `&& !safety_dry()` added to the fl line on that reading fails here.
+   ch210 is asserted at 0 beside it, for the reason the flap case above gives. */
+static void test_ch211_is_one_while_the_dry_latch_stands(void) {
+  fresh_sweep();
+  sim_set_float(true);
+  safety_dry_set(true);
+  TEST_ASSERT_FALSE(safety_float_flap());
+  TEST_ASSERT_FALSE(safety_contra());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);   /* the dry latch is not the flap */
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);   /* nor the contradiction */
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=1"), g_buf);   /* dry is not a float= term */
+  safety_dry_set(false);                           /* `dry off`: the only way back */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=0"), g_buf);
+}
+
+/* The third sibling, standing ALONE. The flap and dry cases above never latch the
+   contradiction, and the one case that stands all three up (the widest-body case further
+   down) has the flap on the same report, so between them an emitter reading `flap || contra`
+   on ch210 -- or `dry || contra` on ch211 -- passed this file whole: run and reverted, that
+   OR now fails here on ch210=0. pb_latch_contra() is a real contradicting dose, the latch's
+   only setter; it neither refuses for float nor holds the board dry, so the other two must
+   read 0 beside ch207=1. float= goes to 0 with it: contra IS a float= term (§2.10). */
+static void test_ch207_alone_leaves_ch210_and_ch211_at_zero(void) {
+  fresh_sweep();
+  pb_latch_contra();
+  TEST_ASSERT_FALSE(safety_float_flap());
+  TEST_ASSERT_FALSE(safety_dry());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=0"), g_buf);   /* the contradiction is not the flap */
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);   /* nor the dry latch */
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);
+}
+
+/* Both latches up on ONE report, both channels 1 (spec §5 A4's other half). The two cases
+   above never latch both, so an emitter in which one latch MASKS the other -- ch210 as
+   `flap && !dry`, or ch211 as `dry && !flap` -- read correctly in each of them and passed
+   this file whole; either masking now fails here on the channel it zeroes. `dry off` then
+   drops only ch211: the flap is still standing, and the wire still says so. */
+static void test_ch210_and_ch211_are_both_one_when_both_latches_stand(void) {
+  fresh_sweep();
+  sim_set_float(true);
+  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);
+  safety_dry_set(true);
+  TEST_ASSERT_TRUE(safety_float_flap());
+  TEST_ASSERT_TRUE(safety_dry());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);       /* the flap forces it; dry does not */
+  safety_dry_set(false);
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=0"), g_buf);
+}
+
 static void test_report_pos_is_unknown_while_the_going_live_flag_is_set(void) {
+#if PB_REPORT_POS_UNKNOWN
   fresh_sweep();
   TEST_ASSERT_EQUAL_INT(1, PB_REPORT_POS_UNKNOWN);   /* ships defined — §4.6 */
   TEST_ASSERT_TRUE(build() > 0);
   TEST_ASSERT_TRUE(has_tok("pos=unknown"));
   TEST_ASSERT_FALSE(has_tok("pos=ok"));
+#else
+  TEST_IGNORE_MESSAGE("going-live arm: [env:native_live] sets the flag to 0; see native");
+#endif
 }
 
+/* The dry term of pos_ok, `!safety_dry() && cart_pos_known() && sensors_i2c_healthy()`
+   (report.cpp; spec §2.10, §4.6: otherwise water_rules queues doses the board will refuse
+   and ack, paging HIGH once per cooldown, forever). It can be seen under [env:native_live]
+   and NOWHERE else: every other env has PB_REPORT_POS_UNKNOWN at 1, where the #if arm says
+   unknown before the formula is reached, and [env:native] with the flag off would still not
+   do, because cart_pos_known() is a compile-time false while the pitch is uncalibrated. So
+   this case ran vacuous from the day it was written -- dropping `!safety_dry() &&` from
+   report.cpp passed it, and passed the two later assertions that repeated it -- and the flag
+   guard below is what makes that visible as IGNORED rather than PASSED. Under native_live:
+   a homed cart says pos=ok, `dry on` turns that into unknown with the cart not moved and the
+   bus still healthy, and `dry off` gives it back. The first report, before the home, pins the
+   middle term the same way. */
 static void test_report_pos_is_unknown_while_the_dry_latch_is_set(void) {
+#if PB_REPORT_POS_UNKNOWN || PB_PULSES_PER_GATE == 0
+  TEST_IGNORE_MESSAGE("pos=ok is unreachable here (flag on, or uncalibrated); see native_live");
+#else
   fresh_sweep();
-  safety_dry_set(true);
+  TEST_ASSERT_TRUE(cart_begin());
+  TEST_ASSERT_FALSE(cart_pos_known());
   TEST_ASSERT_TRUE(build() > 0);
-  TEST_ASSERT_TRUE(has_tok("pos=unknown"));
-  safety_dry_set(false);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);   /* no home seen since boot */
+
+  sim_set_screw_pulse_ms(2);
+  sim_set_home_region(0, 40);
+  sim_set_cart_at(PB_PULSES_HOME_TO_1 + 4u * PB_PULSES_PER_GATE);   /* over gate five */
+  TEST_ASSERT_TRUE_MESSAGE(cart_home(), "arrange: a homed cart");
+  TEST_ASSERT_TRUE(cart_pos_known());
+  TEST_ASSERT_TRUE(sensors_i2c_healthy());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=ok"), g_buf);
+
+  safety_dry_set(true);
+  TEST_ASSERT_TRUE(cart_pos_known());              /* dry moves nothing: only the word changes */
+  TEST_ASSERT_TRUE(sensors_i2c_healthy());
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  TEST_ASSERT_FALSE_MESSAGE(has_tok("pos=ok"), g_buf);
+
+  safety_dry_set(false);                           /* `dry off`: the only way back */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=ok"), g_buf);
+#endif
+}
+
+/* The last term of the same formula, in the same arm: PB_I2C_FAIL_LIMIT failed expander
+   transfers (test_sensors.cpp's idiom) take sensors_i2c_healthy() down without moving the
+   cart, and pos= follows it to unknown. Pinned beside the dry case because the whole #else
+   arm was compiled nowhere before native_live existed, so no term of it had ever run. */
+static void test_report_pos_is_unknown_after_the_expander_goes_unhealthy(void) {
+#if PB_REPORT_POS_UNKNOWN || PB_PULSES_PER_GATE == 0
+  TEST_IGNORE_MESSAGE("pos=ok is unreachable here (flag on, or uncalibrated); see native_live");
+#else
+  fresh_sweep();
+  TEST_ASSERT_TRUE(cart_begin());
+  sim_set_screw_pulse_ms(2);
+  sim_set_home_region(0, 40);
+  sim_set_cart_at(PB_PULSES_HOME_TO_1 + 4u * PB_PULSES_PER_GATE);
+  TEST_ASSERT_TRUE_MESSAGE(cart_home(), "arrange: a homed cart");
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=ok"), g_buf);
+
+  sim_set_i2c_fail(true);
+  for (uint8_t i = 0; i < PB_I2C_FAIL_LIMIT; ++i) (void)sensors_select(0);
+  TEST_ASSERT_FALSE(sensors_i2c_healthy());
+  TEST_ASSERT_TRUE(cart_pos_known());              /* the cart has not moved: only the bus is gone */
+  TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
+#endif
 }
 
 static void test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated(void) {
@@ -317,6 +513,38 @@ static void test_a_saturated_diagnostic_counter_stays_inside_max_raw(void) {
   TEST_ASSERT_TRUE(has_tok(clamp));
 }
 
+/* The clamp for EVERY index, ch210 and ch211 included. Through report_build() the two latch
+   channels are booleans and can never sit above PB_DIAG_CLAMP, so "clamped like the rest"
+   (spec §1) had no failing test behind it for them: an emitter that skipped indices 10 and
+   11 passed the whole suite. report_put_diags() takes the array, so this case hands it
+   twelve values above the clamp and reads twelve clamped tokens back -- and the block's
+   byte count is config.h's "twelve diagnostics, chNNN=999999 12*13" row, measured. So is
+   the row's parenthetical, the block's width WITHOUT the clamp: the same twelve fields at
+   a uint32_t's ten digits are 17 bytes each, 12*17. That factor was hand-typed as 16 from
+   the ten-channel table on, and nothing measured it. */
+static void test_every_diagnostic_channel_is_clamped_on_the_wire_the_two_latches_included(void) {
+  uint32_t above[PB_DIAG_CHANNELS];
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) above[i] = 0xFFFFFFFFu;
+  uint16_t n = 0;
+  TEST_ASSERT_TRUE(report_put_diags(g_buf, sizeof g_buf, &n, above));
+  g_buf[n] = '\0';
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) {
+    char tok[24];
+    snprintf(tok, sizeof tok, "ch%lu=%lu", (unsigned long)(200u + i), (unsigned long)PB_DIAG_CLAMP);
+    TEST_ASSERT_TRUE_MESSAGE(has_tok(tok), g_buf);
+  }
+  TEST_ASSERT_EQUAL_UINT16((uint16_t)(PB_DIAG_CHANNELS * 13), n);   /* " chNNN=999999" x 12 */
+
+  uint16_t unclamped = 0;                            /* " chNNN=4294967295" x 12: 17 each */
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) {
+    char raw[24];
+    unclamped = (uint16_t)(unclamped + snprintf(raw, sizeof raw, " ch%lu=%lu",
+                                                (unsigned long)(200u + i), (unsigned long)above[i]));
+  }
+  TEST_ASSERT_EQUAL_UINT16((uint16_t)(PB_DIAG_CHANNELS * 17), unclamped);
+  TEST_ASSERT_EQUAL_UINT16((uint16_t)(PB_DIAG_CHANNELS * 4), (uint16_t)(unclamped - n));
+}
+
 /* The same producer, at the other end of its range: one leaked pulse must reach the wire as
    BOTH ch205 and err=leak. §4.1 carries `leak` in its fixed enum and §1 says there is no
    latch, so this is the only surface the token has. */
@@ -394,20 +622,137 @@ static void test_a_break_inside_the_stack_margin_latches_err_heap(void) {
   TEST_ASSERT_TRUE_MESSAGE(has_tok("err=heap"), g_buf);
 }
 
+/* The buffer arithmetic, pinned to the bytes. PB_BODY_WORST_SUM (config.h) is a hand sum of
+   every field at its widest; this case builds that body and checks the number. Every field
+   report_build() reads is driven to its maximum: the six wired channels at the 14-bit
+   ceiling, t= at UINT32_MAX (the clock parked ONE step short of it, because the stamp's own
+   hal_millis() advances the fake before it reads -- parked AT the target, the earlier
+   version of this case stamped t=0 and measured a 4-byte t=, never the 13 the table counts,
+   and asserted nothing that would have noticed), ack= at UINT32_MAX, flow_ml= at
+   PB_DOSE_MAX_ML, err= at the longest token. The one field no host case can drive to its
+   width through report_build() is the diagnostic block -- three producers are constants in
+   hal_sim.cpp, four are booleans -- so the block as built is swapped for the block
+   report_put_diags() writes with all twelve inputs above the clamp, and the total must EQUAL
+   the table: a thirteenth channel or a wider token fails here, and so does a hand-edit of
+   the constant. Before this pin, PB_BODY_WORST_FIXED set back to the ten-diagnostic 288
+   passed every case in the tree, this one included. */
 static void test_report_fits_the_buffer_at_maximum_field_widths(void) {
   for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch) sim_set_channel(ch, 16383);  /* 14-bit maximum */
   sim_set_channel(PB_CANARY_CHANNEL, 1);
   TEST_ASSERT_TRUE(sensors_sweep());
-  sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt()));   /* jump, never 2^31 steps */
+  sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt() - 1u));   /* jump, never 2^31 steps */
   report_set_ack(4294967295u, PB_DOSE_MAX_ML, "resetmid");
   TEST_ASSERT_TRUE(build() > 0);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("t=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch0=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch5=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ack=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("flow_ml=1000"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=resetmid"), g_buf);
   TEST_ASSERT_TRUE(strlen(g_buf) < PB_BODY_CAP);
-  TEST_ASSERT_TRUE(strlen(g_buf) <= PB_CONTROLLER_WIRE + 2 + PB_BODY_WORST_FIXED);
+
+  /* the diagnostic block as built: from the first diagnostic to the space before float= */
+  const char *d0 = strstr(g_buf, " ch200=");
+  const char *d1 = strstr(g_buf, " float=");
+  TEST_ASSERT_NOT_NULL(d0);
+  TEST_ASSERT_NOT_NULL(d1);
+  TEST_ASSERT_TRUE(d1 > d0);
+  const size_t diag_built = (size_t)(d1 - d0);
+
+  /* the same block at its clamp width, from the emitter itself */
+  uint32_t above[PB_DIAG_CHANNELS];
+  for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) above[i] = 0xFFFFFFFFu;
+  uint16_t diag_worst = 0;
+  TEST_ASSERT_TRUE(report_put_diags(g_blk, sizeof g_blk, &diag_worst, above));
+
+  char c[16];
+  const int cw = snprintf(c, sizeof c, "c=%u", (unsigned)PB_CONTROLLER);   /* the excluded term */
+  const size_t worst = strlen(g_buf) - (size_t)cw - diag_built + diag_worst;
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)PB_BODY_WORST_SUM, (uint32_t)worst);
+  TEST_ASSERT_TRUE(worst <= (size_t)PB_BODY_WORST_FIXED);
+  TEST_ASSERT_TRUE((size_t)PB_BODY_WORST_FIXED - worst < 32u);   /* rounded up, never loosened */
+  TEST_ASSERT_TRUE(PB_CONTROLLER_WIRE + 2u + PB_BODY_WORST_FIXED <= PB_BODY_CAP);
+}
+
+/* The runtime half of the case above. That one pins the table by SUBSTITUTING the diagnostic
+   block; this one builds the widest body report_build() itself can produce on the host, from
+   the real producers, and proves it reaches the wire: not dropped as txcap, under
+   PB_BODY_CAP, no longer than the table, every clamp applied on a value that actually
+   overflowed. What the host can drive: ch204 (the float-change age -- a clock jump of
+   ~2^32 ms puts it a thousandfold past the clamp), ch205 (the leak count, stormed past the
+   clamp as test_a_saturated_diagnostic_counter_stays_inside_max_raw does), ch209 to the
+   fake's whole 16384 reload (five digits: its ceiling, one short of the clamp), and the three
+   latches at 1 on one report -- ch207 by a real contradicting dose, ch210 by
+   PB_FLOAT_FLAP_LIMIT refusals, ch211 by `dry on` -- which no other case builds. What it
+   cannot, and why the equality stays with the case above: ch200..ch202 are constants in
+   hal_sim.cpp; ch203 gains three errors per PB_I2C_BACKOFF_MS of fake time and has no
+   setter; ch206 is a uint16_t whose only host writer is a seam-2 call check.sh keeps out of
+   this file; ch208 is a boolean. Those fields leave the body some forty bytes short of the
+   table, so the bound here is an inequality on the real path, not a second copy of the sum. */
+static void test_report_build_fits_the_buffer_with_every_host_drivable_field_at_its_widest(void) {
+  for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch) sim_set_channel(ch, 16383);  /* 14-bit maximum */
+  sim_set_channel(PB_CANARY_CHANNEL, 1);
+  sim_set_float(false);
+  TEST_ASSERT_TRUE(sensors_sweep());
+  sim_set_float(true);
+  TEST_ASSERT_TRUE(sensors_sweep());             /* a float change is on record: ch204 counts */
+
+  pb_latch_contra();                             /* ch207: float OK, no flow, a real dose */
+  for (int i = 0; i < PB_FLOAT_FLAP_LIMIT; ++i) safety_float_refusal_count(true);   /* ch210 */
+  safety_dry_set(true);                                                            /* ch211 */
+
+  pulses_leak_poll(false);                       /* ch205: past the clamp, pump off, as loop() polls */
+  sim_flow_storm(2000);
+  for (int i = 0; i < 100 && pulses_leak_count() <= (uint32_t)PB_DIAG_CLAMP; ++i) {
+    sim_advance(10000);
+    pulses_leak_poll(false);
+  }
+  sim_flow_storm(0);
+  TEST_ASSERT_TRUE(pulses_leak_count() > (uint32_t)PB_DIAG_CLAMP);
+
+  sim_wdt_rate_hz(1000000u);                     /* ch209: the counter drains to 0 inside the probe */
+  (void)hal_wdt_alive();
+  sim_wdt_rate_hz(2929u);
+  TEST_ASSERT_TRUE(hal_wdt_last_delta() >= 10000u);   /* five digits: the whole reload */
+
+  /* Parked ONE step short, as the case above explains -- and nothing that reads the clock may
+     run between here and build(): sensors_float_change_age_s() is one hal_millis() call, and
+     asserting it here stamped t=0. Its clamp is read off the wire below instead. */
+  sim_set_clock_ms((uint32_t)(0xFFFFFFFFu - hal_boot_salt() - 1u));   /* t= widest; ch204 past the clamp */
+  report_set_ack(4294967295u, PB_DOSE_MAX_ML, "resetmid");
+
+  const uint16_t n = build();
+  TEST_ASSERT_TRUE_MESSAGE(n > 0, "the widest host body was dropped as txcap");
+  TEST_ASSERT_EQUAL_UINT16(n, (uint16_t)strlen(g_buf));
+  TEST_ASSERT_TRUE(n < PB_BODY_CAP);
+  char c[16];
+  const int cw = snprintf(c, sizeof c, "c=%u", (unsigned)PB_CONTROLLER);
+  TEST_ASSERT_TRUE_MESSAGE(n <= (size_t)cw + PB_BODY_WORST_SUM, g_buf);   /* never longer than the table */
+
+  char clamp[24];
+  snprintf(clamp, sizeof clamp, "ch204=%lu", (unsigned long)PB_DIAG_CLAMP);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok(clamp), g_buf);
+  snprintf(clamp, sizeof clamp, "ch205=%lu", (unsigned long)PB_DIAG_CLAMP);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok(clamp), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("t=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch0=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch5=16383"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch207=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch210=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ch211=1"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("float=0"), g_buf);
+  /* the WIDER word, on every arm: the flag forces it here, and under native_live the dry
+     latch and no-home-since-boot each do */
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("pos=unknown"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("ack=4294967295"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("flow_ml=1000"), g_buf);
+  TEST_ASSERT_TRUE_MESSAGE(has_tok("err=resetmid"), g_buf);
 }
 
 /* backend/fake_device.py's build_report() is the shape butler was written against:
    "c= t= chN=... float= pos= ack= flow_ml=", space-joined, one trailing newline. Ours adds
-   ch200..ch209 and err=; strip those and the two must be byte-identical. */
+   ch200..ch211 and err=; strip those and the two must be byte-identical. */
 static void test_report_matches_the_fake_device_shape(void) {
   fresh_sweep();
   sim_set_float(true);
@@ -419,8 +764,10 @@ static void test_report_matches_the_fake_device_shape(void) {
   for (char *tok = strtok(copy, " \n"); tok; tok = strtok(NULL, " \n")) {
     /* The diagnostic RANGE by name, never the prefix "ch2": `ch2=8002` is a WIRED channel and
        starts with the same three characters, so a prefix filter deletes a token the golden
-       string keeps and this case can never pass. */
-    if (strncmp(tok, "ch20", 4) == 0 || strncmp(tok, "err=", 4) == 0) continue;
+       string keeps and this case can never pass. Two four-character prefixes, because the
+       range is ch200..ch211 and the latches at ch210/ch211 start "ch21". */
+    if (strncmp(tok, "ch20", 4) == 0 || strncmp(tok, "ch21", 4) == 0 ||
+        strncmp(tok, "err=", 4) == 0) continue;
     if (spine[0]) strncat(spine, " ", sizeof spine - strlen(spine) - 1);
     strncat(spine, tok, sizeof spine - strlen(spine) - 1);
   }
@@ -776,8 +1123,14 @@ int main(void) {
   RUN_TEST(test_report_float_is_only_ever_zero_or_one);
   RUN_TEST(test_repeated_float_refusals_drive_float_to_zero_on_the_wire);
   RUN_TEST(test_a_granted_dose_clears_the_float_refusal_counter);
+  RUN_TEST(test_ch210_and_ch211_are_zero_on_a_clean_boot);
+  RUN_TEST(test_ch210_is_one_while_the_flap_stands_and_zero_after_a_granted_dose);
+  RUN_TEST(test_ch211_is_one_while_the_dry_latch_stands);
+  RUN_TEST(test_ch207_alone_leaves_ch210_and_ch211_at_zero);
+  RUN_TEST(test_ch210_and_ch211_are_both_one_when_both_latches_stand);
   RUN_TEST(test_report_pos_is_unknown_while_the_going_live_flag_is_set);
   RUN_TEST(test_report_pos_is_unknown_while_the_dry_latch_is_set);
+  RUN_TEST(test_report_pos_is_unknown_after_the_expander_goes_unhealthy);
   RUN_TEST(test_report_pos_is_unknown_when_the_gate_pitch_is_uncalibrated);
   RUN_TEST(test_report_omits_flow_ml_when_there_is_no_ack);
   RUN_TEST(test_report_never_emits_ack_without_flow_ml);
@@ -788,12 +1141,14 @@ int main(void) {
   RUN_TEST(test_report_t_differs_across_two_boots_fifteen_seconds_apart);
   RUN_TEST(test_report_never_repeats_a_key);
   RUN_TEST(test_a_saturated_diagnostic_counter_stays_inside_max_raw);
+  RUN_TEST(test_every_diagnostic_channel_is_clamped_on_the_wire_the_two_latches_included);
   RUN_TEST(test_ch205_counts_leak_pulses_and_err_leak_reaches_the_wire);
   RUN_TEST(test_ch204_is_zero_before_d5_has_ever_changed_not_a_sentinel);
   RUN_TEST(test_report_err_token_never_contains_whitespace);
   RUN_TEST(test_report_refuses_to_send_on_truncation_and_says_txcap);
   RUN_TEST(test_a_break_inside_the_stack_margin_latches_err_heap);
   RUN_TEST(test_report_fits_the_buffer_at_maximum_field_widths);
+  RUN_TEST(test_report_build_fits_the_buffer_with_every_host_drivable_field_at_its_widest);
   RUN_TEST(test_report_matches_the_fake_device_shape);
   RUN_TEST(test_response_parses_next_only);
   RUN_TEST(test_response_parses_a_water_command);

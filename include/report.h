@@ -15,6 +15,16 @@ uint32_t report_t_ms(void);
    (butler.py:220-250), and the body is assembled from four independent sources. */
 uint16_t report_build(char *buf, uint16_t cap);
 
+/* The diagnostic block -- ch200..ch(200+PB_DIAG_CHANNELS-1), every value min(v, PB_DIAG_CLAMP)
+   -- over ITS INPUTS, an array of PB_DIAG_CHANNELS values. report_build() hands it the twelve
+   producers; test_report hands it twelve values above the clamp. Public for that second
+   caller and no other reason: three of the producers are constants in hal_sim.cpp and four
+   are booleans, so through report_build() alone neither the clamp on ch207/ch208/ch210/ch211
+   nor the block's full width is observable on the host -- an emitter that skipped the clamp
+   for the two latch channels passed every case in the tree before this seam existed. Appends
+   at *n; false on truncation, exactly as the body's other put_ helpers. */
+bool report_put_diags(char *buf, uint16_t cap, uint16_t *n, const uint32_t *diag);
+
 void     report_set_ack(uint32_t id, uint16_t flow_ml, const char *err);
 void     report_clear_ack(void);
 bool     report_ack_is_recv(void);

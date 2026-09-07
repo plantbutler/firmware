@@ -205,20 +205,40 @@ commit the number, and delete -DPB_ALLOW_UNCALIBRATED from [env:uno_r4_wifi]."
 /* ---- buffers. Main stack is 1024 B (bsp_cfg.h:26) -- every one of these is
    FILE-STATIC, never a stack local.
 
-   PB_BODY_WORST_FIXED is the report body's worst case with `c=` and its value EXCLUDED,
+   PB_BODY_WORST_SUM is the report body's worst case with `c=` and its value EXCLUDED,
    summed term by term at the maximum width the grammar permits, with every diagnostic
-   clamped to six digits (§4.1):
+   clamped to six digits (§4.1); PB_BODY_WORST_FIXED is that sum rounded up to the next
+   multiple of 32, derived below rather than typed. PB_DIAG_CHANNELS is the count on the
+   third line, and report.cpp static_asserts its diag array against it, so the array cannot
+   grow without this sum being re-done. ch200..ch209 are §4.1's ten; ch210 (the flap latch)
+   and ch211 (the dry latch) are the 2026-09-07 latches-on-the-wire spec's two, summed at
+   the clamp width like ch207/ch208, not at their real 0/1 width:
 
        t=4294967295                        13
        six wired channels, chN=16383     6*10 =  60   (14-bit ADC: 5 digits)
-       ten diagnostics, chNNN=999999    10*13 = 130   (clamped; unclamped it is 10*16 = 160)
+       twelve diagnostics, chNNN=999999 12*13 = 156   (clamped; unclamped, a uint32_t's ten
+                                                       digits make it 12*17 = 204)
        float=1                              8
        pos=unknown                         12
        ack=4294967295                      15
        flow_ml=1000                        13   (bounded by PB_DOSE_MAX_ML)
        err=resetmid                        13   (longest token is 8 chars)
+       the trailing newline                 1
                                           ---
-                                          264, rounded up to 288
+                                          291, rounded up to 320 (the ten-diagnostic sum
+                                               was 264, rounded up to 288)
+
+   THE SUM IS PINNED TO THE BYTES, not maintained on trust: test_report's
+   test_report_fits_the_buffer_at_maximum_field_widths builds a body with every field the
+   host can drive at its maximum, swaps the diagnostic block for what report_put_diags()
+   writes when all twelve inputs sit above the clamp (three producers are constants in
+   hal_sim.cpp and four are booleans, so no host case reaches that width through
+   report_build() itself), and asserts the total EQUALS PB_BODY_WORST_SUM. A thirteenth
+   channel, a wider token or a hand-edit of the number below fails that case, which is what
+   "updated, not loosened" has to mean for a constant nothing else measures. Its runtime
+   twin builds the widest body the host producers CAN make through report_build() -- ch204
+   and ch205 past the clamp, the three latches up at once -- and proves it reaches the wire
+   under the cap.
 
    The old PB_BODY_CAP of 288 therefore had NO margin at all: any PB_CONTROLLER longer
    than six characters overflowed, and the failure mode is err=txcap with the report
@@ -229,7 +249,9 @@ commit the number, and delete -DPB_ALLOW_UNCALIBRATED from [env:uno_r4_wifi]."
    PB_BODY_CAP, and that PB_CONTROLLER is inside 0..255 -- a RANGE, not a "not empty",
    because board 0 is a real board and is the one the app fills in by default. ---- */
 #define PB_CONTROLLER_WIRE       3     /* strlen("255"); c= is 0..255 (butler.MAX_CONTROLLER) */
-#define PB_BODY_WORST_FIXED    288
+#define PB_DIAG_CHANNELS        12     /* ch200..ch211: the "twelve diagnostics" line above */
+#define PB_BODY_WORST_SUM      291     /* the table above, to the byte; test_report pins it */
+#define PB_BODY_WORST_FIXED    (((PB_BODY_WORST_SUM + 31) / 32) * 32)   /* 320 */
 #define PB_BODY_CAP            384
 #define PB_DIAG_CLAMP       999999     /* every chN diagnostic is min(v, this) on the way out:
                                           chN must be < MAX_RAW = 2**31, and a storming D2
