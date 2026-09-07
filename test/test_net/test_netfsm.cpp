@@ -1,4 +1,4 @@
-/* test/test_net/test_netfsm.cpp — seam 2, the FSM, the AT budget, the retry policy. */
+/* test_netfsm.cpp: the network FSM, its AT budget per pass and its retry policy, on the host. */
 #include <unity.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,15 +30,15 @@ static void test_sock_close_is_idempotent_and_leaves_the_socket_unallocated(void
   TEST_ASSERT_TRUE(sock_open());
   sock_close();
   link_fake_pass_begin();
-  sock_close();                  /* the second close costs nothing and must not fault */
+  sock_close();
   TEST_ASSERT_EQUAL_UINT16(0, link_fake_at_count());
-  TEST_ASSERT_TRUE(sock_open()); /* the precondition holds again only because _sock == -1 */
+  TEST_ASSERT_TRUE(sock_open()); /* opens only because nothing is allocated */
   sock_close();
 }
 
 static void test_the_fake_counts_at_commands_per_pass(void) {
   link_fake_pass_begin();
-  link_join();                                    /* WiFi.cpp:43-67 — 2 ATs, never 3 */
+  link_join();                                    /* a join is 2 ATs in the driver, never 3 */
   TEST_ASSERT_EQUAL_UINT16(2, link_fake_at_count());
   link_fake_pass_begin();
   TEST_ASSERT_EQUAL(LINK_UP, link_state());       /* status() — 1 AT */
@@ -50,7 +50,7 @@ static void test_the_fake_counts_at_commands_per_pass(void) {
   sock_close();                                   /* _CLIENTCLOSE — 1 AT */
   TEST_ASSERT_EQUAL_UINT16(1, link_fake_at_count());
   link_fake_pass_begin();
-  sock_close();                                   /* _sock == -1 — 0 ATs */
+  sock_close();                                   /* nothing allocated — 0 ATs */
   TEST_ASSERT_EQUAL_UINT16(0, link_fake_at_count());
 }
 
@@ -59,35 +59,25 @@ static void test_a_second_link_reset_still_produces_a_working_at_round_trip(void
   link_reset();
   TEST_ASSERT_EQUAL_UINT16(1, link_fake_reset_count());
   TEST_ASSERT_EQUAL_UINT16(1, link_desyncs());
-  link_join();                          /* must resync: 2 ATs into a REOPENED UART */
+  link_join();                          /* resyncs: 2 ATs into a reopened UART */
   TEST_ASSERT_EQUAL(LINK_UP, link_state());
-  link_reset();                         /* and again — this is the one that used to die */
+  link_reset();
   link_join();
   TEST_ASSERT_EQUAL(LINK_UP, link_state());
   TEST_ASSERT_EQUAL_UINT16(2, link_fake_reset_count());
 }
 
-/* §3 change 1: a FAILED connect still ALLOCATES the socket (_sock >= 0), because
-   getSocket() allocates before the connect runs. That is the arithmetic that keeps a
-   CONNECT pass at 2 ATs rather than 3 -- if a failed open instead left _sock == -1, the
-   next sock_close() would see the precondition already satisfied and cost 0 ATs, silently
-   hiding the fact that a real failed WiFiClient::connect() still owns a socket the caller
-   must close. Proving "left allocated" here means proving the ONE observable consequence
-   of allocation this seam exposes: the next sock_close() must still cost its AT. */
+/* The driver allocates the socket before the connect runs, so a refused connect still owns
+   one, and the only sign of that this seam shows is that the next sock_close() costs its AT. */
 static void test_a_failed_connect_leaves_the_socket_allocated(void) {
   up();
   link_fake_fail_open(true);
   TEST_ASSERT_FALSE(sock_open());       /* _BEGINCLIENT + _CLIENTCONNECT both ran; refused */
   link_fake_pass_begin();
-  sock_close();                          /* if _sock were -1 already, this would cost 0 ATs */
+  sock_close();                          /* 0 ATs if nothing were allocated */
   TEST_ASSERT_EQUAL_UINT16(1, link_fake_at_count());
 }
 
-/* No case in this file called sock_write() before this one -- link_fake_sent() and
-   link_fake_write_count() are additions to the skeleton's ten primitives (see the commit
-   that adds them), and an accessor nothing has ever called is an accessor whose first bug
-   report comes from task 24/25. Exercise it once and read back both what it reports and
-   what actually crossed the seam. */
 static void test_sock_write_records_the_bytes_and_the_write_count(void) {
   up();
   TEST_ASSERT_TRUE(sock_open());
@@ -95,19 +85,17 @@ static void test_sock_write_records_the_bytes_and_the_write_count(void) {
   const size_t n = sizeof(body) - 1;     /* exclude the trailing NUL */
   link_fake_pass_begin();
   TEST_ASSERT_EQUAL_INT((int)n, sock_write(body, n));
-  TEST_ASSERT_EQUAL_UINT16(1, link_fake_at_count());     /* SEND — one AT, per §3's table */
+  TEST_ASSERT_EQUAL_UINT16(1, link_fake_at_count());     /* SEND — one AT */
   TEST_ASSERT_EQUAL_UINT16(1, link_fake_write_count());
   uint16_t len = 0;
   const uint8_t *sent = link_fake_sent(&len);
   TEST_ASSERT_EQUAL_UINT16((uint16_t)n, len);
   TEST_ASSERT_EQUAL_MEMORY(body, sent, n);
-  TEST_ASSERT_EQUAL_INT((int)n, sock_write(body, n));    /* a second write bumps the count */
+  TEST_ASSERT_EQUAL_INT((int)n, sock_write(body, n));
   TEST_ASSERT_EQUAL_UINT16(2, link_fake_write_count());
   sock_close();
 }
 
-/* pump_passes(n) is pb_net_passes(n, 0) and nothing else -- one spelling, so the cases
-   below and task 25's cannot drift apart. */
 static void pump_passes(uint8_t n) { pb_net_passes(n, 0u); }
 static const char *k200 =
   "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\n\r\nnext=60\n";
@@ -116,19 +104,12 @@ static void test_http_post_carries_host_token_and_content_length(void) {
   sensors_begin();
   net_begin();
   link_fake_queue_response(k200, strlen(k200));
-  pump_passes(10);   /* was 8 before the fix round: NET_JOIN_WAIT -> NET_IDLE now inserts two
-                         refresh-only passes (signal strength, then address) before NET_IDLE's
-                         first REAL pass, each returning immediately and spending zero on the
-                         report itself -- so reaching NET_SEND costs two more passes than it
-                         used to. See netfsm.cpp's NET_IDLE case. */
+  pump_passes(10);   /* ten passes reach SEND: two refresh-only passes (signal, then address)
+                        precede NET_IDLE's first real one */
   uint16_t n = 0;
   const char *tx = (const char *)link_fake_sent(&n);
   TEST_ASSERT_TRUE(n > 0);
   TEST_ASSERT_TRUE(strstr(tx, "POST /report HTTP/1.1\r\n") == tx);
-  /* HOST_NAME and BUTLER_TOKEN are `const char[]` OBJECTS in secrets.h, so
-     `"Host: " HOST_NAME` would not compile. Build the needles instead. PB_CONTROLLER used
-     to be a string-literal macro and the c= needle juxtaposed it; it is an integer now, so
-     that one is built the same way as the rest. */
   char want[128];
   snprintf(want, sizeof want, "\r\nHost: %s\r\n", HOST_NAME);
   TEST_ASSERT_NOT_NULL(strstr(tx, want));
@@ -144,7 +125,7 @@ static void test_report_content_length_matches_the_bytes_actually_written(void) 
   sensors_begin();
   net_begin();
   link_fake_queue_response(k200, strlen(k200));
-  pump_passes(10);   /* was 8 -- see the sibling case above for why */
+  pump_passes(10);   /* ten passes reach SEND, as above */
   uint16_t n = 0;
   const char *tx = (const char *)link_fake_sent(&n);
   const char *hdr = strstr(tx, "Content-Length: ");
@@ -154,38 +135,25 @@ static void test_report_content_length_matches_the_bytes_actually_written(void) 
   TEST_ASSERT_EQUAL_UINT32((uint32_t)claimed, (uint32_t)(n - (uint16_t)(body - tx)));
 }
 
-/* A full first-ever round trip is DOWN -> JOIN_ISSUE -> JOIN_WAIT -> IDLE -> SOCK_CLOSE ->
-   CONNECT -> SEND -> RECV -> CLOSE -> SOCK_CLOSE -> IDLE: ten net_poll() calls, one state
-   transition per call (spec's own per-pass table, §3/§4.2), never eight -- confirmed by
-   tracing link_fake_at_count() and net_state() pass by pass against this file's own
-   reference netfsm.cpp. Fix round, task 27: NET_JOIN_WAIT -> NET_IDLE now inserts two
-   refresh-only NET_IDLE passes (signal strength, then address) before NET_IDLE's first REAL
-   pass, so the same round trip is now TWELVE net_poll() calls, not ten -- see netfsm.cpp's
-   NET_IDLE case. pump_passes(14) leaves two calls of margin once IDLE is reached (idle passes
-   are no-ops until g_next_s elapses, so the margin costs nothing). */
+/* A first round trip is twelve passes: DOWN, JOIN_ISSUE, JOIN_WAIT, IDLE and its two
+   refresh-only passes, then SOCK_CLOSE, CONNECT, SEND, RECV, CLOSE, SOCK_CLOSE back to IDLE.
+   Fourteen leaves margin; idle passes are no-ops until the interval elapses. */
 static void test_socket_is_closed_on_success_error_timeout_and_a_failed_open(void) {
   sensors_begin();
   /* success */
   net_begin(); link_fake_queue_response(k200, strlen(k200));
   pump_passes(14);
   TEST_ASSERT_EQUAL(NET_IDLE, net_state());
-  TEST_ASSERT_TRUE(sock_open());          /* the precondition holds: _sock was left -1 */
+  TEST_ASSERT_TRUE(sock_open());          /* opens only because the socket was closed */
   sock_close();
   /* a failed open */
   net_begin(); link_fake_fail_open(true);
   pump_passes(14);
   link_fake_fail_open(false);
-  TEST_ASSERT_TRUE(sock_open());          /* would be false if the failed open had not closed */
+  TEST_ASSERT_TRUE(sock_open());          /* false if the failed open had not closed */
   sock_close();
-  /* a timeout in RECV: no response was ever queued. Each pass's own AT round trips only
-     advance the fake clock by a couple of ms (sim.h's "hal_millis() advances the rig by
-     exactly 1 ms" contract), so reaching the 5 s PB_NET_DEADLINE_MS needs real elapsed time
-     between passes, not just more of them -- pb_net_passes()'s second argument, which
-     pump_passes() (this file's alias for it with ms hardwired to 0) cannot supply. Task 25:
-     zero response bytes is retry-eligible, so this scenario now runs the SEND/RECV leg twice
-     (the original, then the one retry) before the report is finally abandoned -- two 5 s
-     PB_NET_DEADLINE_MS waits, not one. 40 passes x 500 ms (20 s) comfortably crosses both with
-     passes to spare for the SOCK_CLOSE/IDLE cleanup that follows. */
+  /* a timeout in RECV: nothing queued. An empty response is retried once, so two 5 s RECV
+     deadlines must elapse; 40 passes x 500 ms crosses both with passes to spare. */
   net_begin();
   pb_net_passes(40, 500u);
   TEST_ASSERT_TRUE(sock_open());
@@ -256,24 +224,15 @@ static void test_response_is_never_parsed_from_a_four_hundred_body(void) {
   sensors_begin();
   net_begin();
   link_fake_queue_response(k400, strlen(k400));
-  pump_passes(12);   /* was 10: the full first-ever round trip is twelve passes now, not
-                         ten -- see test_socket_is_closed_...'s own comment above */
+  pump_passes(12);   /* twelve: a full first round trip */
   cmd_t c;
-  TEST_ASSERT_FALSE(net_take_command(&c));      /* a 400 body echoes OUR tokens back at us */
+  TEST_ASSERT_FALSE(net_take_command(&c));      /* a 400 body echoes our own tokens back */
   TEST_ASSERT_EQUAL_UINT16(400, net_last_status());
   TEST_ASSERT_EQUAL_UINT32(0, net_reports_ok());
 }
 
-/* pump_passes(n) (== pb_net_passes(n, 0)) cannot drive a SECOND round trip on its own: with
-   g_next_s left at 60 by round 1's own "next=60", NET_IDLE's due check never lets the FSM
-   leave IDLE again until 60 s of fake-clock time have actually elapsed, and pump_passes()'s
-   zero ms step advances the clock by only a couple of ms per pass (sim.h's "hal_millis()
-   advances the rig by exactly 1 ms" contract). Without real elapsed time between passes,
-   round 2 never leaves IDLE, SOCK_CLOSE's rx-buffer reset is never re-exercised, and this
-   case would pass for a reason that has nothing to do with the bug it names -- so this uses
-   pb_net_passes() directly, with a step big enough to cross both the 60 s report interval
-   and, once round 2's own RECV starts, the 5 s PB_NET_DEADLINE_MS its intentionally-empty
-   response never answers. */
+/* Round 2 is due only after the 60 s interval round 1's next=60 set, and its empty response
+   then runs out a 5 s RECV deadline; only passes with a real time step cross both. */
 static void test_stale_bytes_in_the_rx_buffer_cannot_become_a_command(void) {
   sensors_begin();
   net_begin();
@@ -281,24 +240,16 @@ static void test_stale_bytes_in_the_rx_buffer_cannot_become_a_command(void) {
   const char *with_cmd =
     "HTTP/1.1 200 OK\r\nContent-Length: 38\r\n\r\nnext=60\ncmd=5 water=3 ml=250 cap_s=30\n";
   link_fake_queue_response(with_cmd, strlen(with_cmd));
-  pump_passes(12);   /* was 10: round 1 is a full first-ever round trip, now twelve passes,
-                         not ten -- see test_socket_is_closed_...'s own comment above. Round
-                         2 below does NOT need the same bump: it reuses the join from round 1
-                         instead of going through NET_JOIN_WAIT -> NET_IDLE a second time, so
-                         it inserts no extra refresh passes at all. */
+  pump_passes(12);   /* twelve: a full first round trip */
   cmd_t c;
   TEST_ASSERT_TRUE(net_take_command(&c));
   TEST_ASSERT_EQUAL_UINT32(5, c.id);
   TEST_ASSERT_EQUAL_UINT32(1, net_reports_ok());
   report_clear_ack();                            /* stand in for exec_pending()'s real ack */
-  /* round 2: the server answers with nothing at all. The old bytes must not be re-parsed --
-     and must not even be mistaken for a completed response, which is the guard-independent
-     half of the proof: the replay guard (task 23) would refuse a re-executed cmd=5 anyway,
-     but a stale, un-cleared g_rx would still let rx_complete() see an already-complete
-     response the instant RECV starts, short-circuiting the real (empty) exchange and
-     crediting a 200 that never happened. */
+  /* round 2: the server answers with nothing. The stale bytes must not be re-parsed, nor read
+     as an already-complete response that credits a 200 which never happened. */
   link_fake_queue_response("", 0);
-  pb_net_passes(40, 2000u);
+  pb_net_passes(40, 2000u);   /* round 2 reuses round 1's join: no extra refresh passes */
   TEST_ASSERT_FALSE(net_take_command(&c));
   TEST_ASSERT_EQUAL_UINT32(1, net_reports_ok());       /* round 2 must NOT count as a second 200 */
   TEST_ASSERT_EQUAL_UINT32(1, net_reports_failed());   /* it must count as the timeout it is */
@@ -308,8 +259,7 @@ static uint16_t g_at_in_dose;
 static net_state_t g_state_in_dose;
 static void poke_net_from_inside_the_dose(void) {
   link_fake_pass_begin();
-  /* safety_dosing() is TRUE here — we are inside hal_pump_write(true) — and this is the one
-     call site in the suite that must pass it, because it is the guard under test. */
+  /* inside the dose, so safety_dosing() is true: the guard under test */
   net_poll(safety_dosing());
   g_at_in_dose = link_fake_at_count();
   g_state_in_dose = net_state();
@@ -324,11 +274,8 @@ static void test_poll_is_a_noop_while_the_pump_is_asserted(void) {
   sim_set_float(true);
   sim_set_flow_ml_s(30);
   sim_on_pump_on(poke_net_from_inside_the_dose);
-  /* dose_run()'s ladder refuses DOSE_REFUSED_BOOT below PB_BOOT_GAP_MS (safety.cpp), and
-     pump_passes(4) alone leaves the fake clock nowhere near that -- without this the pump
-     never asserts, poke_net_from_inside_the_dose() never runs, and both asserts below pass
-     vacuously on g_at_in_dose/g_state_in_dose's zero-initialised defaults. Same shape as
-     harness.h's own pb_latch_contra(). */
+  /* the ladder refuses any dose before PB_BOOT_GAP_MS; without this the pump never asserts
+     and both asserts below pass vacuously on zero-initialised defaults */
   pb_advance(PB_BOOT_GAP_MS + 1u);
   dose_req_t q = { 0, 0, true, 1500, false, false };   /* by_time, no position needed */
   (void)dose_run(&q);
@@ -340,38 +287,21 @@ static void test_net_begin_clears_a_standing_disable_latch(void) {
   net_disable("heap");
   TEST_ASSERT_NOT_NULL(net_disabled());
   net_begin();
-  /* Without this every later case in the file would poll a dead FSM and pass on a no-op.
-     g_disabled is the one static net_begin() did not clear, and net_disable() is the only
-     writer, so nothing before task 25 could have caught it. */
   TEST_ASSERT_NULL(net_disabled());
   net_poll(false);
   TEST_ASSERT_NOT_EQUAL(NET_DOWN, net_state());   /* it actually runs again */
 }
 
-/* The case above pins net_begin()'s clear, which is right and stays. This one pins the ONLY
-   thing that makes that clear safe: the ORDER setup() calls the two in.
-
-   [env:native] filters main.cpp out (platformio.ini's build_src_filter), so main_net_disabled()
-   and main_boot_err() do not exist in this binary and there is nothing here to link against.
-   The sequence below is therefore main.cpp's own two lines RETYPED, with those two accessors
-   stood in for by a verdict this suite can produce itself -- the order is the whole subject, so
-   the order is what is written out. If setup() is ever reordered again, this case is the
-   sentence that says what the reordering costs; keep the two in step.
-
-   What it costs: net_begin() clears g_disabled unconditionally and by design, so a verdict
-   latched BEFORE it is thrown away one line later. The board then prints net=DISABLED on the
-   banner -- main.cpp reads its own g_net_disabled for that, not this latch -- and reports
-   anyway, for 48 hours, with a failed watchdog, ADC or heap assertion behind it. */
+/* setup() must latch the boot verdict after net_begin(), which clears the disable latch
+   unconditionally; in the other order the board reports for 48 hours with a failed watchdog,
+   ADC or heap assertion behind it. net_boot() is the one copy of that order, and main.cpp is
+   not in this binary. */
 static void test_a_failed_boot_assertion_survives_net_begin(void) {
-  /* net_boot() and NOT the two calls by hand: replicating the order here would pin nothing,
-     since main.cpp could be reordered and this case would still pass. net_boot() is the one
-     copy of that order, and setup() has no other way to reach it. */
   net_boot("wdt");
   TEST_ASSERT_NOT_NULL(net_disabled());
   TEST_ASSERT_EQUAL_STRING("wdt", net_disabled());
 
-  /* A latch nothing reads is not a safety measure. net_poll()'s first act is to honour it, so
-     four whole passes must move nothing: no join, no socket, no report on the wire. */
+  /* four passes must move nothing: honouring the latch is net_poll()'s first act */
   pb_net_passes(4, PB_NET_STEP_MS);
   TEST_ASSERT_EQUAL(NET_DOWN, net_state());
   TEST_ASSERT_EQUAL_UINT32(0, net_reports_ok());
@@ -379,8 +309,7 @@ static void test_a_failed_boot_assertion_survives_net_begin(void) {
 }
 
 static void test_a_join_deadline_is_not_expired_early_by_the_clock_rollover(void) {
-  /* Armed BEFORE net_begin(): every timestamp in the FSM is relative to the one before it, and
-     a board 49.7 days up has all of them up here together. */
+  /* set before net_begin(): a board 49.7 days up has every FSM timestamp near the wrap */
   sim_set_clock_ms(0xFFFFF000u);
   net_begin();
   link_fake_drop_link();
@@ -389,17 +318,9 @@ static void test_a_join_deadline_is_not_expired_early_by_the_clock_rollover(void
   net_poll(false);                             /* issues the join; the 5 s deadline WRAPS */
   TEST_ASSERT_EQUAL(NET_JOIN_WAIT, net_state());
 
-  /* An unsigned `hal_millis() >= g_deadline` compares a pre-wrap clock against a post-wrap
-     deadline and calls it expired on the first pass -- abandoning a join that had 5 s to run.
-
-     link_join() just set g_join_pending true; task 25 makes EVERY timed-out AT call poison the
-     link (spec's "any modem timeout"), so the old trick of forcing a timeout on link_state()'s
-     own AT to advance the clock without flipping to LINK_UP no longer works here -- it would
-     poison straight back to NET_DOWN and never reach the deadline check this test exists to
-     pin. link_fake_drop_link() clears g_join_pending again with ZERO ATs, so the next
-     link_state() call is a normal, FAST, non-timeout round trip that genuinely reports
-     LINK_DOWN -- exactly how a real board sees a join still in flight -- while pb_advance()
-     supplies the same elapsed time the old (1200 + 100) ms combination did. */
+  /* An unsigned compare of a pre-wrap clock against a post-wrap deadline calls the join
+     expired on the first pass. A timed-out status query would poison the link instead, so
+     the drop keeps the join pending at zero ATs and pb_advance() supplies the elapsed time. */
   link_fake_drop_link();
   pb_advance(1300);
   net_poll(false);
@@ -413,15 +334,13 @@ static void test_a_recv_deadline_is_not_expired_early_by_the_clock_rollover(void
   for (int i = 0; i < 24 && net_state() != NET_SEND; ++i) net_poll(false);
   TEST_ASSERT_EQUAL(NET_SEND, net_state());
 
-  /* Jump to just under the wrap BEFORE the RECV deadline is armed -- ~3.1 days, inside the
-     idiom's 2^31 validity. Arming it after the jump is what makes it straddle the wrap. */
+  /* jump to just under the wrap before the RECV deadline is armed, so it straddles the wrap */
   sim_set_clock_ms(0xFFFFF830u);
   net_poll(false);                             /* NET_SEND -> NET_RECV, deadline WRAPS */
   TEST_ASSERT_EQUAL(NET_RECV, net_state());
 
-  /* Nothing is queued, so sock_read() returns 0 and only the deadline can end this pass. An
-     unsigned compare calls the wrapped deadline expired at once and discards a report that
-     still had 5 s to arrive. */
+  /* nothing is queued, so only the deadline can end this pass; an unsigned compare would call
+     it expired at once */
   pb_advance(100);
   net_poll(false);
   TEST_ASSERT_EQUAL(NET_RECV, net_state());
@@ -436,18 +355,15 @@ static void test_a_backoff_wait_still_waits_across_the_clock_rollover(void) {
   net_poll(false);                             /* issues the join, arms the deadline pre-wrap */
   TEST_ASSERT_EQUAL(NET_JOIN_WAIT, net_state());
 
-  /* Jump to just under the wrap -- well inside the idiom's 2^31 validity -- so the join
-     deadline is genuinely past and link_down() arms its 2 s backoff across the wrap. The exact
-     value matters: the timed-out status query below advances the fake clock by PB_NET_STEP_MS,
-     and link_down() has to run while hal_millis() is STILL below the wrap or the backoff it
-     arms never straddles it and this test proves nothing. 0xFFFFF830 leaves ~800 ms to spare. */
+  /* Just under the wrap: the join deadline is past, and link_down() must arm its 2 s backoff
+     while the clock is still below the wrap or it never straddles it. The timed-out query
+     below advances the clock by PB_NET_STEP_MS; 0xFFFFF830 leaves ~800 ms to spare. */
   sim_set_clock_ms(0xFFFFF830u);
   link_fake_timeout_next();
   net_poll(false);
   TEST_ASSERT_EQUAL(NET_DOWN, net_state());
 
-  /* An unsigned `hal_millis() < g_wait_until` reads the wrapped deadline as already past and
-     re-joins at once, hammering the modem exactly when the link is worst. */
+  /* an unsigned compare would read the wrapped backoff as already past and rejoin at once */
   net_poll(false);
   TEST_ASSERT_EQUAL(NET_DOWN, net_state());
 
@@ -458,10 +374,7 @@ static void test_a_backoff_wait_still_waits_across_the_clock_rollover(void) {
   TEST_ASSERT_EQUAL(NET_JOIN_ISSUE, net_state());
 }
 
-/* Passes with wall clock, because the RECV deadline and the retry deadline are both in ms.
-   This is pb_net_passes(1, ms_each) with a send counter wrapped round it — one pass at a
-   time, so that the counter can see the state the pass STARTED in. Do not re-derive the pass
-   itself here: harness.h's helper is the one spelling (task 24 step 1). */
+/* one pass at a time, so the send counter sees the state each pass started in */
 static int run_passes(int n, uint32_t ms_each) {
   int sends = 0;
   for (int i = 0; i < n; ++i) {
@@ -482,21 +395,17 @@ static void test_an_exchange_that_produced_no_bytes_is_retried_exactly_once(void
 }
 
 static void test_a_retry_is_abandoned_rather_than_sent_outside_the_dedup_window(void) {
-  sim_reset(true);                        /* WARM: the boot counter advances, so the salt is
-                                             non-zero and t= is above 2^31 (spec §15.2) */
+  sim_reset(true);                        /* warm: the boot counter advances, so the salt
+                                             is non-zero and t= is above 2^31 */
   sensors_begin();
   TEST_ASSERT_NOT_EQUAL(0, hal_boot_salt());
   net_begin();
   link_fake_queue_response("", 0);
   /* inside the window: the retry IS sent */
   TEST_ASSERT_EQUAL_INT(2, run_passes(120, 200));
-  /* a fresh report, then let the retry deadline expire before the FSM can resend. Walk until
-     the ORIGINAL send has gone out, RECV has timed out and the retry is ARMED but not yet
-     re-transmitted (net_state() == NET_SOCK_CLOSE, the one pass between "finish() decided to
-     retry" and "CONNECT dials again") -- a fixed pass count here would be guessing the exact
-     boundary between "timeout just detected" and "already walked into CONNECT for the retry",
-     and NET_SOCK_CLOSE's own re-check of the window (the point of this case) only has
-     something to prove if the clock is pushed past the deadline BEFORE that walk, not after. */
+  /* a fresh report, walked one pass at a time to where the retry is armed but not yet sent
+     (NET_SOCK_CLOSE, between the timeout and the redial): that pass re-checks the window, so
+     the clock must pass the deadline before the walk, not after */
   net_begin();
   link_fake_queue_response("", 0);
   int sends = 0;
@@ -555,7 +464,8 @@ static void test_a_five_oh_three_is_retried_once(void) {
   net_begin();
   const char *b = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 5\r\n\r\nbusy\n";
   link_fake_queue_response(b, strlen(b));
-  TEST_ASSERT_EQUAL_INT(2, run_passes(60, 200));   /* sqlite3.OperationalError rolls it all back */
+  TEST_ASSERT_EQUAL_INT(2, run_passes(60, 200));   /* the backend answers 503 when it
+                                                      rolled everything back */
   TEST_ASSERT_EQUAL_UINT16(503, net_last_status());
 }
 
@@ -596,17 +506,17 @@ static void test_a_modem_timeout_poisons_the_link_and_counts_a_desync(void) {
       const uint16_t desyncs_before = link_desyncs();
       const uint16_t resets_before = link_fake_reset_count();
       net_poll(false);
-      /* The tear-down is DEFERRED to its own pass: this pass has already spent two modem
-         round trips and a third would put it over the watchdog grant. So nothing yet... */
+      /* the tear-down is deferred: this pass spent two round trips and a third would exceed the
+         watchdog grant */
       TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
       TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
-      /* ...and it lands on the pass after the backoff, before any rejoin is attempted. */
+      /* it lands on the pass after the backoff, before any rejoin */
       pb_advance(2500);   /* past the first backoff rung */
       net_poll(false);
       TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());   /* rides out as ch206 */
       TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
       TEST_ASSERT_EQUAL(NET_DOWN, net_state());       /* still down: the rejoin is the NEXT pass */
-      TEST_ASSERT_EQUAL(NET_DOWN, net_state());        /* the NEXT command is NOT issued */
+      TEST_ASSERT_EQUAL(NET_DOWN, net_state());
       /* and the next pass issues nothing at all while the backoff runs */
       link_fake_pass_begin();
       net_poll(false);
@@ -619,14 +529,8 @@ static void test_a_modem_timeout_poisons_the_link_and_counts_a_desync(void) {
   TEST_FAIL_MESSAGE("the FSM never reached NET_CONNECT");
 }
 
-/* Fix round 1, finding 2: the review disabled each of the six "any modem timeout poisons"
-   brackets in turn and found four of them uncaught by anything in this suite --
-   NET_JOIN_WAIT, NET_SOCK_CLOSE, NET_SEND and NET_RECV's r<0 branch. Only NET_CONNECT
-   (above) and NET_JOIN_ISSUE (test_link_drop_returns_to_joining_with_exponential_backoff,
-   below) were proven. One case per unproven site, same shape as the one above: force a
-   timeout on that site's own AT round trip and prove BOTH halves of poison() fired
-   (link_reset()'s desync count, link_down()'s NET_DOWN) -- either alone leaves a live bug
-   this bracket exists to catch. */
+/* One case per state that issues an AT: a modem timeout there must fire both halves of the
+   poison, the reset (a desync counted) and the drop (NET_DOWN); either alone leaves a bug. */
 
 static void test_a_modem_timeout_in_join_wait_poisons_the_link(void) {
   sensors_begin();
@@ -638,27 +542,23 @@ static void test_a_modem_timeout_in_join_wait_poisons_the_link(void) {
   const uint16_t desyncs_before = link_desyncs();
   const uint16_t resets_before = link_fake_reset_count();
   net_poll(false);
-  /* Deferred to its own pass: this one has already spent its modem round trips, and the
-     tear-down costs another that would put it over the watchdog grant. */
+  /* deferred: the tear-down would put this pass over the watchdog grant */
   TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
   TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
   pb_advance(2500);                              /* past the first backoff rung */
   net_poll(false);
   TEST_ASSERT_EQUAL_UINT16(desyncs_before + 1, link_desyncs());
   TEST_ASSERT_EQUAL_UINT16(resets_before + 1, link_fake_reset_count());
-  TEST_ASSERT_EQUAL(NET_DOWN, net_state());      /* not left sitting in JOIN_WAIT for the
-                                                     5 s deadline to (much later) also catch */
+  TEST_ASSERT_EQUAL(NET_DOWN, net_state());      /* not left in JOIN_WAIT for the 5 s
+                                                    deadline to catch later */
 }
 
 static void test_a_modem_timeout_in_sock_close_poisons_the_link(void) {
   sensors_begin();
   net_begin();
   link_fake_queue_response(k200, strlen(k200));
-  /* the FIRST NET_SOCK_CLOSE of a report (right after IDLE) never opened a socket, so its
-     own sock_close() costs 0 ATs and can never time out (§3's table: 0 or 1 AT). Walk past
-     a full successful round trip to the SECOND one, entered from NET_CLOSE with the socket
-     CONNECT opened still allocated -- that is the one sock_close() actually has an AT to
-     lose. */
+  /* the first NET_SOCK_CLOSE of a report never opened a socket and costs 0 ATs, so it cannot
+     time out; the one after NET_CLOSE, with the socket still allocated, can */
   bool seen_close = false;
   for (int i = 0; i < 40; ++i) {
     link_fake_pass_begin();
@@ -669,8 +569,7 @@ static void test_a_modem_timeout_in_sock_close_poisons_the_link(void) {
       const uint16_t desyncs_before = link_desyncs();
       const uint16_t resets_before = link_fake_reset_count();
       net_poll(false);
-      /* Deferred: the poisoning pass has already spent its modem round trips, and the
-         tear-down costs another that would put it over the watchdog grant. */
+      /* deferred: the tear-down would put this pass over the watchdog grant */
       TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
       TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
       TEST_ASSERT_EQUAL(NET_DOWN, net_state());
@@ -698,8 +597,7 @@ static void test_a_modem_timeout_in_send_poisons_the_link(void) {
       const uint16_t desyncs_before = link_desyncs();
       const uint16_t resets_before = link_fake_reset_count();
       net_poll(false);
-      /* Deferred: the poisoning pass has already spent its modem round trips, and the
-         tear-down costs another that would put it over the watchdog grant. */
+      /* deferred: the tear-down would put this pass over the watchdog grant */
       TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
       TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
       pb_advance(2500);                            /* past the first backoff rung */
@@ -727,8 +625,7 @@ static void test_a_modem_timeout_in_recv_poisons_the_link(void) {
       const uint16_t desyncs_before = link_desyncs();
       const uint16_t resets_before = link_fake_reset_count();
       net_poll(false);
-      /* Deferred: the poisoning pass has already spent its modem round trips, and the
-         tear-down costs another that would put it over the watchdog grant. */
+      /* deferred: the tear-down would put this pass over the watchdog grant */
       TEST_ASSERT_EQUAL_UINT16(desyncs_before, link_desyncs());
       TEST_ASSERT_EQUAL_UINT16(resets_before, link_fake_reset_count());
       pb_advance(2500);                            /* past the first backoff rung */
@@ -744,40 +641,25 @@ static void test_a_modem_timeout_in_recv_poisons_the_link(void) {
   TEST_FAIL_MESSAGE("the FSM never reached NET_RECV");
 }
 
-/* Fix round 1, finding 3: NET_IDLE's own `g_retried = false; g_connect_starved = false;`
-   has no test that can fail, because every existing case drives exactly one report cycle
-   and net_begin()'s OWN reset (called once, at the top of the case) masks the gap. Drive
-   TWO report cycles back to back with no intervening net_begin() -- if the second report
-   inherited the first's spent retry, it would send once and be abandoned instead of
-   retrying, because finish()'s `!g_retried` would already read false walking in. */
+/* Two report cycles with no net_begin() between them: NET_IDLE must reset the spent retry,
+   or the second report is abandoned after one send. */
 static void test_each_report_gets_its_own_single_retry(void) {
   sensors_begin();
   net_begin();
   link_fake_queue_response("", 0);              /* round 1: the server never answers at all */
-  const int sends1 = run_passes(120, 200);      /* 24 s: two RECV deadlines, inside the 30 s
-                                                    retry window -- same budget as
-                                                    test_an_exchange_that_produced_no_bytes_
-                                                    is_retried_exactly_once, above */
+  const int sends1 = run_passes(120, 200);      /* 24 s: two RECV deadlines, inside the
+                                                   30 s retry window */
   TEST_ASSERT_EQUAL_INT(2, sends1);             /* the original and its one retry */
   TEST_ASSERT_EQUAL(NET_IDLE, net_state());
 
-  pb_advance(60000);            /* g_next_s is still 60 (no 200 ever arrived to change it),
-                                    so this alone makes round 2 due */
+  pb_advance(60000);            /* the interval is still 60 s: no 200 ever changed it */
   link_fake_queue_response("", 0);              /* round 2: also nothing, ever */
   const int sends2 = run_passes(120, 200);
   TEST_ASSERT_EQUAL_INT(2, sends2);             /* round 2 gets its OWN retry, not zero */
 }
 
-/* Fix round 1, finding 4: was_timeout()'s `(int32_t)(hal_millis() - t0) >= PB_NET_STEP_MS`
-   idiom is never exercised at the exact boundary through net_poll() -- hal_sim.cpp's own
-   "every hal_millis() read advances the rig by 1 ms" contract means capturing t0 costs one
-   tick and was_timeout()'s own hal_millis() call costs a second, so every timeout net_poll()
-   can ever manufacture reads PB_NET_STEP_MS + 1, never PB_NET_STEP_MS itself -- verified by
-   hand-tracing every poison test above. >= and > agree on PB_NET_STEP_MS + 1, so none of
-   the four poison tests just added above, nor the pre-existing ones, can tell the two
-   forms apart.
-   netfsm_test_was_timeout_() calls the real (only) copy of the comparison directly against a
-   clock landed on the boundary by hand, via sim_advance(), so the +1 never happens. */
+/* Every fake hal_millis() read costs a tick, so through net_poll() a timeout always reads
+   PB_NET_STEP_MS + 1, where >= and > agree; only a direct call lands on the boundary itself. */
 static void test_was_timeout_boundary_is_inclusive(void) {
   const uint32_t t0 = hal_millis();
   sim_advance(PB_NET_STEP_MS - 1u);   /* + netfsm_test_was_timeout_()'s own hal_millis() tick
@@ -809,15 +691,9 @@ static void test_link_drop_returns_to_joining_with_exponential_backoff(void) {
       link_fake_pass_begin(); net_poll(false); sim_advance(100); waited += 100;
     }
     seen[rung] = waited;
-    /* still down: the join fails again. link_fake_drop_link() alone cannot express that here --
-       link_join() succeeds UNCONDITIONALLY in the fake (it never consults g_state), so a drop
-       applied before JOIN_ISSUE runs is silently undone the moment link_join()'s own two ATs
-       set g_join_pending, and the very next link_state() call flips straight to LINK_UP,
-       resetting g_backoff_i and erasing the exponential progression this test exists to pin.
-       A timed-out AT is the fake's only real "the join itself failed" primitive, and task 25
-       makes that poison() -> link_reset() + the SAME link_down() ladder -- exactly the
-       repeated-failure shape a real dropped AP produces, and the only one that keeps
-       g_backoff_i climbing instead of being reset by an accidental reassociation. */
+    /* still down: the fake's join succeeds unconditionally, so a dropped link alone would
+       reassociate on the next status query and reset the backoff; a timed-out AT is the only
+       "the join itself failed" the fake has, and it climbs the same ladder */
     link_fake_timeout_next();
   }
   TEST_ASSERT_TRUE(seen[0] <= ladder[0] + 200);
@@ -829,33 +705,26 @@ static void test_a_poisoned_close_does_not_leave_starvation_armed_for_the_next_r
   sensors_begin();
   net_begin();
 
-  /* Arm g_connect_starved: sock_open() fails cleanly (no timeout) on the first attempt AND on
-     the retry, which is the only way NET_CONNECT sets it. */
+  /* arm the starvation flag: a clean, no-timeout open failure on the first attempt and on
+     the retry is the only way NET_CONNECT sets it */
   link_fake_fail_open(true);
   int guard = 0;
   while (net_reports_failed() < 2u && guard++ < 200) net_poll(false);
   TEST_ASSERT_EQUAL_UINT32(2u, net_reports_failed());   /* the open AND its retry both failed */
   TEST_ASSERT_EQUAL(NET_SOCK_CLOSE, net_state());       /* and the socket is still allocated */
 
-  /* Now poison the very NET_SOCK_CLOSE pass that would have CONSUMED the flag. The timeout
-     check sits above the consumer and returns early, so g_connect_starved survives the pass.
-     NET_JOIN_WAIT's LINK_UP exit then goes straight to NET_IDLE without ever touching it --
-     which is why NET_IDLE's own reset is the only thing that clears it. */
+  /* poison the NET_SOCK_CLOSE pass that would have consumed the flag: the timeout check
+     returns early above the consumer, and the JOIN_WAIT exit never touches it */
   link_fake_timeout_next();
   net_poll(false);
   TEST_ASSERT_EQUAL(NET_DOWN, net_state());
 
-  /* A clean, fully successful report from here must end parked in NET_IDLE. With NET_IDLE's
-     g_connect_starved reset deleted, the stale flag fires in the NEXT report's SOCK_CLOSE pass
-     and calls link_down() on a link that never misbehaved -- the board drops a working
-     connection once per report, forever. */
+  /* a clean report must now complete; a stale flag would drop a working link in the next
+     SOCK_CLOSE pass, once per report, forever */
   link_fake_fail_open(false);
   link_fake_queue_response(k200, strlen(k200));
   int g2 = 0;
   while (net_reports_ok() == 0u && g2++ < 300) pb_net_passes(1, 1000u);
-  /* With NET_IDLE's g_connect_starved reset deleted, this never becomes true: the stale flag
-     fires in every subsequent SOCK_CLOSE pass, link_down()s a link that never misbehaved, and
-     the board can no longer complete a report at all. */
   TEST_ASSERT_EQUAL_UINT32(1u, net_reports_ok());
 }
 
@@ -899,8 +768,7 @@ static void test_no_report_is_built_between_receiving_a_command_and_executing_it
   link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
   net_begin(); exec_begin();
   pb_net_passes(12, 100);
-  /* link_fake_write_count() and not link_fake_sent(): the question is whether ANYTHING was
-     sent across two whole report intervals, and the last-buffer accessor cannot answer it. */
+  /* the write count, not the last buffer: the question is whether anything at all was sent */
   uint16_t writes = link_fake_write_count();
   pb_advance(120000);                          /* two report intervals go by */
   pb_net_passes(20, 100);
@@ -920,8 +788,7 @@ static void test_a_stop_command_is_acked(void) {
 }
 
 static void test_a_failed_goto_still_acks(void) {
-  /* PB_PULSES_PER_GATE == 0 compiles cart_goto() to `return false` (§2.15), so this is the
-     shipped configuration's normal answer, not a contrived one. */
+  /* PB_PULSES_PER_GATE == 0 compiles cart_goto() to a refusal: the shipped configuration */
   link_fake_reset(); link_fake_set_state(LINK_UP);
   link_fake_queue_response(k_cmd_200, strlen(k_cmd_200));
   net_begin(); exec_begin();
@@ -933,12 +800,9 @@ static void test_a_failed_goto_still_acks(void) {
 }
 
 static void test_an_out_of_range_outlet_acks_range_and_never_reaches_the_cart(void) {
-  /* The range check sits ABOVE cart_goto() so the backend is told which refusal it got. Nothing
-     pinned the string: the terminal-path case above accepts ANY ack, so deleting the branch just
-     falls through to cart_goto() and acks err=goto, which is still an ack. Both bounds are
-     checked because water=0 is a legal thing for butler to send, and 0 and 6 fail different
-     halves of the comparison. Meaningful under [env:native] as well as native_cal: the check
-     runs before the cart is ever consulted, so PB_PULSES_PER_GATE does not reach it. */
+  /* The range check sits above cart_goto() so the backend is told which refusal it got; both
+     bounds, because water=0 is legal for butler to send and 0 and 6 fail different halves of
+     the compare. The check runs before the cart is consulted, so it holds on every arm. */
   static const struct { const char *body; const char *want; } k[] = {
     { "HTTP/1.1 200 OK\r\nContent-Length: 39\r\n\r\nnext=60\ncmd=51 water=0 ml=100 cap_s=10\n",
       " ack=51 flow_ml=0 err=range" },
@@ -1020,28 +884,16 @@ static void test_err_recv_never_reaches_the_wire(void) {
   TEST_ASSERT_NULL(strstr(tx, "err=recv"));
 }
 
-/* PB_PULSES_PER_GATE == 0 compiles cart_goto() to `return false` (§2.15, test_cart.cpp's own
-   test_goto_refuses_when_pulses_per_gate_is_zero) -- the shipped [env:native] configuration.
-   k_cmd_200 names outlet 3, so under that arm exec_pending() acks err=goto (proved above by
-   test_a_failed_goto_still_acks on this SAME body) and dose_run() -- hence
-   cli_print_dose_summary() -- is never reached at all: found by running this test as the brief
-   states it, which failed outright rather than passing for the wrong reason. Same fork,
-   same idiom test_cart.cpp/test_report.cpp already use for this identical condition: ignore
-   here, prove it for real under native_cal where PB_PULSES_PER_GATE=1450 lets cart_goto(3)
-   actually succeed. */
+/* Under PB_PULSES_PER_GATE == 0 cart_goto() always fails, so the dose and its summary line
+   are never reached; proven under native_cal. */
 static void test_a_backend_dose_prints_the_per_dose_summary_line(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: cart_goto() always fails, so dose_run() is never "
                        "reached; see native_cal");
 #else
   pb_test_setup();
-  /* Under native_cal cart_goto() still fails without this: cart_goto()'s own
-     `if (!g_home_seen && !cart_home()) return false;` (lib/Manifold/src/cart.cpp) needs a
-     screw that actually turns and a home region to find, neither of which any earlier case
-     in this binary has armed. cart_begin() also resets cart.cpp's own process-lifetime
-     statics, which carry no teardown reset of their own (unlike this file's g_retried) --
-     necessary because test_net.cpp cases before this one may have left g_home_seen/g_pos
-     dirty even though none of them reach a successful cart_goto() today. */
+  /* cart_goto() self-homes first, which needs a turning screw and a home region; cart_begin()
+     also resets cart.cpp's process-lifetime statics an earlier case may have dirtied. */
   cart_begin();
   sim_set_screw_pulse_ms(2);
   sim_set_home_region(0, 40);
@@ -1056,16 +908,9 @@ static void test_a_backend_dose_prints_the_per_dose_summary_line(void) {
 #endif
 }
 
-/* A garbage `hang` byte plus el >= PB_HANG_MS puts a BACKEND command into the loop that
-   deliberately starves the watchdog. The field is unconditional (§6's object-hash rule), so
-   zero-initialising the request is the only defence there is. Same fork as the summary-line
-   case immediately above, for the identical reason: under [env:native]'s uncalibrated arm,
-   cart_goto(3) fails and dose_run() is never called at all, so this case would pass vacuously
-   -- sim_feeds() still advances, but only from cart_home()'s own bounded loop (the boot
-   self-home and the unconditional park), never from a single iteration of dose_run()'s loop
-   with an unexercised hang field. Proved by running it unguarded: PASSED even with q.hang's
-   zero-init deleted from exec.cpp entirely, which is the vacuous-pass shape this whole run's
-   brief warns about. */
+/* A garbage hang field plus a long enough dose puts a backend command into the loop that
+   deliberately starves the watchdog; zero-initialising the request is the only defence.
+   Under the uncalibrated arm the dose is never reached and the case would pass vacuously. */
 static void test_a_backend_command_never_sets_hang(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: cart_goto() always fails, so dose_run() is never "
@@ -1084,31 +929,17 @@ static void test_a_backend_command_never_sets_hang(void) {
   exec_pending();
   TEST_ASSERT_GREATER_THAN_UINT32(f0, sim_feeds());   /* the dog was fed throughout */
 
-  /* The feed count alone cannot prove this: PB_HANG_MS and PB_PRIME_MS_DEFAULT are both 3000,
-     so the no-flow abort ends the dose on the very millisecond the deliberate starvation would
-     have started, and feeds rise either way. Assert the field exec_pending() actually built --
-     the only observation that separates "never set hang" from "set it and aborted first". */
+  /* Feeds alone cannot prove it: PB_HANG_MS and PB_PRIME_MS_DEFAULT are both 3000, so the
+     no-flow abort ends the dose on the millisecond starvation would begin. */
   TEST_ASSERT_FALSE(exec_test_last_req_().hang);
 #endif
 }
 
-/* Every other exec_pending() case in this file ends in a REFUSAL or an abort, where the honest
-   answer is zero millilitres either way -- so `ack(g_cmd.id, dose_flow_ml(), err_of(r))`
-   (exec.cpp) could be written `ack(g_cmd.id, 0, err_of(r))` and native and native_cal both
-   stayed green. Nothing anywhere ran a GRANTED, FLOWING backend dose through exec_pending() and
-   then looked at the number that went back on the wire.
-
-   The number matters on the backend, not here: butler's ack UPDATE writes flow_ml
-   unconditionally, its under-delivery alarm is `2 * flow_ml < ml`, and the pot's daily cap is
-   charged COALESCE(flow_ml, ml) -- see report.cpp's own note above report_set_ack(). A constant
-   zero would report every successful watering as a total failure to deliver AND charge the pot
-   the full requested millilitres against its daily allowance, both silently.
-
-   So: the summary-line case's arrangement, plus the two things it lacks -- flow, and a clock
-   past PB_BOOT_GAP_MS. Neither is optional. Without the advance the ladder answers
-   DOSE_REFUSED_BOOT, and because cli_print_dose_summary() prints for a refusal exactly as it
-   does for a granted dose, a case that only greps the summary line cannot tell the two apart.
-   The assertion here is on the REPORT BODY, which is where the backend actually reads it. */
+/* Every other exec case here ends in a refusal or an abort, where 0 ml is honest either way.
+   The backend writes the acked flow_ml, alarms when it is under half the request and charges
+   the daily cap with it, so a constant zero would report every good watering as a failure.
+   The dose needs flow and a clock past PB_BOOT_GAP_MS, or the ladder refuses with boot and
+   the summary line looks the same. */
 static void test_a_granted_backend_dose_acks_the_millilitres_that_actually_flowed(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: cart_goto() always fails, so a granted dose is never "
@@ -1119,10 +950,8 @@ static void test_a_granted_backend_dose_acks_the_millilitres_that_actually_flowe
   sim_set_screw_pulse_ms(2);
   sim_set_home_region(0, 40);
   sim_set_float(true);
-  /* 85 ml/s == 499 pulses/s at the sensor's own 5880/L rating, so k_cmd_200's ml=100 (target
-     100 * 5880 / 1000 = 588 pulses) lands in about 1.2 s -- well inside the body's cap_s=10,
-     and well inside PB_FLOW_MAX_HZ. The same rate test_dose_stops_at_the_millilitre_target
-     uses, for the same reasons. */
+  /* 85 ml/s is 499 pulses/s at the meter's 5880/L, so ml=100 (588 pulses) lands in about
+     1.2 s, inside cap_s=10 and under PB_FLOW_MAX_HZ */
   sim_set_flow_ml_s(85);
   link_fake_reset(); link_fake_set_state(LINK_UP);
   link_fake_queue_response(k_cmd_200, sizeof k_cmd_200 - 1u);
@@ -1159,8 +988,8 @@ static void test_the_cached_accessors_fill_after_a_join_and_cost_nothing(void) {
   TEST_ASSERT_EQUAL_INT8(-52, net_rssi());                   /* the fake's fixed answers, so */
   TEST_ASSERT_EQUAL_STRING("192.168.1.42", net_ip());        /* the refresh passes really ran */
 
-  /* The whole point of the accessors: reading them is free. ui_fill_() calls all three on
-     every loop() pass, and against the real driver that was ~5 ATs stacked on the FSM's own. */
+  /* reading the cache is free: ui_fill_() calls all three every loop pass, and the real
+     driver would stack ~5 ATs on the FSM's own */
   link_fake_pass_begin();
   (void)net_link(); (void)net_rssi(); (void)net_ip(); (void)net_desyncs();
   TEST_ASSERT_EQUAL_UINT16(0, link_fake_at_count());
@@ -1173,8 +1002,7 @@ static void test_a_dropped_link_clears_the_cached_signal_and_address(void) {
   pb_net_passes(20, 100);
   TEST_ASSERT_EQUAL_STRING("192.168.1.42", net_ip());        /* armed, so the clear is visible */
 
-  /* A join the FSM gives up on must not leave `status` showing the address of a link that has
-     already ended -- a stale address reads as a working board. */
+  /* a join the FSM gives up on must not leave status showing a dead link's address */
   link_fake_drop_link();
   int guard = 0;
   while (net_state() != NET_DOWN && guard++ < 200) {
@@ -1187,27 +1015,17 @@ static void test_a_dropped_link_clears_the_cached_signal_and_address(void) {
   TEST_ASSERT_EQUAL_STRING("0.0.0.0", net_ip());
 }
 
-/* The two cases above prove the cache FILLS. Neither can tell whether it filled in one pass or
-   two. When this case was written one pass was a watchdog reset: link_ip() was WiFi.localIP()
-   at up to 2 ATs, so a merged refresh was 3 x 1200 + PB_NET_SLACK_MS = 5600 ms against a
-   5592 ms grant. link_ip() is 1 bounded AT now and the pair would fit; netfsm.cpp keeps them
-   apart for the margin (its comment above the pair has the arithmetic), and the only thing
-   implementing that is the `return;` that ends the RSSI pass -- which could be DELETED with
-   every other net case green.
-
-   This case pins pass STRUCTURE, not an AT count: each refresh writes its own distinctive
-   fixed value, so which pass each answer arrived in is what the fake can show truthfully --
-   one refresh per pass, in order, and the address still unset in the pass the signal arrives
-   in. (link_fake.cpp charged 0 for both when this was written and an AT count would have
-   passed for the wrong reason; it charges 1 each now, which is what the two timeout cases
-   below need.) */
+/* The cache fills, but nothing above says in how many passes. netfsm.cpp keeps the two
+   refreshes in separate 1-AT passes -- 3 x 1200 + PB_NET_SLACK_MS = 5600 ms in one pass
+   would sit against the 5592 ms watchdog grant -- and the only thing
+   implementing that is the return that ends the RSSI pass. Each refresh writes its own fixed
+   value, so which pass each answer arrived in is observable. */
 static void test_the_signal_and_address_refreshes_never_share_a_pass(void) {
   sensors_begin();
   net_begin();
 
-  /* Step to the pass that reaches NET_IDLE -- the transition that arms both refreshes and
-     returns without doing either. One pass at a time: a batch of passes is exactly the
-     resolution this case has to beat. */
+  /* one pass at a time, to the transition into NET_IDLE: it arms both refreshes and does
+     neither */
   int guard = 0;
   while (net_state() != NET_IDLE && guard++ < 40) pb_net_passes(1, 100);
   TEST_ASSERT_EQUAL_MESSAGE(NET_IDLE, net_state(), "arrange: the FSM never joined");
@@ -1225,13 +1043,9 @@ static void test_the_signal_and_address_refreshes_never_share_a_pass(void) {
       "the address refresh did not run in the pass after the signal refresh");
 }
 
-/* Both refresh passes carry the was_timeout()/poison() pairing every other AT-issuing pass in
-   netfsm.cpp has, and until these two cases neither pairing was pinned: link_fake.cpp charged
-   0 ATs for link_rssi() and link_ip() and never consulted link_fake_timeout_next(), so either
-   poison() could be deleted with every net case green. The fake now charges both like every
-   other primitive (one AT each -- the driver's address query became ONE bounded modem
-   round trip in link_wifi.cpp, where it used to be WiFi.localIP()'s 50-iteration spin), and a
-   modem timeout in either pass must tear the session down exactly as one in any other pass. */
+/* Both refresh passes carry the timeout-then-poison pairing every AT-issuing pass has; the
+   fake charges one AT for each, so a timeout in either must tear the session down like any
+   other. */
 static void arrange_idle_(void) {
   sensors_begin();
   net_begin();

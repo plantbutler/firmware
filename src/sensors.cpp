@@ -1,5 +1,4 @@
-/* src/sensors.cpp — the expander, the mux discipline, the canary, the home hall,
-   I2C health with back-off and the bounded nine-clock recovery. */
+/* sensors.cpp: the expander, the mux discipline, the canary, the home hall, I2C health with back-off and the nine-clock recovery. */
 #include "sensors.h"
 #include "hal.h"
 #include "safety.h"
@@ -9,8 +8,7 @@
 #include <string.h>
 
 /* P4..P15 written HIGH on EVERY select: the PCF8575 is quasi-bidirectional and P4 is the
-   home hall, so a select that dropped it would make the input that gates the pump
-   unreadable (cad/wiring/nets.py, P4: "write P4 HIGH before reading"). */
+   home hall, so a select that dropped it would make that input unreadable. */
 #define EXP_INPUTS_HI 0xFFF0u
 #define EXP_HOME_BIT  (1u << 4)
 
@@ -41,7 +39,7 @@ static void note_(bool ok) {
 static bool gate_(void) {
   if (g_healthy) return true;
   if ((int32_t)(hal_millis() - g_backoff_until) < 0) return false;   /* still backing off */
-  if (safety_dosing()) return false;      /* §2.13: an expired back-off STAYS expired */
+  if (safety_dosing()) return false;      /* inside a dose an expired back-off STAYS expired */
   safety_tick();
   (void)hal_i2c_recover();                /* exactly PB_I2C_RECOVER_CLOCKS clocks */
   safety_tick();
@@ -67,7 +65,7 @@ bool sensors_begin(void) {
   g_float_seen = false;
   g_float_last = hal_pin_read(PIN_HALL_FLOAT);
   g_float_change_ms = g_txn_t0;
-  if (!safety_dosing()) (void)hal_i2c_recover();   /* at boot, outside a dose (§2.13) */
+  if (!safety_dosing()) (void)hal_i2c_recover();   /* at boot, outside a dose */
   return hal_i2c_probe(I2C_ADDR_EXPANDER);
 }
 
@@ -167,11 +165,8 @@ void sensors_scan(char *out, size_t cap) {
 }
 
 #ifdef PB_NATIVE
-/* Host-suite seam (task 18 fix round 1, finding 2): see the declaration in sensors.h for the
-   full reasoning. Just the three fields gate_()/note_() actually consult to decide "is the
-   bus healthy" -- not a full sensors_begin() (which also probes the bus, drives a real
-   recovery sequence, and resets the mux/canary/float-tracking state), so a test that never
-   touches sensors.cpp at all pays nothing extra in teardown. */
+/* Host-suite seam. Just the three fields gate_()/note_() consult, not a full
+   sensors_begin(), which probes the bus and drives a real recovery sequence. */
 void sensors_test_reset_health_(void) {
   g_healthy = true;
   g_fails = 0u;

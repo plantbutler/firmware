@@ -1,5 +1,5 @@
-/* src/link_fake.cpp — seam 2 against a script. [env:native] and [env:uno_r4_wifi_sim] only;
-   [env:uno_r4_wifi]'s build_src_filter excludes it. */
+/* link_fake.cpp: seam 2 against a script, for the native and sim envs; the bench env's
+   build_src_filter excludes it. */
 #include "link.h"
 #include "sim.h"
 #include "config.h"
@@ -9,7 +9,7 @@
 #define FAKE_RESP_CAP 512
 
 static link_state_t g_state;
-static bool     g_beginned;      /* models ModemClass::beginned (Modem.h:40) */
+static bool     g_beginned;      /* models ModemClass::beginned */
 static bool     g_serial_open;   /* Serial2: opened by begin(), closed by end() */
 static bool     g_join_pending;
 static int      g_sock;          /* -1 == unallocated, as WiFiClient::_sock */
@@ -25,7 +25,7 @@ static uint16_t g_sent_len;
 static uint16_t g_writes;        /* sock_write() calls: "was anything sent at all?" */
 
 /* One AT round trip. false == the modem timed out, and a timeout costs the full step: that
-   elapsed time is the ONLY signal netfsm has, because link.h has no timeout primitive (§3). */
+   elapsed time is the only signal netfsm has, because link.h has no timeout primitive. */
 static bool at_(void) {
   ++g_at;
   if (!g_serial_open || g_timeout_next) {
@@ -42,7 +42,7 @@ void link_begin(uint32_t step_ms) {
   if (!g_beginned) { g_beginned = true; g_serial_open = true; }   /* modem.begin() */
 }
 
-void link_join(void) { if (at_() && at_()) g_join_pending = true; }   /* 2 ATs, §3's table */
+void link_join(void) { if (at_() && at_()) g_join_pending = true; }   /* 2 ATs */
 
 link_state_t link_state(void) {
   if (!at_()) return g_state;
@@ -50,17 +50,10 @@ link_state_t link_state(void) {
   return g_state;
 }
 
-/* One AT each, like the driver: lib/Network/src/link_wifi.cpp charges 1 for the signal (a
-   WiFi.RSSI() round trip) and 1 for the address (its own bounded _IPSTA query, at most once
-   per join). These two were FREE here until the address query was bounded -- the real cost was
-   "up to 2, or ~125 s", which no fake can charge honestly -- and while they were free, both
-   refresh passes' was_timeout()/poison() pairings were unpinned: neither consulted
-   g_timeout_next, so either poison() could be deleted with every net case green. Charging
-   at_() is what lets test_a_timeout_in_the_{signal,address}_refresh_poisons_the_link fail.
-   Only netfsm.cpp calls either (a make check invariant), once per join each, so there is no
-   per-join cache to model here. Each still returns its own distinctive fixed value, which is
-   what makes "which pass did this arrive in" answerable at all -- see
-   test_the_signal_and_address_refreshes_never_share_a_pass. */
+/* One AT each, like the driver: 1 for the signal and 1 for the address, at most once per
+   join. Charging at_() is what pins each refresh pass's timeout/poison pairing; a free call
+   would let either poison() be deleted with every net case green. Each returns its own
+   distinctive fixed value so "which pass did this arrive in" is answerable. */
 int8_t      link_rssi(void) { return at_() ? -52 : 0; }
 const char *link_ip(void) {
   static char ip[16];
@@ -75,15 +68,14 @@ bool sock_open(void) {
   if (!at_()) return false;           /* _BEGINCLIENT */
   g_sock = 1;                         /* getSocket() ALLOCATES before the connect runs */
   if (!at_()) return false;           /* _CLIENTCONNECT */
-  return !g_fail_open;                /* a failed connect leaves _sock >= 0 — §3 change 1 */
+  return !g_fail_open;                /* a failed connect leaves _sock >= 0 */
 }
 
 int sock_write(const uint8_t *b, size_t n) {
   if (g_sock < 0) return -1;
   if (!at_()) return -1;
-  ++g_writes;                   /* the COUNT, not just the last buffer: task 26's ack-cycle
-                                   case has to prove that nothing was sent across two whole
-                                   report intervals, and g_sent cannot answer that. */
+  ++g_writes;                   /* the COUNT, not just the last buffer: "nothing was
+                                   sent across two report intervals" needs it */
   if (n > sizeof g_sent) n = sizeof g_sent;
   memcpy(g_sent, b, n);
   g_sent_len = (uint16_t)n;
@@ -104,8 +96,8 @@ int sock_read(uint8_t *b, size_t cap) {
 void sock_close(void) { if (g_sock >= 0) { (void)at_(); g_sock = -1; } }
 
 void link_reset(void) {
-  g_serial_open = false;        /* modem.end() — Modem.cpp:45-48 */
-  g_beginned = false;           /* Modem.cpp:45-48 never does this. Without it, begin() no-ops. */
+  g_serial_open = false;        /* modem.end() */
+  g_beginned = false;           /* the core's end() never clears this; without it begin() no-ops */
   if (!g_beginned) { g_beginned = true; g_serial_open = true; }   /* modem.begin() */
   g_state = LINK_DOWN; g_join_pending = false; g_sock = -1;
   ++g_desyncs; ++g_resets;
@@ -128,14 +120,9 @@ void link_fake_drop_link(void)      { g_state = LINK_DOWN; g_join_pending = fals
 void link_fake_pass_begin(void)     { g_at = 0; }
 uint16_t link_fake_at_count(void)   { return g_at; }
 uint16_t link_fake_reset_count(void){ return g_resets; }
-/* link.h has no available()/connected() primitive at all, so these can never become true from
-   above the seam -- they are hard-coded false, and the case that asserts them
-   (test_sock_read_calls_neither_available_nor_connected) is therefore asserting a TAUTOLOGY.
-   Say so plainly rather than reading it as coverage: it documents the seam's shape, and the
-   real check is the AT budget beside it. The half that could fail is the DRIVER's, and no
-   host test can see it, because link_fake is not WiFiClient; task 28's two wall-clock cases
-   time a RECV pass and a stale-socket open on real silicon, which is the closest anything in
-   this plan comes to catching a driver that quietly started polling. */
+/* link.h has no available()/connected() primitive, so these are hard-coded false and the
+   case asserting them is a tautology that documents the seam's shape; the real check is the
+   AT budget beside it. The driver's half only a wall-clock case on real silicon can see. */
 bool link_fake_saw_available(void)  { return false; }
 bool link_fake_saw_connected(void)  { return false; }
 const uint8_t *link_fake_sent(uint16_t *len) { if (len) *len = g_sent_len; return g_sent; }

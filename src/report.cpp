@@ -1,27 +1,16 @@
-/* src/report.cpp — the wire protocol, pure. Where the traps live (spec §4).
-   NO signed integer conversion anywhere: t = hal_boot_salt() + hal_millis() is above 2^31 on
-   ordinary boots, so a single percent-d against a uint32_t prints a leading '-', _int_in
-   rejects it, and EVERY report 400s from the first one (spec §15.2, §9's grep). Every numeric
-   site is %lu with an explicit cast. */
+/* report.cpp: the wire protocol, pure -- the k=v body and the response parser.
+   No signed conversion anywhere: t = hal_boot_salt() + hal_millis() is above 2^31 on
+   ordinary boots, so a signed print gives a leading '-' and every report 400s. */
 #include "report.h"
 #include "config.h"
 #include "hal.h"
-#include "netfsm.h"    /* net_desyncs(): fix round, task 27 -- the seam's own desync counter
-                          is read through netfsm.cpp's cache now, same as every other module
-                          outside netfsm.cpp and its driver. */
+#include "netfsm.h"
 #include "sensors.h"
 #include "pulses.h"
 #include "safety.h"
 #include "cart.h"
-#include "noinit.h"    /* g_nv.cmd_high_water: the replay guard, §4.3 */
-#include "secrets.h"   /* PB_CONTROLLER: the two static_asserts below and the c= field.
-                          An INTEGER since 2026-09-05, so `c=` is the same shape as every
-                          other identifier on the wire and a typo cannot open a second
-                          garden. Board 0 is a real board, which is why the assert below
-                          is a range and not a "not empty".
-                          [env:native] and [env:uno_r4_wifi_sim] pass it in build_flags;
-                          the two device envs do not, and this header is its only other
-                          definition. Its #ifndef guard makes both routes agree. */
+#include "noinit.h"
+#include "secrets.h"   /* PB_CONTROLLER: build_flags in the host and sim environments, this header on the device ones; its #ifndef guard makes both agree */
 #include <stdio.h>
 #include <string.h>
 
@@ -65,11 +54,10 @@ static bool put_ch(char *b, uint16_t cap, uint16_t *n, uint32_t ch, uint32_t v) 
   return true;
 }
 
-/* ch200..ch211, every one clamped: chN must be < MAX_RAW = 2^31 (butler.py:88,251), and a
-   storming D2 pushes ch205 past 2^31 in ~12.4 days. At least one is ALWAYS present, so a
-   wedged bus produces an alarm instead of silence (§4.1). A function of the ARRAY, not of the
-   producers, so the host can prove the clamp for every index and measure the block at its
-   full width -- see report.h. */
+/* ch200..ch211, every one clamped: chN must be below 2^31 on the wire, and a storming D2
+   pushes ch205 past it in ~12.4 days. At least one is always present, so a wedged bus
+   produces an alarm instead of silence. A function of the array, not the producers, so
+   the host can prove the clamp for every index. */
 bool report_put_diags(char *b, uint16_t cap, uint16_t *n, const uint32_t *diag) {
   for (uint32_t i = 0; i < (uint32_t)PB_DIAG_CHANNELS; ++i) {
     const uint32_t v = diag[i] > (uint32_t)PB_DIAG_CLAMP ? (uint32_t)PB_DIAG_CLAMP : diag[i];
@@ -78,16 +66,10 @@ bool report_put_diags(char *b, uint16_t cap, uint16_t *n, const uint32_t *diag) 
   return true;
 }
 
-/* Spec §12 item 0: "hal_begin() and EVERY REPORT check the break against the stack, because
-   nothing else will." _sbrk is the unchecked libnosys version and __HeapLimit is referenced by
-   nothing in the image, so this is the only heap bound that exists — and the 48-hour run is
-   exactly when the largest allocator in the program, the network stack, is active. Returns
-   false once the margin is crossed, and latches err=heap so the fact reaches the wire.
-
-   It does NOT call net_disable() itself: that flag lives in netfsm.cpp, this file must not
-   grow a dependency on a translation unit that does not exist until task 24, and report.cpp
-   is compiled into every host suite. Task 24's NET_IDLE pass is the one caller that turns a
-   false into `net_disable("heap")`; this function's job is the measurement and the token. */
+/* The only heap bound that exists: _sbrk is the unchecked libnosys version and nothing
+   references __HeapLimit. Checked at boot and on every report, when the network stack --
+   the largest allocator -- is active. Latches err=heap so the fact reaches the wire; the
+   net-disable half lives in netfsm.cpp, which not every host suite links. */
 bool report_heap_ok(void) {
   if (hal_heap_break() < hal_stack_limit() - (uint32_t)PB_STACK_MARGIN) return true;
   safety_set_err("heap");
@@ -95,28 +77,25 @@ bool report_heap_ok(void) {
 }
 
 uint16_t report_build(char *buf, uint16_t cap) {
-  if (!report_may_build()) return 0;    /* err=recv must never reach the wire (§4.3) */
+  if (!report_may_build()) return 0;    /* err=recv must never reach the wire */
   uint16_t n = 0;
   bool ok = true;
-  (void)report_heap_ok();      /* §12 item 0's per-report half. It does not abort the body:
-                                  a report that says err=heap is worth more than no report. */
+  (void)report_heap_ok();      /* does not abort the body: a report that says err=heap is
+                                  worth more than no report */
   const bool stuck = sensors_stuck();
 
   ok = ok && put_u(buf, cap, &n, "c=%lu", (uint32_t)PB_CONTROLLER);
   ok = ok && put_u(buf, cap, &n, " t=%lu", g_t_wire);
 
-  if (!stuck) {                       /* §5: a stuck mux omits the WIRED channels, not the body */
+  if (!stuck) {                       /* a stuck mux omits the wired channels, not the body */
     for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch)
       if (sensors_valid(ch))
         ok = ok && put_ch(buf, cap, &n, ch, sensors_value(ch));
   }
 
-  /* The twelve producers, in channel order, for report_put_diags() above. ch210 and ch211
-     put the other two latches beside ch207's: the flap (1 while PB_FLOAT_FLAP_LIMIT
-     consecutive float refusals stand) and the dry latch (1 while g_nv.dry_latched stands).
-     ch207 and ch210 say WHY float= is 0 -- float= itself is unchanged below. ch211 is not a
-     float= term at all: it is what forces pos=unknown further down. The array's length is
-     pinned to PB_DIAG_CHANNELS because config.h's PB_BODY_WORST_SUM is done at that count. */
+  /* The twelve producers, in channel order. ch207 (contra) and ch210 (the float flap) say
+     WHY float= is 0; ch211 (the dry latch) is no float= term at all: it forces pos=unknown
+     below. The count is pinned because the body's worst-case sum is done at it. */
   const uint32_t diag[] = {
     hal_heap_arena(), hal_heap_ordblks(), hal_stack_hwm(),
     sensors_i2c_errors(), sensors_float_change_age_s(), pulses_leak_count(),
@@ -128,17 +107,15 @@ uint16_t report_build(char *buf, uint16_t cap) {
                 "the diag array and PB_DIAG_CHANNELS disagree: re-do PB_BODY_WORST_SUM");
   ok = ok && report_put_diags(buf, cap, &n, diag);
 
-  /* §2.10, §4.1: the DEBOUNCED tank verdict, ANDed with !contra, forced to 0 above
-     PB_FLOAT_FLAP_LIMIT consecutive DOSE_REFUSED_FLOAT results. Never 2, never negative:
-     _int_in(v,"float",0,2) is half-open and ASCII-digits-only. */
+  /* The debounced tank verdict, ANDed with !contra, forced to 0 after PB_FLOAT_FLAP_LIMIT
+     consecutive float refusals. Never 2, never negative: butler accepts 0 or 1 only. */
   const bool fl = safety_float_ok_debounced() && !safety_contra() && !safety_float_flap();
   ok = ok && put_u(buf, cap, &n, " float=%lu", fl ? 1u : 0u);
 
-  /* §4.1, §2.10, §4.6: unknown UNCONDITIONALLY while the going-live flag is defined AND
-     unconditionally while the dry latch is set (otherwise water_rules queues doses the board
-     will refuse and ack, paging HIGH once per cooldown, forever). Otherwise ok only when the
-     gate pitch is calibrated, a home has been seen since boot, and the last expander read
-     succeeded. */
+  /* Unknown unconditionally while the going-live flag is defined and while the dry latch
+     stands (otherwise the backend queues doses the board refuses and acks, paging once per
+     cooldown, forever). Otherwise ok only with a calibrated cart, a home seen since boot
+     and a healthy expander. */
 #if PB_REPORT_POS_UNKNOWN
   const bool pos_ok = false;
 #else
@@ -152,10 +129,9 @@ uint16_t report_build(char *buf, uint16_t cap) {
     ok = ok && put_u(buf, cap, &n, " flow_ml=%lu", (uint32_t)g_ack.flow_ml);
     err = g_ack.err;
   } else {
-    /* §1: pulses with the pump off raise ch205 and err=leak, and they never block a dose.
-       This is that token's ONLY producer in the program: pulses_leak_poll() (driven from
-       loop(), task 12 step 4) advances the count, and this line puts it on the wire. Below
-       `stuck`, because a mux that is lying about every channel is the larger fact. */
+    /* Pulses with the pump off raise ch205 and err=leak and never block a dose; this is
+       the token's only producer. Below `stuck`: a mux lying about every channel is the
+       larger fact. */
     err = stuck ? "stuck" : (pulses_leak_seen() ? "leak" : safety_last_err());
   }
   if (!err || !*err) err = "none";
@@ -163,18 +139,16 @@ uint16_t report_build(char *buf, uint16_t cap) {
 
   ok = ok && put_s(buf, cap, &n, "%s", "\n");
   if (!ok) { ++g_txcap_drops; safety_set_err("txcap"); return 0; }
-  /* A truncation set err=txcap, and nothing else in the program ever clears it. One 384-byte
-     body would otherwise put txcap on EVERY later report forever, long after the condition
-     that caused it. Only this function's own token is cleared, and only by a body that fit —
-     the boot tokens (wdt, adc, heap) and the dose tokens are none of this function's business. */
+  /* Nothing else clears err=txcap, so one oversized body would otherwise mark every later
+     report forever. Only this function's own token, and only once a body fit: the boot
+     and dose tokens are not its business. */
   if (strcmp(safety_last_err(), "txcap") == 0) safety_set_err("none");
   g_last_len = n;
   return n;
 }
 
-/* butler's ack UPDATE writes flow_ml = ? unconditionally (butler.py:830), so an ack= without a
-   flow_ml= stores NULL, charges the pot the FULL ml against its daily cap (COALESCE(flow_ml, ml),
-   :745-751) and skips the 2*flow_ml < ml branch entirely. Structurally one pair, both ways. */
+/* butler's ack UPDATE writes flow_ml unconditionally: an ack= without flow_ml= stores NULL,
+   charges the pot the full ml against its daily cap and skips the short-dose branch. */
 void report_set_ack(uint32_t id, uint16_t flow_ml, const char *err) {
   g_ack.id = id; g_ack.flow_ml = flow_ml; g_ack.err = err;
   g_ack_set = (id != 0);                 /* ack=0 400s the whole report; never emit it */
@@ -183,24 +157,18 @@ void report_clear_ack(void) { g_ack_set = false; g_ack.id = 0; g_ack.flow_ml = 0
 bool report_ack_is_recv(void) {
   return g_ack_set && g_ack.err && strcmp(g_ack.err, "recv") == 0;
 }
-/* §4.3: no report may be built while a command is pending and the ack slot still reads "recv".
-   Without this the placeholder reaches the wire, butler marks the command acked with flow_ml=0,
-   pages HIGH, sets the pot's cooldown and charges 0 ml — and THEN the board runs the dose. */
+/* No report while a command is pending and the ack slot reads "recv": the placeholder on
+   the wire would mark the command acked with flow_ml=0, page, set the cooldown, charge
+   0 ml -- and THEN the board would run the dose. */
 bool report_may_build(void) { return !report_ack_is_recv(); }
 
-/* ---- response parsing — where a fault becomes water (spec §4.5) ---- */
+/* ---- response parsing: where a fault becomes water ---- */
 
 /* One unsigned field out of a k=v token. false == absent, non-numeric, or overlong.
-   ASCII digits only, like butler's own _int_in (butler.py:192-201).
-
-   The per-digit overflow check is EXACT, not a rounded-down constant: v > (UINT32_MAX - d) / 10
-   is the precise "would v*10+d overflow" test for the digit about to be consumed, so it accepts
-   every representable uint32_t (up to and including 4294967295) and rejects every string that
-   would not fit — never silently wraps. A cruder single-threshold guard (reject once v exceeds
-   some fixed constant, then multiply unconditionally) is one edge case short of that: at the
-   boundary itself the very next digit can still carry v past UINT32_MAX and wrap modulo 2^32,
-   turning e.g. "water=4294967297" into a silently-accepted outlet=1 instead of a rejected field
-   — exactly the "partial" acceptance rule 1 above exists to forbid. */
+   ASCII digits only, like butler's own parser. The overflow check is exact per digit:
+   v > (UINT32_MAX - d) / 10 is precisely "would v*10+d overflow", so every uint32_t is
+   accepted and nothing wraps -- a fixed-threshold guard is one digit short and would turn
+   "water=4294967297" into an accepted outlet=1. */
 static bool field_u32(const char *line, uint16_t len, const char *key, uint32_t *out) {
   const size_t kl = strlen(key);
   for (uint16_t i = 0; i < len; ++i) {
@@ -227,8 +195,8 @@ bool response_parse(const char *body, uint16_t len, response_t *out) {
   out->cmd.outlet = 0; out->cmd.ml = 0; out->cmd.cap_s = 0;
   if (!body || len == 0) return false;
 
-  /* Every line must be newline-TERMINATED inside len. A body truncated mid-token must never
-     water: a half-read reply is not a command (§4.5). */
+  /* Every line must be newline-terminated inside len: a body truncated mid-token must
+     never water. */
   uint16_t pos = 0;
   while (pos < len) {
     const char *nl = (const char *)memchr(body + pos, '\n', (size_t)(len - pos));
@@ -243,10 +211,10 @@ bool response_parse(const char *body, uint16_t len, response_t *out) {
 
     if (!field_u32(line, llen, "cmd=", &v)) continue;
     if (v == 0) continue;                 /* ack must be >= 1 or the whole report 400s */
-    /* Replay guard (§4.3): a response body left over from an earlier round trip — exactly what a
-       poisoned AT session produces — would otherwise run cmd=17 a SECOND time; the second ack
-       lands on a row no longer state='sent', so the UPDATE is a silent no-op, the cooldown and
-       daily cap never see it, and the plant gets double the water with no alert. */
+    /* Replay guard: a response body left over from an earlier round trip -- what a poisoned
+       AT session produces -- would run the same command a second time; the second ack lands
+       on a row no longer 'sent', so the backend's UPDATE is a silent no-op and the plant
+       gets double the water with no alert. */
     if (v <= g_nv.cmd_high_water) continue;
     const uint32_t id = v;
 
@@ -254,26 +222,19 @@ bool response_parse(const char *body, uint16_t len, response_t *out) {
     if (field_u32(line, llen, "stop=", &stop) && stop != 0) {
       out->cmd.id = id; out->cmd.kind = CMD_STOP;
     } else {
-      /* Sentinel-initialised, not left indeterminate: field_u32 only writes *out on success, so
-         an absent field must fail the width check three lines down on its own, EVEN IF a future
-         edit drops the `continue` that is supposed to catch it here. An uninitialised local
-         would make that failure mode depend on whatever the stack happened to hold — caught in
-         this task's own mutation sweep, where deleting the ml= guard alone slipped through
-         because the leftover stack value happened to still land outside [1,65535]. A sentinel
-         above every field's own maximum removes the coin flip: the guards below stay the fast,
-         readable path, and the width check is the backstop that holds even if they are gone. */
+      /* Sentinels above every field's maximum, not indeterminate locals: field_u32 writes
+         *out only on success, so an absent field fails the width check on its own even if
+         a `continue` above it is ever dropped. */
       uint32_t outlet = 0xFFFFFFFFu, ml = 0xFFFFFFFFu, cap_s = 0xFFFFFFFFu;
       if (!field_u32(line, llen, "water=", &outlet)) continue;
       if (!field_u32(line, llen, "ml=", &ml))       continue;   /* no ml= is no command */
       if (!field_u32(line, llen, "cap_s=", &cap_s)) continue;   /* an absent cap is unbounded */
       if (ml == 0) continue;
       if (outlet > 255u || ml > 65535u || cap_s > 65535u) continue;
-      /* An outlet outside 1..PB_OUTLETS — water=0 included — IS accepted here and refused with
-         err=range by exec_pending(), above cart_goto(), so the backend learns the real reason.
-         cap_s rides through UNCLAMPED: the firmware's own ceiling (PB_DOSE_CAP_MS_MAX) is
-         dose_run()'s job (safety.cpp:222), not this parser's — a hostile or buggy cap_s widens
-         nothing, because nothing here ever narrows it either. Parse into a struct, decide
-         nothing (spec §4.5, this task's requirement 4). */
+      /* An outlet outside 1..PB_OUTLETS, water=0 included, is accepted here and refused
+         with err=range by exec_pending(), so the backend learns the real reason. cap_s
+         rides through unclamped: the firmware's own ceiling is the dosing entry point's
+         job. Parse into a struct, decide nothing. */
       out->cmd.id = id; out->cmd.kind = CMD_WATER;
       out->cmd.outlet = (uint8_t)outlet;
       out->cmd.ml = (uint16_t)ml;

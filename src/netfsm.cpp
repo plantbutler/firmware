@@ -1,10 +1,7 @@
-/* src/netfsm.cpp — the report state machine and the HTTP framing, above seam 2.
-   §9 greps this file for ZERO hits of the safety header, the dosing entry point and the pump
-   write. That is the direction that matters: one include of the safety header added here
-   during a later change puts a call that asserts D6 one edit away from a state whose socket
-   is open, with the build and make check both green.
-   NO signed integer conversion in any format string (§9): every numeric site is %lu with an
-   explicit cast. */
+/* netfsm.cpp: the report/response state machine and HTTP framing over the network seam.
+   Names neither the safety header, the dosing entry point nor the pump write: a state
+   whose socket is open must never be one edit away from a call that asserts D6. No signed
+   conversion in any format string. */
 #include "netfsm.h"
 #include "link.h"
 #include "report.h"
@@ -12,17 +9,13 @@
 #include "cart.h"
 #include "config.h"
 #include "hal.h"
-#include "ui.h"          /* ui_modem_ran() ONLY. §9's grep over this file names the safety
-                            header, the dosing entry point and the pump write, and ui.h is
-                            none of those. */
+#include "ui.h"
 #include "secrets.h"
 #include <stdio.h>
 #include <string.h>
 
-/* THE DOSING FLAG IS A PARAMETER, not a forward declaration. §9's grep keeps the safety header
-   out of this file, and an `extern bool safety_dosing(void);` here would be that include by
-   another name; loop() supplies the flag instead (task 12 step 4, task 26 step 13b). Spec §3,
-   "include hygiene, in both directions". */
+/* The dosing flag arrives as a net_poll() parameter: an extern declaration here would be
+   the safety header by another name. */
 
 static_assert(sizeof(HOST_NAME) + sizeof(BUTLER_TOKEN) + PB_HDR_FIXED + PB_BODY_CAP <= PB_TX_CAP,
               "HOST_NAME + BUTLER_TOKEN + headers + body do not fit PB_TX_CAP: snprintf would "
@@ -42,16 +35,12 @@ static uint8_t  g_backoff_i;
 static uint32_t g_wait_until, g_deadline, g_last_report_ms;
 static bool     g_first_report_due;
 static bool     g_retried;                  /* each report gets its own single retry */
-/* Set only inside NET_CONNECT's failure branch, and only once the retry is already exhausted
-   (g_retried was already true): TWO consecutive attempts that cannot even OPEN a socket,
-   neither of them a modem timeout, is the fake's own model of a link that silently dropped
-   between reports (link_fake_drop_link()) -- sock_open() answers instantly and cleanly with
-   "not associated", so there is no desync for poison()/link_reset() to fix, but nothing else
-   in this FSM ever re-polls link_state() once IDLE is first reached. Left unhandled, the board
-   would retry-then-abandon every report forever without ever rejoining -- exactly the 48-hour
-   "survives a WiFi drop" bar this file exists to meet. NET_SOCK_CLOSE is the one place that
-   acts on it, via the SAME link_down() a JOIN_WAIT deadline expiry uses; a RECV-side failure
-   (the server present but silent) never sets this and is not treated as a link problem. */
+/* Set only in NET_CONNECT's failure branch once the retry is exhausted: two consecutive
+   opens that fail cleanly, neither a modem timeout, is a link that silently dropped between
+   reports. There is no desync to reset, and nothing else re-polls the link once IDLE is
+   reached, so without this the board would retry-then-abandon every report forever without
+   rejoining. NET_SOCK_CLOSE acts on it through the same link_down() a JOIN_WAIT expiry uses;
+   a RECV-side failure (server present but silent) never sets it. */
 static bool     g_connect_starved;
 
 static char     g_body[PB_BODY_CAP];
@@ -64,12 +53,9 @@ static uint16_t g_rx_len;
 static cmd_t    g_cmd;
 static bool     g_have_cmd;
 
-/* Fix round, task 27: this file's OWN cache of what the seam last reported, so every other
-   caller in the tree reads a plain, zero-AT accessor instead of the seam itself (netfsm.h's
-   own comment beside the four accessors below has the full story). g_link is refreshed every
-   NET_JOIN_WAIT pass; g_rssi/g_ip are populated at most once per successful join, one whole
-   NET_IDLE pass each (g_need_rssi/g_need_ip); all three collapse back to their "no link"
-   defaults the moment link_down() gives up on the join. */
+/* This file's own cache of what the seam last reported, so every other caller reads a
+   zero-AT accessor. g_link is refreshed every NET_JOIN_WAIT pass; g_rssi/g_ip at most once
+   per join, one whole NET_IDLE pass each; all three reset when link_down() gives up. */
 static uint8_t  g_link;
 static int8_t   g_rssi;
 static char     g_ip[16] = "0.0.0.0";
@@ -89,12 +75,9 @@ int8_t      net_rssi(void)            { return g_rssi; }
 const char *net_ip(void)              { return g_ip; }
 uint16_t    net_desyncs(void)         { return link_desyncs(); }
 
-/* EVERY pass that issues an AT command goes through this, never through a bare
-   `g_modem_ran = true;`. ui.cpp's own flag has to be raised in the SAME pass, or spec §3's and
-   §5's rule that neither screen is painted after a modem pass is not implemented at all — and
-   the cost of not implementing it is up to 102 s of wedged-bus LCD painting stacked on top of
-   a 2.4 s modem pass, inside a 5592 ms grant. net_modem_ran_this_pass() stays as the readable
-   fact for `status` and for tests; ui_modem_ran() is the consumer that matters. */
+/* Every pass that issues an AT command goes through this: ui.cpp's flag must be raised in
+   the same pass, or a screen is painted after a modem pass -- up to 102 s of wedged-bus LCD
+   painting on top of a 2.4 s modem pass, inside a 5592 ms watchdog grant. */
 static void modem_ran_(void) { g_modem_ran = true; ui_modem_ran(); }
 
 bool net_take_command(cmd_t *out) {
@@ -119,42 +102,31 @@ void net_begin(void) {
   g_need_reset = false;
 }
 
-/* setup()'s boot order, in the one file a host test can reach. net_begin() MUST run first: it
-   clears g_disabled unconditionally, deliberately, so a latch left standing across a restart
-   cannot make net_poll() a silent no-op forever. Latch the verdict before that line and
-   net_begin() throws it away one statement later -- the banner still prints net=DISABLED,
-   because it reads main.cpp's own flag rather than this one, and the board then reports
-   rescaled raw counts for 48 hours with a failed watchdog, ADC or heap assertion behind it.
-   Pinned by test_a_failed_boot_assertion_survives_net_begin. */
+/* net_begin() must run first: it clears g_disabled unconditionally so a latch cannot
+   survive a restart, and a verdict latched before it would be thrown away one statement
+   later -- the banner would still print net=DISABLED from main.cpp's own flag while the
+   board reported rescaled raw counts for 48 hours. */
 void net_boot(const char *boot_err) {
   net_begin();
   if (boot_err) net_disable(boot_err);
 }
 
-/* PB_RETRY_DEADLINE_MS = 30000, well inside butler's RETRY_WINDOW_S = 300 (butler.py:86).
-   g_t_ms is the UNSALTED hal_millis() stamped alongside g_t_wire (§4.1). Measuring against the
-   wire value gives `elapsed - salt` mod 2^32. Two variables, one purpose each (§4.4). */
+/* PB_RETRY_DEADLINE_MS is well inside butler's 300 s dedup window. Measured against the
+   unsalted hal_millis() stamp, not the wire value, which carries the boot salt. */
 static bool retry_window_open(void) {
   return (int32_t)(hal_millis() - report_t_ms()) < (int32_t)PB_RETRY_DEADLINE_MS;
 }
 
-/* Every error exit routes THROUGH NET_SOCK_CLOSE via this one function, and it does NOT call
-   sock_close() itself: a failed CONNECT that closed inline would be _BEGINCLIENT +
-   _CLIENTCONNECT + _CLIENTCLOSE = 3 ATs = 3600 ms, and 3600 + PB_NET_SLACK_MS = 5600 > 5592.
-   Load-bearing arithmetic, not tidiness (spec §3 change 2).
+/* Every error exit routes through NET_SOCK_CLOSE, and this never closes inline: a failed
+   CONNECT closing here would be 3 ATs = 3600 ms, and 3600 + PB_NET_SLACK_MS exceeds the
+   5592 ms grant.
 
-   The retry-eligible set is exactly two cases and nothing else (spec §4.4):
-   (a) zero response bytes arrived, and (b) a COMPLETE 503, which is raised only on
-   sqlite3.OperationalError (butler.py:1638-1639) and rolls the whole BEGIN IMMEDIATE back.
-   Everything else is discarded: a 4xx (the backend answered; the same body cannot get better),
-   a truncated reply, a parse failure, a 500, any other non-200.
-
-   If ANY response bytes arrived, do not retry. When the request lands and the RESPONSE is lost,
-   the backend has already moved a command queued -> sent (:870-873); the retry then hits the
-   unconditional expire (:837-841) and kills a command the board never saw — a HIGH "never
-   acknowledged" page for a dose that never existed, and the pot charged the full ml because
-   flow_ml is NULL. Retrying is what destroys it, which is why a TRUNCATION is on the
-   never-retry side: a truncation is bytes that arrived. */
+   Retry-eligible is exactly two cases: zero response bytes arrived, or a complete 503
+   (raised only on sqlite3.OperationalError, which rolls the whole transaction back).
+   Everything else is discarded -- a 4xx, a truncated reply, a parse failure, a 500. If any
+   bytes arrived the request landed: the backend has already moved the command queued ->
+   sent, and a retry would hit its unconditional expire and kill a command the board never
+   saw, paging and charging the pot the full ml. A truncation is bytes that arrived. */
 static void finish(uint16_t status, bool ok, bool retry_eligible) {
   if (status) g_status = status;
   if (ok) ++g_ok; else ++g_failed;
@@ -168,10 +140,8 @@ static void link_down(void) {
   g_wait_until = hal_millis() + k_backoff[g_backoff_i];
   if (g_backoff_i + 1 < sizeof k_backoff / sizeof k_backoff[0]) ++g_backoff_i;
   g_state = NET_DOWN;
-  /* No stale signal-strength or address once the FSM has given up on this join: `status`
-     must never show an RSSI or an IP that belonged to a link that has already ended. A
-     fresh join re-arms g_need_rssi/g_need_ip on its own NET_JOIN_WAIT -> NET_IDLE
-     transition, so clearing them here just means the NEXT join's own passes do the work. */
+  /* `status` must never show an RSSI or IP from a link that has ended; the next join
+     re-arms both on its own JOIN_WAIT -> IDLE transition. */
   g_link = 0; g_rssi = 0; snprintf(g_ip, sizeof g_ip, "0.0.0.0");
   g_need_rssi = false; g_need_ip = false;
 }
@@ -194,9 +164,8 @@ static uint16_t rx_status(void) {
   return (uint16_t)((g_rx[9] - '0') * 100 + (g_rx[10] - '0') * 10 + (g_rx[11] - '0'));
 }
 
-/* strncasecmp() is POSIX (<strings.h>), not standard C; the Renesas newlib carries it in
-   <string.h> instead. Hand-rolled here rather than including both headers behind a guess at
-   which one the device toolchain provides — five lines, no portability question left open. */
+/* strncasecmp() is POSIX, and the Renesas newlib keeps it in a different header than the
+   host does; hand-rolled rather than guessing. */
 static int ci_starts_with_(const char *s, const char *left, size_t n) {
   for (size_t i = 0; i < n; ++i) {
     char a = s[i], b = left[i];
@@ -227,26 +196,22 @@ static bool rx_complete(const char **body, uint16_t *blen) {
   return true;
 }
 
-/* buf_read breaks out on Timeout (Modem.cpp:185-187) and leaves the late answer sitting in
-   Serial2's RX FIFO; write() clears its result string (:100) but does not drain the UART, and
-   the FSM's restart logic (:241,:267) resyncs some shapes and not others. So ANY modem timeout
-   is treated as link poisoned: do not issue the next command. link_reset() is end();
-   beginned = false; begin(); ++desyncs — and the middle line is the one the 48-hour run depends
-   on. Never the ping helper: it resets modem.timeout() to 10000 ms (WiFi.cpp:585-593). */
-/* The tear-down is DEFERRED to its own pass, not done here. poison() is reached from passes
-   that have already spent two modem round trips, and the tear-down costs a third (its second
-   half re-issues a command, and the fake charges it nothing, which is why the host suite
-   cannot see this): 3 x PB_NET_STEP_MS = 3600 ms, and 3600 + PB_NET_SLACK_MS = 5600 > 5592.
-   That is the same arithmetic this file already uses to forbid combining the two refresh
-   passes, and it bites hardest here, on the path taken when the modem is ALREADY misbehaving.
-   The link is down either way, so nothing talks to the modem while the tear-down waits. */
+/* A modem timeout leaves the late answer in Serial2's RX FIFO: the next write clears its
+   result but not the UART, and the modem's restart logic resyncs some shapes and not
+   others. So ANY timeout poisons the link: issue no further command, and reset the modem
+   (end, clear its begun flag, begin again -- the middle step is the one a long run depends
+   on). Never the ping helper: it resets the modem timeout to 10000 ms.
+   The tear-down is deferred to its own pass: poison() is reached from passes that already
+   spent two round trips, and the reset costs a third (3 x PB_NET_STEP_MS = 3600 ms, over
+   the grant once slack is added). The fake charges the reset nothing, so the host suite
+   cannot see this. The link is down either way, so nothing talks to the modem meanwhile. */
 static void poison(void) {
   g_need_reset = true;
-  link_down();     /* same backoff arithmetic a JOIN_WAIT deadline expiry uses; one spelling */
+  link_down();     /* the same backoff a JOIN_WAIT deadline expiry uses */
 }
 
-/* A timeout always costs a full step and always yields the failure value; a SUCCESSFUL two-AT
-   pass never does. So the test lives inside the failure branch, never around the whole pass. */
+/* A timeout always costs a full step and always yields the failure value; a successful
+   two-AT pass never does, so the test lives inside the failure branch. */
 static bool was_timeout(uint32_t t0) {
   return (int32_t)(hal_millis() - t0) >= (int32_t)PB_NET_STEP_MS;
 }
@@ -258,10 +223,9 @@ bool netfsm_test_was_timeout_(uint32_t t0) { return was_timeout(t0); }
 
 void net_poll(bool dosing) {
   g_modem_ran = false;
-  if (g_disabled) return;              /* the boot assertion's consumer (§3) */
-  if (dosing || cart_busy()) return;   /* §3's runtime guard. The flag arrives as a PARAMETER
-                                          because §9 keeps the safety header out of this
-                                          file. */
+  if (g_disabled) return;              /* the boot assertion's consumer */
+  if (dosing || cart_busy()) return;   /* a parameter, so the safety header stays out
+                                          of this file */
 
   switch (g_state) {
     case NET_DOWN:
@@ -278,7 +242,7 @@ void net_poll(bool dosing) {
     case NET_JOIN_ISSUE: {
       modem_ran_();
       const uint32_t t0 = hal_millis();
-      link_join();                              /* 2 ATs (WiFi.cpp:43-67) */
+      link_join();                              /* 2 ATs */
       if (was_timeout(t0)) { poison(); return; }
       g_deadline = hal_millis() + PB_NET_DEADLINE_MS;
       g_state = NET_JOIN_WAIT;
@@ -289,9 +253,8 @@ void net_poll(bool dosing) {
       modem_ran_();
       const uint32_t t0 = hal_millis();
       link_state_t s = link_state();            /* 1 AT */
-      /* The ONE place net_link()'s cache is written: this file's own JOIN_WAIT poll already
-         has the answer, so this costs zero extra ATs. Kept in the same three-way shape
-         ui_state_t::link and cli's `link=` have always used (0 down, 1 joining, 2 up). */
+      /* The one place g_link is written; JOIN_WAIT already has the answer, at zero extra
+         ATs. 0 down, 1 joining, 2 up, as ui and `status` read it. */
       g_link = (uint8_t)(s == LINK_UP ? 2 : (s == LINK_JOINING ? 1 : 0));
       if (s == LINK_UP) {
         g_backoff_i = 0;
@@ -305,14 +268,10 @@ void net_poll(bool dosing) {
     }
 
     case NET_IDLE: {
-      /* Refresh passes come first and each spends the WHOLE pass: link_rssi() is 1 AT and
-         link_ip() is 1 AT (once per join; the driver's own cache makes every call after the
-         first free even within this same join -- see link_wifi.cpp). They were split when
-         link_ip() was WiFi.localIP() at up to 2 ATs: 1 + 2 = 3 ATs = 3600 ms, and 3600 +
-         PB_NET_SLACK_MS = 5600 > 5592. At 1 + 1 they would now fit in one pass, and they stay
-         apart anyway: a 1-AT pass keeps ~3.2 s of margin under the grant where a 2-AT pass
-         keeps ~1.2 s, and nothing about a refresh needs the tighter one. Every 2-AT pass in
-         this file is 2 ATs because it MUST be. */
+      /* The refresh passes come first, one AT each and one whole pass each. At 1 + 1 they
+         would fit in one pass and stay apart anyway: a 1-AT pass keeps ~3.2 s of margin
+         under the grant, a 2-AT pass ~1.2 s. Every 2-AT pass in this file is 2 ATs
+         because it must be. */
       if (g_need_rssi) {
         modem_ran_();
         const uint32_t t0 = hal_millis();
@@ -322,13 +281,9 @@ void net_poll(bool dosing) {
         return;
       }
       if (g_need_ip) {
-        /* The same was_timeout()/poison() pairing as every other AT-issuing pass. This pass
-           used to be the one exception: link_ip() was WiFi.localIP(), whose SUCCESSFUL call
-           costs ~2.5 s (a 100 ms wait plus up to 2 ATs), above PB_NET_STEP_MS on the
-           no-error path, so the test would have poisoned every good join -- and whose
-           failing call spins up to ~125 s, which no test on this side of the seam can
-           interrupt. link_wifi.cpp now issues the one bounded query instead, so a slow
-           answer here means what it means everywhere else: the modem timed out. */
+        /* The same was_timeout()/poison() pairing as every other AT pass: the driver's
+           address query is one bounded AT, not the core's localIP() with its ~2.5 s
+           success and ~125 s failure, so a slow answer here means the modem timed out. */
         modem_ran_();
         const uint32_t t0 = hal_millis();
         const char *ip = link_ip();              /* 1 AT, once per join */
@@ -340,23 +295,20 @@ void net_poll(bool dosing) {
 
       const uint32_t due = (uint32_t)g_next_s * 1000u;
       if (!g_first_report_due && hal_millis() - g_last_report_ms < due) return;
-      if (!report_may_build()) return;   /* §4.3: the report WAITS while the ack reads recv */
-      /* §12 item 0's per-report break check. report_heap_ok() latches err=heap; disabling the
-         network is this file's half, because the flag lives here. A board that stops reporting
-         is the right answer once the break is inside the stack margin: the network stack is
-         the largest allocator in the program, and continuing is how the corruption reaches a
-         water command. */
+      if (!report_may_build()) return;   /* the report waits while the ack still reads recv */
+      /* report_heap_ok() latches err=heap; disabling the network is this file's half. A
+         board that stops reporting is the right answer once the break is inside the stack
+         margin: the network stack is the largest allocator, and continuing is how the
+         corruption reaches a water command. */
       if (!report_heap_ok()) { net_disable("heap"); return; }
-      /* This pass issues no AT command at all, which is what makes the sweep legal here:
-         §3 skips sensors_sweep() in any pass where a modem command ran. It is the sweep's
-         ONLY caller in the whole program and its cadence is one per report cycle; loop()
-         does not call it and there is no sensors_poll() anywhere. */
+      /* This pass issues no AT command, which is what makes the sweep legal here: no pass
+         may both run the modem and sweep the sensors. This is the sweep's only caller. */
       (void)sensors_sweep();
       report_stamp();
       g_body_len = report_build(g_body, sizeof g_body);
       g_last_report_ms = hal_millis();
       g_first_report_due = false;
-      if (g_body_len == 0) { ++g_failed; return; }   /* err=txcap: DROPPED, never sent (§4.2) */
+      if (g_body_len == 0) { ++g_failed; return; }   /* err=txcap: DROPPED, never sent */
       g_retried = false;              /* each report gets its own single retry */
       g_connect_starved = false;
       g_state = NET_SOCK_CLOSE;
@@ -370,18 +322,13 @@ void net_poll(bool dosing) {
       const uint32_t t0 = hal_millis();
       sock_close();                     /* 1 AT, or 0 when _sock == -1 */
       if (was_timeout(t0)) { poison(); return; }
-      /* An armed retry (g_retried already true, body kept) is re-checked against the window
-         HERE, not only once back in finish(): the retry can sit ARMED across a backoff/rejoin
-         before this pass ever runs again, and a window that was open at failure time can have
-         since closed. Abandoning it here, rather than letting SOCK_CLOSE blindly walk it into
-         CONNECT, is what makes "abandoned rather than sent outside the dedup window" true for
-         every path back to this state, not just the one finish() takes on the failure itself. */
+      /* An armed retry can sit across a backoff and rejoin before this pass runs again, so
+         the window is re-checked here: a retry outside the dedup window is abandoned,
+         never sent. */
       if (g_retried && g_body_len != 0 && !retry_window_open()) g_body_len = 0;
       if (g_body_len) { g_state = NET_CONNECT; return; }
-      /* Two straight non-timeout CONNECT failures (see g_connect_starved's own comment):
-         re-join instead of parking in IDLE forever with no way back to JOIN_ISSUE. Plain
-         link_down() -- the SAME backoff a JOIN_WAIT deadline expiry uses -- not poison(): the
-         modem answered cleanly both times, so there is no UART desync to fix with a reset. */
+      /* Two straight clean CONNECT failures: re-join rather than park in IDLE forever.
+         link_down(), not poison(): the modem answered both times, there is no desync. */
       if (g_connect_starved) { g_connect_starved = false; link_down(); return; }
       g_state = NET_IDLE;
       return;
@@ -416,9 +363,8 @@ void net_poll(bool dosing) {
 
     case NET_RECV: {
       modem_ran_();
-      /* client.read(buf, cap) and NOTHING else: available() would add an _AVAILABLE, and
-         connected() costs TWO more. The PB_NET_DEADLINE_MS deadline is the closed-socket
-         detector instead, for zero AT commands (spec §3 change 3). */
+      /* Only the socket read: available() would add an AT and connected() two more. The
+         deadline is the closed-socket detector, at zero ATs. */
       const uint32_t t0 = hal_millis();
       int r = sock_read((uint8_t *)g_rx + g_rx_len, (size_t)(sizeof g_rx - g_rx_len));
       if (r > 0) g_rx_len = (uint16_t)(g_rx_len + r);
@@ -436,8 +382,8 @@ void net_poll(bool dosing) {
       const uint16_t st = rx_status();
       const char *body; uint16_t blen;
       if (st == 200 && rx_complete(&body, &blen)) {
-        /* The previous report's ack was delivered. Clear it BEFORE the next command can set
-           the receipt placeholder, or every report repeats the same ack forever (§4.3). */
+        /* Clear the delivered ack BEFORE the next command can set the receipt placeholder,
+           or every report repeats the same ack forever. */
         report_clear_ack();
         response_t rs;
         const bool got = response_parse(body, blen, &rs);
@@ -449,9 +395,8 @@ void net_poll(bool dosing) {
         finish(200, true, false);
       } else {
         /* Only a 200 body reaches response_parse: butler's 400 body echoes the board's own
-           tokens (f"{key}= out of range: {value}"), so a 4xx body could otherwise be parsed
-           for cmd=/ml= (§4.2). A complete 503 is the one non-200 that is retry-eligible —
-           sqlite3.OperationalError rolls the whole BEGIN IMMEDIATE back (spec §4.4). */
+           tokens, so a 4xx body could otherwise be parsed for cmd=/ml=. A complete 503 is
+           the one retry-eligible non-200. */
         finish(st, false, st == 503);
       }
       return;

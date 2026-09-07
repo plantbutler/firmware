@@ -1,5 +1,4 @@
-/* lib/Screen/include/Screen.h -- DEVICE ONLY. [env:native] lib_ignores this library.
-   The only place in the tree that names LiquidCrystal_I2C or u8x8 (spec §1). */
+/* Screen.h: the LCD/OLED panel driver; device only ([env:native] ignores this library) and the only place in the tree that names LiquidCrystal_I2C or u8x8. */
 #ifndef SCREEN_H
 #define SCREEN_H
 
@@ -15,27 +14,24 @@ private:
   ScreenType type;
   /* The backpack answers at 0x27 or 0x3F depending on its solder jumpers, and the library
      takes the address in its constructor: two driver objects, and probe() points `lcd` at
-     the one whose address answered. Neither touches the bus until begin(). */
+     the one that answered. Neither touches the bus until begin(). */
   LiquidCrystal_I2C lcd_a, lcd_b;
   LiquidCrystal_I2C *lcd;
   bool present_;
 
-  /* Feeds the watchdog, then judges the unit that just returned (it started at
-     unit_start_ms). Every LCD command()/write()/setCursor() (6 Wire transactions) and
-     every OLED drawGlyph() (3 Wire transactions) is ONE such unit -- the finest
-     granularity either library's PUBLIC surface exposes; neither can be split further
-     without reaching into private internals ("forking" them). If the unit ran longer
-     than PB_SCREEN_PAINT_BUDGET_MS, the panel is marked permanently not-present and the
-     caller must stop: the watchdog is a safety device, the screen is a debugging aid,
-     and when a paint and the grant conflict the screen loses (spec §5). config.h has
-     the full transaction-count derivation for both panels. */
+  /* Feeds the watchdog, then judges the unit that started at unit_start_ms. One LCD
+     command()/write()/setCursor() (6 Wire transactions) or one OLED drawGlyph() (3) is a
+     unit -- the finest granularity either library's public surface exposes. A unit over
+     PB_SCREEN_PAINT_BUDGET_MS marks the panel permanently not-present and the caller must
+     stop: the watchdog is a safety device, the screen a debugging aid, and when the two
+     conflict the screen loses. config.h derives the transaction counts. */
   bool paint_ok_(uint32_t unit_start_ms);
 
 public:
   explicit Screen(ScreenType type);
 
-  /* One bounded probe at boot. A panel that does not answer becomes a permanent no-op
-     rather than wedging inside Oled.begin() or LiquidCrystal_I2C::init(). Spec §5. */
+  /* One bounded probe at boot: a panel that does not answer becomes a permanent no-op
+     rather than wedging inside the library's own init. */
   bool probe();
   bool present() const { return present_; }
 

@@ -261,7 +261,7 @@ check_nc() {
 # would be 2 forever and this invariant could never hold.
 check_files 1 'define[[:space:]]+PB_PUMP_OWNER' "${SCAN[@]}" -- \
   "exactly one file defines PB_PUMP_OWNER, so exactly one file gets PIN_PUMP_EN"
-check 0 'pinMode\(PIN_PUMP_EN' "${SCAN[@]}" -- \
+check_nc 0 'pinMode\(PIN_PUMP_EN' "${SCAN[@]}" -- \
   "pinMode never touches D6 (it would latch PODR=0 and drive the pin LOW)"
 # `[^;]*`, never `.*`: a C statement ends at `;`, and the two writes below can never
 # share one, so bounding the wildcard at the statement boundary is enough to stop it
@@ -272,9 +272,9 @@ check 0 'pinMode\(PIN_PUMP_EN' "${SCAN[@]}" -- \
 # any argument order or spacing WITHIN one statement -- it only refuses to reach past the
 # semicolon that ends it, so it is not narrowed to the exact `NULL, g_pin_cfg[...]` call
 # form the two real sites happen to share today.
-check 2 'R_IOPORT_PinCfg[^;]*PIN_PUMP_EN' "${SCAN[@]}" -- \
+check_nc 2 'R_IOPORT_PinCfg[^;]*PIN_PUMP_EN' "${SCAN[@]}" -- \
   "exactly two whole-word PFS writes to D6 (hal_boot_pump_off, hal_pump_write)"
-check 0 'R_IOPORT_PinWrite.*PIN_PUMP_EN|digitalWrite.*PIN_PUMP_EN' "${SCAN[@]}" -- \
+check_nc 0 'R_IOPORT_PinWrite.*PIN_PUMP_EN|digitalWrite.*PIN_PUMP_EN' "${SCAN[@]}" -- \
   "no unverifiable write form on D6"
 
 # ---- D6, task 13's own closed gap: a bare pin-6 literal bypasses every PIN_PUMP_EN grep
@@ -283,7 +283,7 @@ check 0 'R_IOPORT_PinWrite.*PIN_PUMP_EN|digitalWrite.*PIN_PUMP_EN' "${SCAN[@]}" 
 # an unrelated "6" -- a channel count, an array size, ch206 -- or on a different pin whose
 # number happens to start with 6 (pinMode(60,... has a "0" where this pattern requires a
 # terminator). Nothing in the tree does this today; the macro is what every write site uses.
-check 0 '(pinMode|digitalWrite)\([[:space:]]*6[[:space:]]*[,)]' "${SCAN[@]}" -- \
+check_nc 0 '(pinMode|digitalWrite)\([[:space:]]*6[[:space:]]*[,)]' "${SCAN[@]}" -- \
   "no bare-literal pin 6 write bypassing PIN_PUMP_EN (pinMode(6,...) or digitalWrite(6,...))"
 
 # ---- D2/D3: spec §2.14. Both hits must be inside hal_arm_pulse_pins_. ----
@@ -323,27 +323,27 @@ if [ "$pp_all" != "$pp_fn" ]; then
 fi
 
 # ---- the watchdog, first two of four: spec §2.5. The other two are task 13 step 3's. ----
-check 1 'WDT\.refresh' "${SCAN[@]}" -- \
+check_nc 1 'WDT\.refresh' "${SCAN[@]}" -- \
   "one refresh call site, inside hal_wdt_feed"
-check 0 'WDT\.getTimeout' "${SCAN[@]}" -- \
+check_nc 0 'WDT\.getTimeout' "${SCAN[@]}" -- \
   "the timeout getter is never used (it returns 0 under the wdt_cfg_t overload)"
 
 # ---- the watchdog, continued: spec §2.4, §2.5 ----
-check 1 'hal_wdt_feed\(' src/safety.cpp -- \
+check_nc 1 'hal_wdt_feed\(' src/safety.cpp -- \
   "safety_tick is the ONLY feeder in safety.cpp"
 # hal.h's declaration is excluded: a seam has to declare what it seams.
-check 0 'hal_wdt_feed\(' "${SCAN[@]}" \
+check_nc 0 'hal_wdt_feed\(' "${SCAN[@]}" \
   --exclude=safety.cpp --exclude=hal_uno.cpp --exclude=hal_sim.cpp --exclude=hal.h -- \
   "nothing outside safety.cpp and the two HALs feeds the dog"
 
 # ---- lib/Screen: spec §5 ----
 # spec §5: TwoWire::flush() spins with no bound and is never called by us.
-check 0 'Wire\.flush' "${SCAN[@]}" -- \
+check_nc 0 'Wire\.flush' "${SCAN[@]}" -- \
   "no Wire flush anywhere"
 
 # spec §5: the library's row printer offers no hook between characters, so an LCD row is
 # painted one character at a time with safety_tick() between them.
-check 0 'lcd\.print|lcd\.println' "${SCAN[@]}" -- \
+check_nc 0 'lcd\.print|lcd\.println' "${SCAN[@]}" -- \
   "no library row printer on the LCD"
 
 # task 13's own closed gap: task 9 replaced the OLED's opaque whole-string draw and
@@ -354,7 +354,7 @@ check 0 'lcd\.print|lcd\.println' "${SCAN[@]}" -- \
 # without a single invariant noticing. Scoped to lib/Screen only: the library names are
 # real English words elsewhere (config.h's own accounting of why they are NOT called
 # describes them without spelling any of the three contiguously -- see that file).
-check 0 'drawString|clearDisplay|clearLine' lib/Screen -- \
+check_nc 0 'drawString|clearDisplay|clearLine' lib/Screen -- \
   "the opaque whole-string draw and whole-panel/per-row clear calls do not creep back into lib/Screen"
 
 # ---- seam isolation, spec §9 item 16: the safety layer cannot reach the network stack.
@@ -436,7 +436,7 @@ check_nc 1 'dose_run\(' src/cli.cpp -- \
 # were reworded to drop the parentheses (task 30), the same "said in words, not spelled"
 # treatment WiFi.ping's own comments already get below. ----
 LINK_SEAM_PAT='(^|[^[:alnum:]_])(link_begin|link_join|link_state|link_rssi|link_ip|link_reset|link_desyncs|sock_open|sock_write|sock_read|sock_close)\('
-check 0 "$LINK_SEAM_PAT" "${SCAN[@]}" \
+check_nc 0 "$LINK_SEAM_PAT" "${SCAN[@]}" \
   --exclude=link.h --exclude=netfsm.cpp --exclude=link_wifi.cpp --exclude=link_fake.cpp \
   --exclude=test_netfsm.cpp --exclude=test_cli.cpp --exclude=test_device.cpp -- \
   "nothing outside netfsm.cpp and link_wifi.cpp calls a seam-2 function directly"
@@ -467,7 +467,7 @@ check_nc 1 'g_nv\.contra_latched[[:space:]]*=[[:space:]]*true' src/safety.cpp --
 # here (and its library.json srcFilter, see 190b56d) in the same commit that deleted that
 # file. Excluded by FILE NAME, never by directory, so a real file added to either library
 # -- cart.cpp already, link_wifi.cpp in task 27 -- is still checked.
-check 0 '(^|[^[:alnum:]_])delay\(' "${SCAN[@]}" --exclude=hal_uno.cpp -- \
+check_nc 0 '(^|[^[:alnum:]_])delay\(' "${SCAN[@]}" --exclude=hal_uno.cpp -- \
   "no unbounded blocking wait outside hal_uno.cpp's power-on settles"
 # WIDENED, task 30: the original `%[0-9.]*[fgeFGE]` never matched a flag character
 # between `%` and the width/precision digits -- `%-8.2f`, `% .3f`, `%+.1f`, `%#.1f` and a
@@ -495,13 +495,13 @@ check_nc 0 '%[-+ #*0-9.]*[fgeFGE]([^[:alnum:]]|$)' "${SCAN[@]}" -- \
 # which made this the likeliest of the six to trip on ordinary documentation.
 check_nc 0 '%[-+ #*0-9.]*[di]([^[:alnum:]]|$)' src/report.cpp src/netfsm.cpp -- \
   "no signed integer conversion in the report or the framing"
-check 0 'for[[:space:]]*\([[:space:]]*;[[:space:]]*;[[:space:]]*\)|while[[:space:]]*\([[:space:]]*(true|1)[[:space:]]*\)' \
+check_nc 0 'for[[:space:]]*\([[:space:]]*;[[:space:]]*;[[:space:]]*\)|while[[:space:]]*\([[:space:]]*(true|1)[[:space:]]*\)' \
   "${SCAN[@]}" --exclude=safety.cpp -- \
   "the program's only intentional unbounded loop is in the function that owns D6"
 # `malloc[[:space:]]*\(` -- the CALL, never the bare word. src/hal_uno.cpp writes
 # `#include <malloc.h>` for mallinfo(), which is how the heap diagnostics of ch200/ch201
 # exist at all; a bare-word pattern would match that include and fail this check forever.
-check 0 'String|std::map|std::string|(^|[^[:alnum:]_])new([^[:alnum:]_]|$)|malloc[[:space:]]*\(' \
+check_nc 0 'String|std::map|std::string|(^|[^[:alnum:]_])new([^[:alnum:]_]|$)|malloc[[:space:]]*\(' \
   include src test lib/Manifold -- \
   "no dynamic allocation outside lib/Network and lib/Screen"
 # spec §9 names three homes for the Arduino header; src/sim_console.cpp is a FOURTH, added
@@ -520,10 +520,10 @@ check 0 'String|std::map|std::string|(^|[^[:alnum:]_])new([^[:alnum:]_]|$)|mallo
 # lib/Screen is a real fourth home, just one this check happens not to scan; lib/Network
 # has ZERO occurrences of Arduino in any form (it names WiFiS3.h, not Arduino.h) and was
 # never a home at all. The description below says only what this check actually covers.
-check 0 'Arduino\.h' include src test lib/Manifold \
+check_nc 0 'Arduino\.h' include src test lib/Manifold \
   --exclude=hal_uno.cpp --exclude=sim_console.cpp -- \
   "the Arduino header lives only in hal_uno.cpp and sim_console.cpp, of the files this check scans (lib/Screen also uses it, out of scope here; lib/Network does not use it at all)"
-check 0 'WiFi\.ping' "${SCAN[@]}" -- \
+check_nc 0 'WiFi\.ping' "${SCAN[@]}" -- \
   "ping is never called (it resets the modem timeout to 10 s)"
 
 # ---- the two binaries: spec §6 ----
