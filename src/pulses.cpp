@@ -1,4 +1,4 @@
-/* src/pulses.cpp — D2/D3 ISR bodies, gap reject, snapshots, rate, ml, leak watch. */
+/* pulses.cpp: the flow and screw ISR bodies, gap reject, tear-safe snapshots, rate, ml, the leak watch. */
 #include "pulses.h"
 #include "hal.h"
 #include "config.h"
@@ -24,9 +24,8 @@ static void tear_(void) {
   }
 }
 
-/* Same shape as tear_()/pulses_test_tear_next() above, for pulses_screw()'s identical
-   retry loop (task 14: the flow injector was task 6's, and the screw one had no equal
-   anywhere, so its retry branch was proven only by the always-agrees happy path). */
+/* The screw counter's equal of tear_() above, so pulses_screw()'s retry branch is
+   reachable from a test. */
 static uint32_t g_tear_screw_pending;
 void pulses_test_tear_screw_next(uint32_t edges) { g_tear_screw_pending = edges; }
 static void tear_screw_(void) {
@@ -129,10 +128,8 @@ uint32_t pulses_leak_count(void) { return g_leak_count; }
 bool     pulses_leak_seen(void)  { return g_leak_count > 0u; }
 
 #if PB_SIM
-/* The leak-watch subset of what pulses_begin() resets, and nothing else: g_flow/g_screw and
-   the rate window are deliberately left untouched, because other suites (test_dose.cpp) manage
-   those themselves per case and a teardown that zeroed them too would be a second, competing
-   reset path for state this function has no business touching. */
+/* Only the leak-watch state. The counters and the rate window are left alone: other
+   suites manage those per case, and a second reset path would compete with them. */
 void pulses_test_reset_leak_(void) {
   g_leak_rearm_ms = 0u;
   g_leak_base = 0u;

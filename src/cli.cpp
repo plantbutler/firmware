@@ -1,12 +1,4 @@
-/* src/cli.cpp -- the console (spec §6). Bench commands here; task 20 adds the
-   #if PB_BRINGUP block, and tasks 15/16/19 add dry, stop and the latch release.
-   secrets.h is here for PB_CONTROLLER, which `status` prints: neither [env:uno_r4_wifi]
-   nor [env:uno_r4_wifi_bringup] passes it in build_flags, and secrets.h is the only
-   header that defines it. Task 14 adds cart.h, task 15/16 safety.h, task 24 netfsm.h --
-   each at TOP LEVEL, never inside the #if PB_BRINGUP block, because cli_print_status()
-   calls into all of them unconditionally. Fix round, task 27: this file used to reach
-   past netfsm.h straight into the seam for link/rssi/ip/desync info; it now reads
-   netfsm.h's own cached accessors instead and has no seam header of its own to include. */
+/* cli.cpp: the serial console -- bench commands, the bring-up block, the stop matcher and status. */
 #include "cart.h"
 #include "cli.h"
 #include "config.h"
@@ -60,9 +52,8 @@ static bool parse_u32_(const char *s, uint32_t *out) {
   return true;
 }
 
-/* parse_u32_()'s bounded sibling: parse_u32_() requires a NUL terminator, and a
-   space-separated argument on a console line ends at a space instead. Digit-only, exactly
-   like parse_u32_() -- a strtol here would silently accept `servo 0x600 200`. */
+/* Bounded sibling of parse_u32_(): a console argument ends at a space, not a NUL. Digits
+   only -- a strtol would accept `servo 0x600 200`. */
 static bool parse_u32_range_(const char *begin, const char *end, uint32_t *out) {
   uint32_t v = 0;
   if (begin >= end || *begin < '0' || *begin > '9') return false;
@@ -74,7 +65,6 @@ static bool parse_u32_range_(const char *begin, const char *end, uint32_t *out) 
   return true;
 }
 
-/* Pointer to the first space or NUL in s -- the end of one console token. */
 static const char *token_end_(const char *s) {
   while (*s != '\0' && *s != ' ') ++s;
   return s;
@@ -87,7 +77,7 @@ static void note_memory_(void) {
   if (h > g_hwm_max)   g_hwm_max = h;
 }
 
-static void cmd_i2c_(void) {          /* bring-up 1: expect 0x20, 0x3C, and the LCD at 0x27 or 0x3F */
+static void cmd_i2c_(void) {          /* expect 0x20, 0x3C, and the LCD at 0x27 or 0x3F */
   char scan[96];
   sensors_scan(scan, sizeof scan);
   hal_serial_write("i2c: ");
@@ -116,8 +106,8 @@ static bool cmd_mux_(const char *arg) {
   return true;
 }
 
-/* Streams screw / home / float. An I2C error prints `home unknown` -- never `home 0`,
-   because a bus error is not the same fact as "not home" (spec §6, §13 step 3). */
+/* Streams screw / home / float. An I2C error prints `home unknown`, never `home 0`: a bus
+   error is not the same fact as "not home". */
 static void cmd_hall_line_(void) {
   bool home = false;
   char b[64];
@@ -140,11 +130,8 @@ static void cmd_flow_(void) {
   hal_serial_write(b);
 }
 
-/* Every command this binary has, and only those: cad/wiring's table promises "one screen:
-   the commands this binary has", and a help that hid `dry off` was a help that left an
-   operator latched after a mid-dose reset with no word for the way back. The bring-up
-   block is compiled out of the bench binary exactly as the commands themselves are.
-   test_help_names_every_command_this_binary_has holds the two lists to the dispatcher. */
+/* Every command this binary has and only those: a help that hid `dry off` would leave an
+   operator latched after a mid-dose reset with no word for the way back. */
 static void cmd_help_(void) {
   hal_serial_write(
     "i2c              scan the bus (expect 0x20 0x3C, and the LCD at 0x27 or 0x3F)\n"
@@ -174,11 +161,10 @@ void cli_begin(void) {
   hal_serial_write("type help\n");
 }
 
-/* Bytes cli_stop_requested() read from the UART and did NOT consume. cli_poll() drains
-   this before it touches the UART, so the two readers cannot lose or reorder a byte
-   between them. It is not a queue of commands: the dosing loop clears it at the end of
-   every dose (§2.8, §15.3), so impatience typed during a dose is discarded, not
-   executed. */
+/* Bytes cli_stop_requested() read from the UART and did not consume. cli_poll() drains
+   this before touching the UART, so the two readers cannot lose or reorder a byte. Not a
+   queue of commands: the dosing loop clears it after every dose, so impatience typed
+   during a dose is discarded, not executed. */
 static char     g_push[PB_LINE_CAP];
 static uint16_t g_push_len;
 
@@ -197,14 +183,9 @@ static size_t read_console_(char *buf, size_t cap) {
   return hal_serial_read(buf, cap);
 }
 
-/* §2.12. Consumes ONLY an exact `stop\n` or `dry on\n`. Every other byte is pushed back
-   unread, so `status` typed at the console is still `status` when cli_poll() reads it.
-
-   §2.12 calls this "a four-byte state"; `dry on` is six bytes, so the partial buffer is
-   eight. Four would truncate `dry on` into a permanent non-match: the match state has to
-   hold the whole word before it can be recognised, and "stop" plus "dry on" both have to
-   fit without a plan review needing to revisit the size a second time. Do not trim this
-   back to four for tidiness -- it is settled at eight on purpose. */
+/* Consumes only an exact `stop\n` or `dry on\n`; every other byte is pushed back unread,
+   so `status` typed during a dose is still `status` when cli_poll() reads it. Eight bytes
+   because `dry on` is six: the whole word must fit before it can be recognised. */
 #define PB_STOP_MATCH_CAP 8
 
 static char     g_pfx[PB_STOP_MATCH_CAP];
@@ -257,7 +238,7 @@ bool cli_stop_requested(void) {
 void cli_poll(void) {
   note_memory_();
   if (g_hall_stream && hal_millis() >= g_hall_next_ms) {
-    g_hall_next_ms = hal_millis() + 200u;         /* 5 Hz, spec §13 step 3 */
+    g_hall_next_ms = hal_millis() + 200u;         /* 5 Hz */
     cmd_hall_line_();
   }
   char buf[32];
@@ -279,17 +260,10 @@ void cli_poll(void) {
 }
 
 #if PB_BRINGUP
-/* cart.h is ALREADY included at the top of this file (task 14 step 10) -- cli_print_status()
-   calls the cart in both binaries, so the include cannot live in here. Do not add a second
-   one: this block is bringup-only and the cart is not. */
-
-/* WHOLE-TOKEN parse of `pump`'s [prime] [hang] flags, over the text AFTER the ms argument:
-   `hanging` is not `hang`, and a substring match would starve the watchdog on a word
-   nobody typed. Pure string inspection with no side effect and no call into the dosing
-   entry point -- so the literal-token requirement can be proven directly by a host case,
-   without ever letting hang=true reach the loop that deliberately starves the dog (a host
-   case that did THAT would hang the suite by construction: see safety.cpp's hang hook).
-   (Not spelled literally: §9's count of that call in this file must stay exactly one.) */
+/* Whole-token parse of `pump`'s [prime] [hang] flags: `hanging` is not `hang`, and a
+   substring match would starve the watchdog on a word nobody typed. Pure string
+   inspection, so a host case can prove it without a hang=true ever reaching the loop that
+   deliberately starves the dog. */
 static void cli_pump_flags_(const char *args, bool *prime, bool *hang) {
   *prime = false; *hang = false;
   for (const char *t = args; *t != '\0'; ) {
@@ -303,23 +277,20 @@ static void cli_pump_flags_(const char *args, bool *prime, bool *hang) {
 }
 
 #ifdef PB_NATIVE
-/* Host-suite seam. cli_pump_flags_() is static and would otherwise be unreachable from
-   test_cli.cpp -- this is a thin, side-effect-free forward so the literal-token case can
-   call the REAL parser rather than a second, hand-copied one that could drift from it. */
+/* cli_pump_flags_() is static; this forward lets test_cli.cpp call the real parser rather
+   than a copy that could drift from it. */
 void cli_pump_flags_for_test_(const char *args, bool *prime, bool *hang) {
   cli_pump_flags_(args, prime, hang);
 }
 #endif
 
-/* THE ONE CALL SITE OF THE DOSING ENTRY POINT IN THIS FILE -- §9 counts exactly one in
-   cli.cpp, and this comment may not spell the token it counts.
+/* The one call of the dosing entry point in this file -- make check counts exactly one.
    `pump` and `calib` both come through here, and so does the summary line. */
 static void cli_run_dose_(uint32_t ms, bool long_prime, bool hang) {
   dose_req_t q = {0};
   q.by_time    = true;
-  q.need_pos   = false;                    /* bring-up 4a/5a/5b run before the cart is
-                                              calibrated; a pump that demanded a position
-                                              would make them unrunnable */
+  q.need_pos   = false;                    /* bring-up runs before the cart is calibrated;
+                                              a pump that demanded a position could not */
   q.cap_ms     = ms > PB_DOSE_CAP_MS_MAX ? PB_DOSE_CAP_MS_MAX : ms;
   q.long_prime = long_prime;
   q.hang       = hang;
@@ -327,8 +298,8 @@ static void cli_run_dose_(uint32_t ms, bool long_prime, bool hang) {
   cli_print_dose_summary();
 }
 
-/* spec §6. Every command here is compiled out of the binary that runs unattended, and
-   make check proves it on the PREPROCESSED source of this file (task 30), not on this #if. */
+/* Every command here is compiled out of the binary that runs unattended, and make check
+   proves it on the preprocessed source of this file, not on this #if. */
 static bool cli_dispatch_bringup_(const char *line) {
   if (strncmp(line, "servo ", 6) == 0) {
     const char *sp = strchr(line + 6, ' ');
@@ -352,7 +323,7 @@ static bool cli_dispatch_bringup_(const char *line) {
   if (strncmp(line, "goto ", 5) == 0) {
     uint32_t o = 0u;
     if (!parse_u32_(line + 5, &o) || o < 1u || o > PB_OUTLETS) {
-      hal_serial_write("goto: outlet must be 1..5\n");              /* the range, by name */
+      hal_serial_write("goto: outlet must be 1..5\n");
       return true;
     }
     if (cart_goto((uint8_t)o)) hal_serial_write("goto ok\n");
@@ -373,13 +344,12 @@ static bool cli_dispatch_bringup_(const char *line) {
     cli_run_dose_(ms, prime, hang);
     return true;
   }
-  if (strcmp(line, "calib") == 0) { cli_run_dose_(10000u, true, false); return true; }  /* 7b */
+  if (strcmp(line, "calib") == 0) { cli_run_dose_(10000u, true, false); return true; }
   if (strncmp(line, "cal ", 4) == 0) {
-    /* `cal 0` - one token on the serial line, or a stray byte parsed as one - used to make
-       target = 0 for EVERY subsequent command, so each dose ignored its millilitre target
-       and ran the full cap_ms; pulses_to_ml then divided by zero, and the Cortex-M4's UDIV
-       returns 0 without DIV_0_TRP - so the flood happened and the report said nothing came
-       out. The dosing entry point re-checks the same range as DOSE_REFUSED_CAL (§6). */
+    /* A cal of 0 would make target = 0 for every later command: each dose ignores its
+       millilitre target and runs the full cap, pulses_to_ml divides by zero, and the
+       Cortex-M4's UDIV returns 0 without DIV_0_TRP -- the flood happens and the report
+       says nothing came out. The dosing entry point re-checks the same range. */
     uint32_t v = 0u;
     if (!parse_u32_(line + 4, &v) || v < PB_PULSES_PER_L_MIN || v > PB_PULSES_PER_L_MAX ||
         !cfg_pulses_per_l_set((uint16_t)v)) {
@@ -389,7 +359,7 @@ static bool cli_dispatch_bringup_(const char *line) {
     cli_printf_u32("pulses_per_l=%lu\n", (uint32_t)cfg_pulses_per_l_get());
     return true;
   }
-  if (strcmp(line, "noinit pattern") == 0) {        /* bring-up 7c' */
+  if (strcmp(line, "noinit pattern") == 0) {
     g_nv.pattern = 0xC0FFEE01u;
     noinit_commit();
     hal_serial_write("noinit pattern written. Now: `pump 3000 hang`, wait for the reset, "
@@ -401,24 +371,22 @@ static bool cli_dispatch_bringup_(const char *line) {
 #endif /* PB_BRINGUP */
 
 #if PB_SIM_CLI
-#include "sim.h"           /* the injectors AND link_fake_queue_response(): task 21 put the
-                              link_fake_* control surface at the end of this header, and
-                              there is no include/link_fake.h in this tree */
+#include "sim.h"
 
-/* spec §8. Each of these maps to a bring-up step or a finding:
-   float 0|1        -> 5a, and dropping it mid-dose is 5b
-   flow <ml_s>      -> the prime abort at 0; a mid-dose stop is the stall abort (7b)
-   flow storm       -> DOSE_REFUSED_NOISE / DOSE_ABORT_NOISE
-   i2c fail|ok      -> position unknown, pump refused, pos=unknown
-   mux stuck        -> the canary, err=stuck
-   stall on|off     -> goto aborts, position lost
-   leak on          -> ch205 rises and err=leak
-   wdt stop         -> hal_wdt_alive() false, every dose refused
-   wdt slow <hz>    -> delta below PB_WDT_PROBE_MIN_COUNTS
-   noinit clobber   -> the checksum fails and it reads as a cold boot
-   ch <0-5> <raw>   -> plant a raw count
-   resp "<body>"    -> the ack offbeat, on a desk
-   reset warm|cold  -> re-enter setup() with .noinit kept or cleared */
+/* Each injector provokes one fault the rig must survive:
+   float 0|1        tank empty / OK; dropped mid-dose it aborts the dose
+   flow <ml_s>      0 is the prime abort; a mid-dose stop is the stall abort
+   flow storm       DOSE_REFUSED_NOISE / DOSE_ABORT_NOISE
+   i2c fail|ok      position unknown, pump refused, pos=unknown
+   mux stuck        the canary, err=stuck
+   stall on|off     goto aborts, position lost
+   leak on          ch205 rises and err=leak
+   wdt stop         hal_wdt_alive() false, every dose refused
+   wdt slow <hz>    delta below PB_WDT_PROBE_MIN_COUNTS
+   noinit clobber   the checksum fails and it reads as a cold boot
+   ch <0-5> <raw>   plant a raw count
+   resp "<body>"    queue the backend's response
+   reset warm|cold  re-enter setup() with .noinit kept or cleared */
 static bool cmd_sim_(const char *a) {
   uint32_t v = 0, w = 0;
   if (strcmp(a, "float 0") == 0)  { sim_set_float(false);   return true; }
@@ -489,11 +457,10 @@ bool cli_dispatch(const char *line) {
     return true;
   }
   if (strcmp(line, "stop") == 0) {
-    /* A dose in progress never reaches here: the dosing loop blocks and matches this
-       word byte-wise itself (§2.12). This arm is the idle console's answer, and it exists
-       so that `stop` is never `? unknown` -- it is the one command an operator reaches
-       for in an emergency. It also clears a stale request left by a matched-but-
-       unconsumed word, so the NEXT dose is not aborted by a stop typed before it. */
+    /* A dose in progress never reaches here: the dosing loop blocks and matches the word
+       byte-wise itself. This arm is the idle console's answer, so `stop` is never
+       `? unknown`, and it clears a stale request so the NEXT dose is not aborted by a
+       stop typed before it. */
     cli_stop_clear();
     hal_serial_write("stop: no dose running\n");
     return true;
@@ -508,18 +475,15 @@ bool cli_dispatch(const char *line) {
   return false;
 }
 
-/* Printed at the end of every dose, from every path (spec §6's pitch deliverable). Outside
-   #if PB_BRINGUP: exec.cpp (task 26) calls this same function for the backend's doses in
-   the bench build, so the printer itself ships in both binaries even though only the
-   bring-up console's pump/calib reach it today. */
+/* Printed at the end of every dose, from every path. Outside the bring-up block because
+   exec.cpp calls it for the backend's doses in the bench build. */
 void cli_print_dose_summary(void) {
   static char line[PB_LINE_CAP];
   uint32_t ms  = dose_last_ms();
   uint32_t ml  = dose_flow_ml();
   uint32_t t10 = ms ? (ml * 10000u) / ms : 0u;      /* ml/s x 10, in integer tenths */
-  /* §6 prints r=ok for a successful dose while err_of(DOSE_OK) is the wire's "none".
-     One conditional, here: `ok` must NOT be added to err_of()'s enum, which is tested
-     against butler.py's own parser. */
+  /* r=ok for a success while err_of(DOSE_OK) is the wire's "none": `ok` must not be added
+     to err_of()'s enum, which is tested against butler.py's own parser. */
   const char *r = (dose_last_result() == DOSE_OK) ? "ok" : err_of(dose_last_result());
   snprintf(line, sizeof line,
            "dose outlet=%lu ms=%lu pulses=%lu ml=%lu mls=%lu.%lu r=%s\n",
@@ -546,20 +510,12 @@ void cli_print_status(void) {
            (unsigned)hal_pump_level_on(), pol);
   hal_serial_write(b);
 
-  /* The citation is spelled out by section TITLE, not number: "2.5)" is a digit, a dot
-     and a digit, which is exactly the shape test_cli.cpp's float-formatting guard scans
-     every printed line for (spec §12 item 1's rule against floating-point format
-     specifiers anywhere in this program) - a numeric subsection here would make this
-     line indistinguishable from a stray float and fail the very check it exists to
-     satisfy. */
-  /* hal_wdt_alive() and hal_wdt_last_delta() may NOT be passed inline as two arguments
-     of the same call: C++ leaves function-argument evaluation order unspecified, and
-     hal_wdt_alive() is destructive (it probes, then caches the delta hal_wdt_last_delta()
-     reads back) -- on this toolchain gcc evaluates arguments right-to-left on ARM, which
-     would read the delta BEFORE the probe that is supposed to have just produced it, so
-     alive= and delta= would describe two different probes on the same printed line. Call
-     hal_wdt_alive() first, into a local, THEN read the delta it just cached. */
-  const bool     alive = hal_wdt_alive();      /* destructive: probes, then caches the delta */
+  /* No numeric section citation in a printed line: the float-formatting test scans every
+     printed line for a digit-dot-digit run, the shape of a stray float specifier. */
+  /* hal_wdt_alive() probes and then caches the delta; C++ leaves argument evaluation order
+     unspecified (gcc on ARM goes right-to-left), so passing both inline would print the
+     delta of the previous probe. Call it first, into a local. */
+  const bool     alive = hal_wdt_alive();
   const uint32_t delta = hal_wdt_last_delta();
   snprintf(b, sizeof b,
            "wdt=%s granted=%lums alive=%s delta=%lu "
@@ -578,10 +534,9 @@ void cli_print_status(void) {
 
   cli_printf_u32("uptime=%lus\n", hal_millis() / 1000u);
 
-  /* spec §6's two widths, both real: adc_req is what we asked the core to map to, adc_hw
-     is the fixed hardware width read back through seam 1 (task 3's hal_adc_bits()). A
+  /* adc_req is what we asked the core for, adc_hw the fixed hardware width read back. A
      mismatch silently rescales every raw count on the wire, so main.cpp latches err=adc
-     and disables the network for it (task 12). */
+     and disables the network. */
   snprintf(b, sizeof b, "adc_req=%lu adc_hw=%lu adc_ok=%s\n",
            (unsigned long)PB_ADC_BITS, (unsigned long)hal_adc_bits(),
            hal_adc_width_ok() ? "yes" : "no");
@@ -614,36 +569,31 @@ void cli_print_status(void) {
   hal_serial_write("pos: FORCED unknown (PB_REPORT_POS_UNKNOWN=1)\n");
 #endif
   cli_printf_u32("parked=%lu\n", (uint32_t)(cart_parked() ? 1u : 0u));
-  /* §2.12: the dosing loop blocks and net_poll() cannot run while it does, and enqueue() returns
-     409 while the water command it would abort is still 'sent'. Say so, so nobody reaches for
-     it in an emergency. The live aborts are the console `stop`, `dry on`, the float, the two
-     flow rules, the plausibility ceiling, the cap and the watchdog. */
+  /* The dosing loop blocks and net_poll() cannot run while it does. The live aborts are
+     the console `stop`, `dry on`, the float, the two flow rules, the plausibility
+     ceiling, the cap and the watchdog. */
   hal_serial_write("note: a backend stop=1 CANNOT interrupt a running dose; type `stop`\n");
 
-  /* §4.2 requires the drop to be loud: a truncated body is a DROPPED report, not a 400, and
-     the console is the only place that failure is otherwise visible at all. */
+  /* A truncated body is a DROPPED report, not a 400, and the console is the only place
+     that failure is visible. */
   cli_printf_u32("report: last_body=%lu bytes\n", (uint32_t)report_last_len());
   cli_printf_u32("report: cap=%lu bytes\n", (uint32_t)PB_BODY_CAP);
   cli_printf_u32("report: DROPPED on truncation (err=txcap) x%lu\n", report_txcap_drops());
 
   /* A rebuilt or restored backend database restarts commands.id at 1, and the board then
-     refuses EVERY command as a replay until a COLD boot (power cycle, not RESET). Without this
-     line that is silent and unexplainable. Spec §4.3, §16.5.9. */
+     refuses EVERY command as a replay until a COLD boot (power cycle, not RESET). */
   cli_printf_u32("cmd_high_water=%lu (recovery: cold boot)\n", g_nv.cmd_high_water);
 
   cli_printf_u32("link=%lu\n", (uint32_t)net_link());         /* 0 down, 1 joining, 2 up */
-  cli_printf_i32("rssi=%ld dBm\n", (int32_t)net_rssi());      /* task 11's signed printer */
+  cli_printf_i32("rssi=%ld dBm\n", (int32_t)net_rssi());
   hal_serial_write("ip="); hal_serial_write(net_ip()); hal_serial_write("\n");
   cli_printf_u32("http_last=%lu\n", (uint32_t)net_last_status());
   cli_printf_u32("reports_ok=%lu\n", net_reports_ok());
   cli_printf_u32("reports_failed=%lu\n", net_reports_failed());
   cli_printf_u32("modem_ran=%lu\n", (uint32_t)(net_modem_ran_this_pass() ? 1u : 0u));
-  /* The connect form is printed rather than asserted: this package proves only the command
-     SELECTION, and whether _CLIENTCONNECT still resolves HOST_NAME as a hostname is a bring-up
-     question task 27's real driver settles, not something a host test can check (spec §3
-     change 4). modem_timeout_ms/conn_timeout_ms are both PB_NET_STEP_MS because a single
-     modem.timeout() call sets the ONE budget every AT round trip in this file shares -- there
-     is no separate connect-specific timeout to print a different number for. */
+  /* Printed rather than asserted: whether _CLIENTCONNECT resolves HOST_NAME as a hostname
+     is a bench question no host test can settle. Both timeouts are PB_NET_STEP_MS because
+     one modem timeout is the single budget every AT round trip shares. */
   cli_printf_u32("modem_timeout_ms=%lu\n", (uint32_t)PB_NET_STEP_MS);
   cli_printf_u32("conn_timeout_ms=%lu\n", (uint32_t)PB_NET_STEP_MS);
   hal_serial_write("connect_form=_CLIENTCONNECT to HOST_NAME as a NAME"
@@ -662,25 +612,20 @@ void cli_print_status(void) {
            (unsigned long)(hal_stack_limit() - hal_heap_break()));
   hal_serial_write(b);
 
-  /* §2.11: the boot banner and `status` both print dry=. This is safety_dry()'s verdict,
-     not a re-read of g_nv.dry_latched -- the two agree today, but this line is what the
-     operator and bring-up 6/7c actually read, so it goes through the same accessor the
-     dosing entry point's own ladder does. (Not spelled literally: §9's count of that call
-     in this file must stay exactly one.) */
+  /* safety_dry()'s verdict, not a re-read of g_nv.dry_latched: the same accessor the
+     dose ladder reads. */
   cli_printf_u32("dry=%lu\n", (uint32_t)(safety_dry() ? 1u : 0u));
 
-  /* §2.7. The loudest fact this board can report about itself: two independent sensors
-     disagree and the rig has refused to water since. `clear contra` is the only way back. */
+  /* The loudest fact this board can report: two independent sensors disagree and the rig
+     has refused to water since. `clear contra` is the only way back. */
   if (safety_contra())
     hal_serial_write("contra=1 *** CONTRADICTION LATCHED - float said OK, meter saw "
                      "nothing. `clear contra` to release.\n");
   else
     hal_serial_write("contra=0\n");
 
-  /* The raw .noinit struct: bring-up 7c' reads exactly this line after a forced reset.
-     cold= and resetmid= are noinit.cpp's two accessors (task 4) and this is their only
-     consumer -- without them the struct's numbers are readable but the VERDICT the boot
-     drew from them is not, and 7c's pass criterion is the verdict. */
+  /* The raw .noinit struct plus the verdict the boot drew from it: cold= and resetmid=
+     have no other consumer. */
   snprintf(b, sizeof b,
            "nv magic=0x%lx boots=%lu chw=%lu dry=%u contra=%u inflight=%u "
            "pattern=0x%lx sum=0x%lx cold=%u resetmid=%u\n",
@@ -700,14 +645,11 @@ void cli_print_status(void) {
 #else
   hal_serial_write("cap=UNCLAMPED (PB_ML_PER_S_MEASURED=0; bring-up 7b commits it)\n");
 #endif
-  /* No numeric section citation on this line: test_no_float_formatting_appears_in_any_
-     printed_line scans every printed line for a bare digit-dot-digit run, the shape of a
-     stray float specifier, and "2.12)" is exactly that shape -- the same trap the wdt line
-     above already dodges by spelling its own citation out as a section TITLE. */
+  /* No digit-dot-digit citation in this printed line either: see the wdt line above. */
   hal_serial_write("stop: `stop` and `dry on` abort a running dose; a backend stop=1 CANNOT "
                    "- net_poll() does not run while the pump is asserted (design spec "
                    "section \"What a backend stop=1 can and cannot do\")\n");
   hal_serial_write("last=");
-  hal_serial_write(safety_last_err());     /* one bare token of 4.1's fixed enum */
+  hal_serial_write(safety_last_err());     /* one bare token of the wire's err enum */
   hal_serial_write("\n");
 }
