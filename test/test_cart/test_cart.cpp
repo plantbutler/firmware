@@ -1,3 +1,4 @@
+/* test_cart.cpp: the cart's homing, goto, stall and deadline behaviour against the simulated screw and home hall. */
 #include <unity.h>
 #include <string.h>
 #include "../support/bodies.h"
@@ -8,16 +9,13 @@
 #include "netfsm.h"
 #include "report.h"
 #include "sensors.h"
-#include "sim.h"        /* the link_fake_* control surface lives HERE (task 21). There is no
-                           include/link_fake.h anywhere in this tree. */
+#include "sim.h"
 
 void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
 
-/* §2.15. With the pitch unknown the natural arithmetic finds the target already satisfied
-   at home, returns true and sets g_pos = outlet; both position guards then pass and the
-   pump dead-heads against a CLOSED manifold with pos=ok on the wire. A comment saying
-   "0 means always refuse" is not a mechanism. */
+/* With the pitch unknown the natural arithmetic finds the target already satisfied at home,
+   and the pump dead-heads against a closed manifold with pos=ok on the wire. */
 void test_goto_refuses_when_pulses_per_gate_is_zero(void) {
   TEST_ASSERT_TRUE(cart_begin());
 #if PB_PULSES_PER_GATE == 0
@@ -30,10 +28,8 @@ void test_goto_refuses_when_pulses_per_gate_is_zero(void) {
 #endif
 }
 
-/* The regression on Manifold::reset(): it drove backwards for ONE gate-width and declared
-   position 0, which from gate five is about 80 s short of the threadless start of the
-   screw -- so the cart was left over gate four, holding it open under the reservoir head,
-   while the firmware believed it was parked. */
+/* From gate five, one gate-width backwards is about 80 s short of home: a home that stops
+   on a count leaves the cart over gate four, holding it open under the reservoir head. */
 void test_home_from_outlet_five_actually_reaches_home(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: goto is compiled out");
@@ -46,20 +42,16 @@ void test_home_from_outlet_five_actually_reaches_home(void) {
   TEST_ASSERT_TRUE(cart_parked());
   TEST_ASSERT_EQUAL_UINT32(0u, cart_pulses());
   TEST_ASSERT_EQUAL_UINT8(0u, cart_pos());
-  /* Not just cart.cpp's own bookkeeping: a live read of the PHYSICAL home hall, so a
-     move_() call site that stops on a fixed pulse count instead of the hall (the exact
-     shape of the old bug) cannot pass this case merely by zeroing g_pulses/g_pos on any
-     "successful" move -- it has to have actually left the magnet over the sensor. */
+  /* A live read of the physical hall, so a move that stops on a pulse count instead of the
+     hall cannot pass merely by zeroing its own bookkeeping. */
   bool home = false;
   TEST_ASSERT_TRUE(sensors_home_hall(&home));
   TEST_ASSERT_TRUE(home);
 #endif
 }
 
-/* cart_begin() promises "servo stopped, position UNKNOWN, NO MOVEMENT" -- checked two
-   ways: cart_pos_known() itself, and that every SIM_EV_SERVO write on record (there is
-   exactly one: cart_begin()'s own stop) carries 1500 and nothing else. The self-home is
-   exec_pending()'s, PB_BOOT_HOME_MS after reset -- not cart_begin()'s. */
+/* Every servo write on record must be the stop value: the self-home is exec_pending()'s,
+   PB_BOOT_HOME_MS after reset, not cart_begin()'s. */
 void test_position_is_unknown_after_boot_until_homed(void) {
   TEST_ASSERT_TRUE(cart_begin());
   TEST_ASSERT_FALSE(cart_pos_known());
@@ -76,10 +68,8 @@ void test_position_is_unknown_after_boot_until_homed(void) {
   TEST_ASSERT_TRUE(servo_writes >= 1u);
 }
 
-/* Only meaningful while the pitch is unknown: under native_cal a successful cart_home()
-   DOES make cart_pos_known() true, so this is guarded the opposite way from the refusal
-   case above. Seeing the home hall (cart_home() succeeding) is not the same fact as being
-   able to deliver to a numbered outlet (cart_pos_known()) -- that needs the pitch too. */
+/* Seeing the home hall is not the same fact as being able to deliver to a numbered outlet:
+   that needs the pitch too, so this holds only in the uncalibrated arm. */
 void test_pos_is_never_ok_before_calibration(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_ASSERT_TRUE(cart_begin());
@@ -92,10 +82,8 @@ void test_pos_is_never_ok_before_calibration(void) {
 #endif
 }
 
-/* The whole difference between this file and the one it replaces: the OLD Manifold moved
-   by minutes of blocking waits; this one counts pulses, so a slower screw takes longer
-   wall time to cover the SAME distance. Re-homed between the two goto(2) calls so each
-   one actually traverses rather than finding the target already satisfied. */
+/* A slower screw takes longer wall time for the same pulse count. Re-homed between the two
+   goto(2) calls so each one actually traverses. */
 void test_goto_counts_pulses_not_milliseconds(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: goto is compiled out");
@@ -122,10 +110,8 @@ void test_goto_counts_pulses_not_milliseconds(void) {
 #endif
 }
 
-/* "cart_pulses() is not zeroed" is only a real assertion if it started non-zero: under
-   the uncalibrated arm g_pulses can only ever be 0 or freshly re-zeroed by a successful
-   cart_home(), so this case needs cart_goto() (native_cal) to move it off zero first,
-   then proves a FAILED cart_home() leaves that value alone rather than re-zeroing it. */
+/* "Not zeroed" is only an assertion if the count started non-zero, which needs cart_goto():
+   hence the calibrated arm only. */
 void test_home_zeroes_the_count_only_when_the_hall_asserts(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("g_pulses can only be moved off zero by cart_goto(), which is compiled out");
@@ -139,14 +125,12 @@ void test_home_zeroes_the_count_only_when_the_hall_asserts(void) {
   TEST_ASSERT_TRUE(before > 0u);
   sim_set_home_region(9000u, 9001u);        /* moved out of reach */
   TEST_ASSERT_FALSE(cart_home());
-  TEST_ASSERT_EQUAL_UINT32(before, cart_pulses());   /* NOT zeroed */
+  TEST_ASSERT_EQUAL_UINT32(before, cart_pulses());   /* not zeroed */
   TEST_ASSERT_FALSE(cart_pos_known());
 #endif
 }
 
-/* An unreadable hall must not read as "not home", which is what would drive the cart
-   blind into the end of the screw. Runs the same in both arms: neither cart_home() nor
-   the i2c error depends on the pitch. */
+/* "Not home" would drive the cart blind into the end of the screw. */
 void test_an_i2c_error_on_the_home_hall_is_unknown_not_not_home(void) {
   TEST_ASSERT_TRUE(cart_begin());
   sim_set_screw_pulse_ms(2);
@@ -157,9 +141,8 @@ void test_an_i2c_error_on_the_home_hall_is_unknown_not_not_home(void) {
   TEST_ASSERT_FALSE(cart_pos_known());
 }
 
-/* sim_set_clock_ms() (task 14 step 1) starts the fake within PB_MOVE_CAP_MS of the wrap.
-   The home region is put out of reach so the ONLY way this ends is the deadline, proving
-   move_()'s unsigned differences hold across the millis() rollover rather than the hall. */
+/* The clock starts within PB_MOVE_CAP_MS of the wrap and the hall is out of reach, so the
+   deadline is the only way this can end. */
 void test_move_deadline_holds_across_a_millis_rollover(void) {
   TEST_ASSERT_TRUE(cart_begin());
   sim_set_screw_pulse_ms(2);
@@ -173,8 +156,6 @@ void test_move_deadline_holds_across_a_millis_rollover(void) {
   TEST_ASSERT_TRUE(elapsed < (uint32_t)PB_MOVE_CAP_MS + 1000u);   /* generous, not tick-tight */
 }
 
-/* A traverse that never saw the hall has not found home, and must not be allowed to claim
-   it did. */
 void test_home_that_times_out_leaves_position_unknown(void) {
   TEST_ASSERT_TRUE(cart_begin());
   sim_set_screw_pulse_ms(2);
@@ -186,7 +167,6 @@ void test_home_that_times_out_leaves_position_unknown(void) {
   TEST_ASSERT_FALSE(cart_parked());
 }
 
-/* The stall window, not the move cap, is what ends a stalled traverse. */
 void test_stall_aborts_within_the_stall_window_and_loses_position(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: goto is compiled out");
@@ -205,8 +185,8 @@ void test_stall_aborts_within_the_stall_window_and_loses_position(void) {
 #endif
 }
 
-/* A rejected outlet must not start the servo at all, so outlet == 0 (which butler accepts,
-   spec §4.5) cannot cost a traverse. */
+/* A rejected outlet must not start the servo: outlet 0, which the backend accepts, cannot
+   be allowed to cost a traverse. */
 void test_goto_rejects_an_outlet_outside_one_to_five(void) {
 #if PB_PULSES_PER_GATE == 0
   TEST_IGNORE_MESSAGE("uncalibrated arm: goto is compiled out");
@@ -221,8 +201,7 @@ void test_goto_rejects_an_outlet_outside_one_to_five(void) {
 #endif
 }
 
-/* Four exits -- success, stall, timeout, a bus error -- looped rather than asserting only
-   the happy one. Uses cart_home() only, so it runs the same in both arms. */
+/* cart_home() only, so it runs the same in both arms. */
 void test_servo_is_stopped_on_every_exit_path(void) {
   const char *names[] = { "ok", "stall", "timeout", "i2c" };
   for (unsigned k = 0; k < 4u; ++k) {

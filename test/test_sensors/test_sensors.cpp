@@ -1,3 +1,4 @@
+/* test_sensors.cpp: pulse counting and the I2C expander/mux path -- its select recipe, backoff and recovery -- against the simulated bus. */
 #include <unity.h>
 #include "../support/harness.h"
 #include "config.h"
@@ -9,8 +10,8 @@
 void setUp(void)    { pb_test_setup(); }
 void tearDown(void) { pb_test_teardown(); }
 
-/* §2.14: PB_FLOW_MIN_GAP_US is honest about only biting above 2 kHz, which is why the
-   two rate rules exist above it. PB_SCREW_MIN_GAP_US is four times wider. */
+/* PB_FLOW_MIN_GAP_US only bites above 2 kHz, which is why the rate rules exist above it;
+   PB_SCREW_MIN_GAP_US is four times wider. */
 static void test_edges_closer_than_the_minimum_gap_are_rejected(void) {
   pulses_begin();
   pulses_isr_flow();
@@ -31,8 +32,8 @@ static void test_edges_closer_than_the_minimum_gap_are_rejected(void) {
   TEST_ASSERT_EQUAL_UINT32(2u, pulses_screw());
 }
 
-/* §2.14: at the ISR's own 2 kHz ceiling a 250 ml target is reached in ~625 ms, so any
-   estimator slower than 100 ms loses the race the in-dose rate rules have to win. */
+/* At the 2 kHz ceiling a 250 ml target arrives in ~625 ms, so an estimator slower than
+   100 ms loses the race the in-dose rate rules have to win. */
 static void test_the_rate_estimator_reports_over_a_hundred_millisecond_window(void) {
   pulses_begin();
   sim_flow_storm(2000);                  /* edges 500 us apart: at the reject's boundary */
@@ -50,29 +51,24 @@ static void test_a_counter_snapshot_is_never_torn_by_an_edge(void) {
   pb_advance(1);
   pulses_isr_flow();
   TEST_ASSERT_EQUAL_UINT32(1u, pulses_flow());
-  pulses_test_tear_next(1u);             /* an edge lands BETWEEN the snapshot's two reads */
+  pulses_test_tear_next(1u);             /* an edge lands between the snapshot's two reads */
   pb_advance(1);
   TEST_ASSERT_EQUAL_UINT32(2u, pulses_flow());
   TEST_ASSERT_EQUAL_UINT32(2u, pulses_flow());   /* and it settled */
 }
 
-/* pulses_screw()'s retry loop (do { a = g_screw; b = g_screw; } while (a != b);) is
-   textually identical to pulses_flow()'s, but until task 14 nothing ever drove it: the
-   happy path always has a == b on the first pass, so the retry branch was asserted only
-   by never being exercised. Same injector shape as the flow case above, mirrored onto
-   the screw counter (task 14, which owns the screw model). */
 static void test_a_screw_counter_snapshot_is_never_torn_by_an_edge(void) {
   pulses_begin();
   pb_advance(1);
   pulses_isr_screw();
   TEST_ASSERT_EQUAL_UINT32(1u, pulses_screw());
-  pulses_test_tear_screw_next(1u);       /* an edge lands BETWEEN the snapshot's two reads */
+  pulses_test_tear_screw_next(1u);       /* an edge lands between the snapshot's two reads */
   pb_advance(1);
   TEST_ASSERT_EQUAL_UINT32(2u, pulses_screw());
   TEST_ASSERT_EQUAL_UINT32(2u, pulses_screw());  /* and it settled */
 }
 
-/* §7: PB_COAST_MS — impeller spin-down is not a leak. And §1: there is no leak LATCH. */
+/* Impeller spin-down inside PB_COAST_MS is not a leak, and there is no leak latch. */
 static void test_leak_does_not_latch_from_coast_down_pulses_after_a_dose(void) {
   pulses_begin();
   pulses_leak_rearm_at(hal_millis() + PB_COAST_MS);
@@ -93,26 +89,20 @@ static void test_leak_does_not_latch_from_coast_down_pulses_after_a_dose(void) {
   TEST_ASSERT_TRUE(pulses_leak_seen());
 }
 
-/* CARRIED DEFECT (task 6 brief): the fake's flow model must not delay the first pulse
-   past dose_run()'s prime deadline. Task 18's prime rule (spec §2.8) aborts a dose when
-   `el >= prime_ms && got < PB_PRIME_MIN_PULSES`, where `el` and `got` are both read from
-   hal_millis()/pulses_flow() at the SAME loop iteration. This is the behavioural property
-   that rule depends on: with a healthy nonzero flow rate and the default prime window, the
-   first pulse must be counted by the time hal_millis() first reports elapsed ==
-   PB_PRIME_MS_DEFAULT, not one millisecond later. Against the model that gates its edge
-   emitter on the stale (pre-increment) g_ms read inside advance_1ms_(), the first edge
-   lands at elapsed 3001 ms and this case fails at elapsed 3000 ms with pulses_flow() == 0. */
+/* The prime rule aborts when elapsed >= prime_ms with too few pulses, both read in the same
+   loop pass, so the fake must have counted the first edge by the time elapsed first reads
+   PB_PRIME_MS_DEFAULT -- not one millisecond later. A stale clock read inside the fake's
+   1 ms step put the first edge at 3001 ms and failed the rule at 3000 with no pulses. */
 static void test_the_first_flow_edge_lands_at_or_before_the_default_prime_deadline(void) {
   pulses_begin();
   sim_set_flow_ml_s(50);                 /* a healthy nonzero delivery rate */
-  hal_pump_write(true);                  /* starts the fake's prime clock (g_pump_on_at_ms) */
+  hal_pump_write(true);                  /* starts the fake's prime clock */
   pb_advance((uint32_t)PB_PRIME_MS_DEFAULT);
   TEST_ASSERT_TRUE(pulses_flow() > 0u);
 }
 
-/* The PCF8575 is quasi-bidirectional: an input must be written HIGH to be readable, and
-   P4 is the home hall (cad/wiring/nets.py P4: "10 k pull-up (R3); write P4 HIGH before
-   reading"). So every select writes P4..P15 HIGH and only P0..P3 carry the channel. */
+/* The PCF8575 is quasi-bidirectional: an input must be written HIGH to be readable, and P4
+   is the home hall, on a 10 k pull-up (R3). So every select writes P4..P15 HIGH and only P0..P3 carry the channel. */
 static void test_select_holds_p4_high_so_the_home_hall_stays_readable(void) {
   (void)sensors_begin();
   sim_events_clear();
@@ -127,8 +117,8 @@ static void test_select_holds_p4_high_so_the_home_hall_stays_readable(void) {
   TEST_ASSERT_EQUAL_UINT32(1u, writes);
 }
 
-/* Bring-up 2's recipe verbatim: select, >= 1 ms, read twice, keep the SECOND. The first
-   conversion after a select still carries the previous channel on a 10 k source. */
+/* The first conversion after a select still carries the previous channel on a 10 k source:
+   select, >= 1 ms, read twice, keep the second. */
 static void test_read_discards_the_first_conversion_and_keeps_the_second(void) {
   (void)sensors_begin();
   sim_set_channel(0, 1111);
@@ -153,9 +143,6 @@ static void test_an_i2c_error_is_reported_as_error_not_as_zero(void) {
   TEST_ASSERT_TRUE(home);   /* untouched: a bus error must never be mapped onto *home == false */
 }
 
-/* sensors_home_hall() shares gate_() with sensors_select() (backoff, and the refuse-while-
-   dosing guard), but until now only sensors_select() had a case that drove it — same code
-   path, proven here independently rather than inferred. */
 static void test_home_hall_is_gated_by_the_same_backoff_and_dosing_guard_as_select(void) {
   (void)sensors_begin();
   sim_set_i2c_fail(true);
@@ -171,7 +158,7 @@ static void test_home_hall_is_gated_by_the_same_backoff_and_dosing_guard_as_sele
   sim_set_i2c_fail(false);
   pb_advance((uint32_t)PB_I2C_BACKOFF_MS + 1u);
 
-  safety_set_dosing(true);                  /* §2.13: recovery may not run mid-dose */
+  safety_set_dosing(true);                  /* recovery may not run mid-dose */
   sim_events_clear();
   home = true;
   TEST_ASSERT_FALSE(sensors_home_hall(&home));
@@ -186,8 +173,8 @@ static void test_home_hall_is_gated_by_the_same_backoff_and_dosing_guard_as_sele
   TEST_ASSERT_TRUE(sensors_i2c_healthy());
 }
 
-/* §3: a healthy sweep is ~18 ms and a wedged one is 7 s at the core's fixed 1000 ms
-   transfer timeout. The dog's window is 5592 ms. */
+/* A healthy sweep is ~18 ms; a wedged one is 7 s at Wire's fixed 1000 ms per transfer,
+   against a 5592 ms watchdog window. */
 static void test_sweep_feeds_the_watchdog_between_channels(void) {
   (void)sensors_begin();
   sim_events_clear();
@@ -218,9 +205,9 @@ static void test_sweep_reads_the_open_canary_channel_every_time(void) {
   }
 }
 
-/* §5: an unpowered mux, a broken S-line or a floating EN gives the SAME ADC value on
-   every channel with no error raised anywhere, and from butler's side that is
-   byte-identical to five equally-dry pots. So the wired channels are omitted, not sent. */
+/* An unpowered mux, a broken select line or a floating EN gives the same ADC value on every
+   channel with no error raised anywhere -- byte-identical, on the wire, to five equally dry
+   pots. So the wired channels are omitted, not sent. */
 static void test_a_stuck_mux_is_reported_as_an_error_not_as_readings(void) {
   (void)sensors_begin();
   for (uint8_t ch = 0; ch < PB_CHANNELS; ++ch) sim_set_channel(ch, (uint16_t)(1000u + ch));
@@ -254,8 +241,8 @@ static void test_three_consecutive_failures_back_off_and_mark_the_bus_unhealthy(
   TEST_ASSERT_TRUE(sensors_i2c_healthy());
 }
 
-/* §2.13: A4/A5 are the mux select lines and the home hall — the input that gates the
-   pump. A back-off that expires mid-dose simply stays expired until the dose ends. */
+/* A4/A5 carry the mux select lines and the home hall, the input that gates the pump; a
+   back-off that expires mid-dose stays expired until the dose ends. */
 static void test_i2c_recovery_never_runs_while_the_pump_is_asserted(void) {
   (void)sensors_begin();
   sim_set_i2c_fail(true);
@@ -275,8 +262,8 @@ static void test_i2c_recovery_never_runs_while_the_pump_is_asserted(void) {
   TEST_ASSERT_TRUE(sensors_select(0));      /* and it runs the moment the dose ends */
 }
 
-/* A FIXED count, never an "until SDA releases" condition — that condition is an
-   unbounded loop on a bus a stuck device is holding down (§2.13). */
+/* Never "until SDA releases": that is an unbounded loop on a bus a stuck device is holding
+   down. */
 static void test_recovery_is_a_fixed_nine_clocks_with_sda_held_low(void) {
   (void)sensors_begin();
   sim_set_i2c_fail(true);

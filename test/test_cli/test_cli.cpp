@@ -1,17 +1,12 @@
-/* test/test_cli/test_cli.cpp -- the console and the two renderers.
-   Task 11 adds the line-reader and command cases to this same file; tasks 15, 16, 19, 20
-   and 29 add more. The fixture is the SHARED one from the first line: every later case in
-   this file calls pb_test_setup() (which starts the watchdog), and a suite whose setUp is
-   empty makes task 11's granted=/alive= case unpassable. */
+/* test_cli.cpp: the console line reader and commands, and the two screen renderers, on the host. */
 #include "../support/harness.h"
 #include "cart.h"
 #include "cli.h"
 #include "config.h"
 #include "hal.h"
 #include "noinit.h"
-#include "pins.h"     /* fix round 1: PIN_HALL_FLOAT, I2C_ADDR_OLED -- observable-effect
-                          checks for the sim command family's argument-differentiated pairs */
-#include "pulses.h"   /* fix round 1: pulses_begin()/pulses_screw() for `sim stall on|off` */
+#include "pins.h"
+#include "pulses.h"
 #include "safety.h"
 #include "sim.h"
 #include "ui.h"
@@ -26,9 +21,7 @@ static ui_state_t base_state(void) {
   ui_state_t s;
   memset(&s, 0, sizeof s);
   strcpy(s.build, "bench");
-  /* What ui_fill_() now writes: PB_CONTROLLER is an integer, printed. The
-     fixture used to say "bench1" independently of the macro, so it kept
-     passing while asserting a shape that can no longer occur. */
+  /* the controller as ui_fill_() prints it: PB_CONTROLLER, an integer */
   strcpy(s.controller, "0");
   strcpy(s.ip, "192.168.1.42");
   s.uptime_min = 83; s.pos_known = false; s.screw_pulses = 1290;
@@ -46,7 +39,7 @@ static void test_ui_render_fills_eight_rows_of_sixteen_characters(void) {
   memset(rows, 'X', sizeof rows);
   ui_render(&s, rows);
   for (int r = 0; r < 8; ++r) {
-    TEST_ASSERT_EQUAL_CHAR('\0', rows[r][16]);      /* terminated AT index 16 */
+    TEST_ASSERT_EQUAL_CHAR('\0', rows[r][16]);
     TEST_ASSERT_EQUAL_UINT(16, strlen(rows[r]));    /* padded, so no stale glyphs remain */
   }
   TEST_ASSERT_EQUAL_STRING("PB 0  1h23m     ", rows[0]);
@@ -62,19 +55,18 @@ static void test_ui_render_lcd_shows_the_contradiction_banner(void) {
   TEST_ASSERT_EQUAL_STRING("CONTRA LATCH    ", rows[0]);
   TEST_ASSERT_EQUAL_STRING("float ok,no flow", rows[1]);
 
-  /* The banner OVERRIDES whatever the caller selected, and outranks an HTTP status too --
-     the latch is the louder fact of the two (§2.7). */
+  /* the banner overrides the caller's rows, and outranks an HTTP status */
   s.contra = true; s.lcd_state = "IDLE"; s.lcd_detail = "next 35s"; s.http_status = 400;
   ui_render_lcd(&s, rows);
   TEST_ASSERT_EQUAL_STRING("CONTRA LATCH    ", rows[0]);
-  TEST_ASSERT_EQUAL_STRING("float ok,no flow", rows[1]);   /* the latch outranks HTTP 400 */
+  TEST_ASSERT_EQUAL_STRING("float ok,no flow", rows[1]);
   s.sim = true;
   ui_render_lcd(&s, rows);
   TEST_ASSERT_EQUAL_STRING("*** SIM NO D6 **", rows[0]);   /* and SIM outranks the latch */
 }
 
 static void test_ui_render_lcd_prose_is_never_the_wire_error_token(void) {
-  /* spec §4.1's fixed err= enum. Row 1 is human prose and must never be one of these. */
+  /* the wire's fixed err= tokens; row 1 is prose and must never be one of them */
   static const char *const tokens[] = {
     "none", "float", "pos", "noflow", "noise", "cap", "stop", "wdt", "dry", "contra",
     "boot", "range", "cal", "i2c", "busy", "cooldown", "leak", "adc", "stuck", "txcap",
@@ -96,10 +88,8 @@ static void test_ui_render_lcd_prose_is_never_the_wire_error_token(void) {
   }
 }
 
-/* spec §4.2: "the last HTTP status is on the LCD, not only in `status`: a 400/401 loop is
-   otherwise invisible to anyone not on the serial port". The renderer decides this, not the
-   caller: main.cpp's ui_fill_() selects lcd_detail for a dozen other reasons, and a rule
-   that depended on it happening to choose the right one would be a rule in name only. */
+/* A 400/401 loop is invisible to anyone not on the serial port unless the LCD shows it. The
+   renderer decides, not the caller: ui_fill_() picks lcd_detail for a dozen other reasons. */
 static void test_ui_render_lcd_shows_the_last_http_status_on_a_four_hundred(void) {
   ui_state_t s = base_state();
   s.http_status = 400;
@@ -128,9 +118,8 @@ static void test_ui_poll_is_a_noop_while_the_pump_is_asserted(void) {
   TEST_ASSERT_EQUAL_UINT16(after_first, ui_paints_for_test());   /* ...and nothing painted */
 }
 
-/* spec §3, §5: a pass that issued a modem command has already spent up to 2.4 s of a
-   5592 ms grant, and one wedged LCD row is up to 102 s. net_poll() calls ui_modem_ran()
-   directly (task 24); this is the assertion that keeps that call from being deleted. */
+/* A pass that issued a modem command has spent up to 2.4 s of a 5592 ms grant, and one wedged
+   LCD row can cost 102 s. net_poll() calls ui_modem_ran(); this keeps that call alive. */
 static void test_ui_poll_is_a_noop_in_a_pass_where_a_modem_command_ran(void) {
   ui_state_t s = base_state();
   ui_poll(&s);                                   /* first paint fills the shadow */
@@ -145,11 +134,8 @@ static void test_ui_poll_is_a_noop_in_a_pass_where_a_modem_command_ran(void) {
 
 static void drain_tx(void) { char b[2048]; sim_serial_tx(b, sizeof b); }
 
-/* cli_poll() reads at most sizeof(buf) == 32 bytes per call (step 4), and the overlong-line
-   case below pushes ~136 bytes at it. ONE cli_poll() would consume 32 of them and never
-   reach the newline, so "line too long" would never be printed and the case would fail for
-   a reason that has nothing to do with the line reader. Loop, with a fixed bound so that a
-   bug here cannot hang the suite. */
+/* cli_poll() reads at most 32 bytes per call and the overlong-line case pushes ~136, so one
+   call would never reach the newline; loop, with a fixed bound. */
 static size_t feed(const char *line, char *out, size_t cap) {
   drain_tx();
   sim_serial_rx(line);
@@ -157,11 +143,7 @@ static size_t feed(const char *line, char *out, size_t cap) {
   return sim_serial_tx(out, cap);
 }
 
-/* THE BENCH COMMAND SET of spec §6, and this case must end up carrying ALL of it.
-   Six commands exist today. Four more arrive later and each is added to THIS case by the
-   task that adds the command: `dry on` / `dry off` (task 15), `stop` (task 16),
-   `clear contra` (task 19). Every one of them is present in the BENCH binary as well as
-   the bringup one, so none of them may be wrapped in #if PB_BRINGUP here or there. */
+/* Every command the bench binary has; none of these may sit behind the bring-up guard. */
 static void test_parses_every_bench_command(void) {
   pb_test_setup();
   TEST_ASSERT_TRUE(cli_dispatch("i2c"));
@@ -194,11 +176,10 @@ static void test_an_overlong_line_is_dropped_whole_not_truncated_into_a_command(
   TEST_ASSERT_NULL(strstr(out, "flow hz="));       /* the prefix did NOT become a command */
 }
 
-/* cad/wiring's table promises `help` prints "the commands this binary has". It printed six
-   and hid `dry off` -- the one command an operator latched by a mid-dose reset needs. Every
-   word the dispatcher accepts must appear, each in the column layout cmd_help_ uses (the
-   needle is the word plus the padding that follows it, so "home" cannot pass on HALL_HOME);
-   the bring-up ones only in the bring-up binary, which [env:native] is (PB_BRINGUP=1). */
+/* Every word the dispatcher accepts, in cmd_help_'s column layout (the needle is the word plus
+   its padding, so "home" cannot pass on HALL_HOME); the bring-up ones only in the bring-up
+   binary, which native is. It once listed six and hid `dry off`, the one command an
+   operator needs after a mid-dose reset. */
 static void test_help_names_every_command_this_binary_has(void) {
   pb_test_setup();
   char out[2048];
@@ -235,16 +216,9 @@ static void test_status_reports_the_watchdog_grant_liveness_and_the_pump_active_
   TEST_ASSERT_NOT_NULL(strstr(out, "alive=no"));
 }
 
-/* Fix round 1 (review finding 2). Mutation testing found `status`'s contra=1/contra=0
-   branches had no coverage at all: swapping them left the whole 133-case gate green,
-   because nothing asserted the printed text, only that `status` runs. An operator reading
-   a swapped banner would be told the rig is fine when it has refused to water since
-   yesterday -- exactly the surface §2.7 names as required. Both exact lines, both states.
-   The needle for the latched case is deliberately the WHOLE sentence, not just "contra=1":
-   the raw `.noinit` dump line further down status also contains the bare substring
-   "contra=1" (as part of "dry=%u contra=%u inflight=%u"), so a needle that stopped at
-   "contra=1" alone could pass against either line and would not actually pin down which
-   branch printed. */
+/* Both banners, both states. The needle for the latched case is the whole sentence: the raw
+   .noinit dump line further down status also contains "contra=1", so a shorter needle could
+   match either line. */
 static void test_status_prints_the_correct_contra_banner_for_each_state(void) {
   pb_test_setup();
   char out[4096];
@@ -268,20 +242,14 @@ static uint32_t parse_delta_(const char *out) {
   return (uint32_t)strtoul(p + 6, 0, 10);
 }
 
-/* No case in this tree pins WHICH probe a printed delta= came from. "present" or "above
-   PB_WDT_PROBE_MIN_COUNTS" would pass against a STALE delta from a prior probe at a
-   similar rate just as well as a fresh one -- exactly the shape of the bug fix round 2
-   found in cli_print_status() (hal_wdt_alive() and hal_wdt_last_delta() passed as two
-   arguments of one unspecified-order snprintf() call). Drive two DISTINCT watchdog
-   rates through two separate `status` calls and assert delta= tracks the rate that was
-   active for THAT call, not the previous one. Brackets, not exact integers, the same
-   way test_dose.cpp:120-121 already brackets a probe delta against the ~41 ms the probe
-   loop's own hal_millis() reads add on top of the nominal 40 ms window. */
+/* Two distinct watchdog rates through two status calls: delta= must come from that call's
+   probe, not the previous one's. Brackets, not exact integers: the probe loop's own clock
+   reads add about a millisecond on top of the nominal 40 ms window. */
 static void test_status_delta_reflects_the_probe_that_produced_it(void) {
   pb_test_setup();
   char out[2048];
 
-  sim_wdt_rate_hz(2929);                          /* PCLKB/8192 (§7): ~120 counts/probe */
+  sim_wdt_rate_hz(2929);                          /* PCLKB/8192: ~120 counts per probe */
   size_t n = feed("status\n", out, sizeof out);
   out[n] = '\0';
   uint32_t delta_fast = parse_delta_(out);
@@ -293,18 +261,14 @@ static void test_status_delta_reflects_the_probe_that_produced_it(void) {
   uint32_t delta_slow = parse_delta_(out);
   TEST_ASSERT_TRUE(delta_slow >= 30u && delta_slow <= 55u);
 
-  /* The ranges above are already disjoint; this is the assertion that actually pins
-     the ordering bug, spelled out rather than left implicit in the two brackets. */
   TEST_ASSERT_TRUE(delta_slow < delta_fast);
 }
 
-/* newlib's float formatting is the deepest stack consumer in the program (spec §12), so
-   the float conversions are banned. A float-formatted number shows as <digit>.<digit>.
-   Two exemptions, and only two: the ip= line's dotted quad (whole line -- the line IS the
-   field), and -- from task 20 -- the mls= field of the dose summary line, computed in
-   integer tenths. mls='s exemption is FIELD-scoped, not line-scoped: that line also
-   carries outlet=, ms=, pulses=, ml= and r= on the same line, and a whole-line skip would
-   hide a stray dot on any one of THOSE too. */
+/* newlib's float formatting is the deepest stack consumer in the program, so the float
+   conversions are banned; a float-formatted number shows as digit.digit. Two exemptions: the
+   ip= line's dotted quad (the whole line), and the dose summary's mls= field, computed in
+   integer tenths -- field-scoped, because that line also carries outlet=, ms=, pulses=, ml=
+   and r=. */
 static void scan_line_for_float_formatting_(const char *line) {
   if (strncmp(line, "ip=", 3) == 0) return;
   const char *mv = strstr(line, "mls=");
@@ -320,10 +284,8 @@ static void scan_line_for_float_formatting_(const char *line) {
 }
 
 static void test_no_float_formatting_appears_in_any_printed_line(void) {
-  /* THE TWO NEEDLES BELOW ARE BUILT CHARACTER BY CHARACTER ON PURPOSE. make check greps
-     this tree for a percent sign followed by a float conversion letter, and it scans
-     string literals in test/ exactly as it scans code; writing the needles out would make
-     this file the one hit that fails the check it exists to defend. */
+  /* the two needles are built character by character: the build check greps this tree, test/
+     included, for a percent sign followed by a float conversion letter */
   pb_test_setup();
   char out[4096];
   size_t n = feed("status\n", out, sizeof out);
@@ -339,12 +301,9 @@ static void test_no_float_formatting_appears_in_any_printed_line(void) {
     line = strtok(0, "\n");
   }
 
-  /* Task 20 step 12's own acceptance criterion: this scanner must still pass with the
-     dose summary line in the output -- and `status` alone never prints mls=, so nothing
-     above actually exercised that exemption. Drive a REAL dose to DOSE_OK (the console's
-     own pump/calib are always by_time=true and can structurally never reach DOSE_OK, so
-     this is the only route to it) and scan the summary line it produces through the exact
-     same scanner. */
+  /* status alone never prints mls=, so the exemption went unexercised above. A real dose to
+     DOSE_OK is the only route to the summary line: the console's pump and calib are by time
+     and never reach it. */
   pb_advance(PB_BOOT_GAP_MS + 1u);
   sim_set_float(true);
   sim_set_flow_ml_s(85u);
@@ -364,8 +323,8 @@ static void test_no_float_formatting_appears_in_any_printed_line(void) {
   }
 }
 
-/* §2.12. The console's last-resort abort. dose_run() calls this once per loop iteration,
-   so the word arrives in whatever fragments the UART hands over -- here `st` and `op\n`. */
+/* The console's last-resort abort. The dose loop polls it once per iteration, so the word
+   arrives in whatever fragments the UART hands over: here st and op. */
 static void test_stop_is_matched_byte_by_byte_across_two_reads(void) {
   pb_test_setup();
   cli_stop_clear();
@@ -378,9 +337,8 @@ static void test_stop_is_matched_byte_by_byte_across_two_reads(void) {
   TEST_ASSERT_FALSE(cli_stop_requested());
 }
 
-/* The deliverable's own example. `sta` must leave THREE bytes for the line buffer: a
-   matcher that swallowed `st` would turn `status` into `atus` -- an unknown command that
-   looks like a console fault rather than a matcher bug. */
+/* sta must leave three bytes for the line buffer: a matcher that swallowed st would turn
+   status into atus, an unknown command that looks like a console fault. */
 static void test_a_non_matching_byte_is_pushed_to_the_line_buffer_unread(void) {
   pb_test_setup();
   cli_stop_clear();
@@ -393,8 +351,8 @@ static void test_a_non_matching_byte_is_pushed_to_the_line_buffer_unread(void) {
   TEST_ASSERT_NOT_NULL_MESSAGE(strstr(out, "granted="), out);   /* status actually ran */
 }
 
-/* §2.12: `dry on` typed mid-dose sets the latch AND raises the stop request, so the word
-   means the same thing during a dose as before one. */
+/* dry on typed mid-dose sets the latch and raises the stop request: the word means the same
+   during a dose as before one. */
 static void test_dry_on_mid_dose_raises_the_stop_request_and_sets_the_latch(void) {
   pb_test_setup();
   cli_stop_clear();
@@ -406,9 +364,8 @@ static void test_dry_on_mid_dose_raises_the_stop_request_and_sets_the_latch(void
   TEST_ASSERT_TRUE(safety_dry());
 }
 
-/* Near misses. `sto` is short, `stopp` is long, `xstop` is not the line, and `dry off` is
-   a different command that must NOT abort a dose - it clears a latch, it does not stop
-   water. All four leave the request down and the bytes recoverable. */
+/* Near misses: sto is short, stopp is long, xstop is not the line, and dry off is a different
+   command that clears a latch and must not stop water. All four leave the bytes recoverable. */
 static void test_a_near_miss_token_does_not_raise_the_stop_request(void) {
   const char *misses[] = { "sto\n", "stopp\n", "xstop\n", "dry off\n" };
   for (unsigned i = 0; i < 4u; ++i) {
@@ -420,10 +377,8 @@ static void test_a_near_miss_token_does_not_raise_the_stop_request(void) {
   }
 }
 
-/* §2.7's release valve, exercised through the console's line matcher rather than the
-   latch itself -- test_contra.cpp owns the latch's own behaviour under `clear contra`;
-   this is the shape task 19's Tests list separates out because it is cli_dispatch()'s
-   line matching under test, not safety_contra(). Two literal tokens, no abbreviation. */
+/* The line matcher, not the latch (test_contra.cpp owns that): two literal tokens, no
+   abbreviation. */
 static void test_clear_requires_both_literal_tokens(void) {
   const char *misses[] = { "clear", "contra", "clearcontra", "clear  contra", "CLEAR CONTRA" };
   for (unsigned i = 0; i < 5u; ++i)
@@ -473,16 +428,9 @@ static void test_pump_ms_is_clamped_to_the_hard_cap(void) {
 #endif
 }
 
-/* Direct proof of the literal-token requirement, over the pure parser rather than through
-   dose_run(). test_pump_hang_requires_the_literal_third_token below (verbatim from the
-   task) cannot actually discriminate a substring-matching regression on ITS OWN input:
-   `pump 500 hanging` has cap_ms=500 < PB_HANG_MS=3000, so the loop always exits via
-   DOSE_ABORT_CAP before el ever reaches the point where a wrongly-true hang flag would be
-   observed, and no larger cap_ms can be used in a host case without risking an ACTUAL
-   infinite hang the moment the flag is wrongly true (§6's own hang loop never returns; no
-   host case may ever set hang=true). Proven here instead by calling the parser directly:
-   no dose_run(), no loop, no possible hang -- so the case can safely assert on the boolean
-   the parser produced rather than on a side effect three abort-rules removed from it. */
+/* The parser directly, not through a dose: "pump 500 hanging" has a 500 ms cap below the
+   3000 ms PB_HANG_MS, so the cap abort fires before a wrongly-true hang flag could ever be
+   observed, and no host case may risk a real hang. */
 static void test_pump_flag_parser_requires_whole_tokens(void) {
 #if PB_BRINGUP
   bool prime, hang;
@@ -501,8 +449,7 @@ static void test_pump_flag_parser_requires_whole_tokens(void) {
 #endif
 }
 
-/* `" hanging"` contains `" hang"`, so a bare strstr passes this case wrongly - which is
-   exactly what the case is for. §6's own words are "the literal third token". */
+/* " hanging" contains " hang": a bare strstr would accept it. */
 static void test_pump_hang_requires_the_literal_third_token(void) {
 #if PB_BRINGUP
   pb_test_setup();
@@ -536,19 +483,8 @@ static void test_cal_rejects_zero_and_absurd_values(void) {
 #endif
 }
 
-/* §6's own conditional, proven directly: "one conditional, in one place" -- r=ok for
-   DOSE_OK, the real token otherwise, and NEVER err_of(DOSE_OK)'s wire token "none". No
-   #if PB_BRINGUP here: cli_print_dose_summary() ships in both binaries (exec.cpp, task
-   26, calls it for the backend's own doses in the bench build), and neither arm of this
-   case goes through the console at all -- `pump`/`calib` are always by_time=true and can
-   structurally never reach DOSE_OK (target stays 0), so the ONLY way to exercise the
-   printer's r=ok branch on this drop is the same direct dose_run() call task 17's own
-   suite already uses for a metered dose. */
-/* Bring-up 7c' reads g_nv.pattern and its checksum back out of `status` after a forced
-   reset -- the whole point being that the WRITE actually happened before the reset, not
-   merely that the command was recognised. TEST_ASSERT_TRUE(cli_dispatch(...)) alone (the
-   absence test's own assertion) cannot tell "wrote the pattern" from "did nothing and
-   returned true", so this proves the write directly. */
+/* The write must have happened, not merely the command been recognised: a true dispatch
+   cannot tell "wrote the pattern" from "did nothing". */
 static void test_noinit_pattern_writes_the_known_word_and_recomputes_the_checksum(void) {
 #if PB_BRINGUP
   pb_test_setup();
@@ -564,6 +500,9 @@ static void test_noinit_pattern_writes_the_known_word_and_recomputes_the_checksu
 #endif
 }
 
+/* r=ok for DOSE_OK and the real token otherwise, never the wire's "none". The printer ships in
+   both binaries, and the console's pump and calib are by time and never reach DOSE_OK, so a
+   direct dose is the only route to that branch. */
 static void test_dose_summary_line_prints_r_ok_only_for_a_successful_dose(void) {
   pb_test_setup();
   pb_advance(PB_BOOT_GAP_MS + 1u);
@@ -609,9 +548,7 @@ static void test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls(void) {
   TEST_ASSERT_NOT_NULL(strstr(out, " ml="));
   TEST_ASSERT_NOT_NULL(strstr(out, " mls="));
   TEST_ASSERT_NOT_NULL(strstr(out, " r="));
-  /* mls is computed in integer TENTHS and printed as two unsigned longs around a literal
-     dot: newlib's float formatting is the deepest stack consumer in the program, and the
-     float conversions are banned and grepped for (§12 item 1). */
+  /* mls is integer tenths printed around a literal dot: the float conversions are banned */
   const char *mls = strstr(out, " mls=");
   TEST_ASSERT_NOT_NULL(strchr(mls, '.'));
 #else
@@ -619,11 +556,10 @@ static void test_dose_summary_line_carries_outlet_ms_pulses_ml_and_mls(void) {
 #endif
 }
 
-/* §6. `pump 60000 prime hang` was a single typed line that removed all three of DECISIONS
-   #10's mandatory measures at once: it asserted D6, suppressed the no-flow abort and
-   starved the watchdog. Over an unauthenticated USB CDC line a serial-monitor reconnect,
-   a `cat` of the wrong file into /dev/cu.*, or an autocompleting terminal is enough.
-   Gating on the spelling of a token is not a gate; a different binary is. */
+/* "pump 60000 prime hang" is one typed line that asserts D6, suppresses the no-flow abort and
+   starves the watchdog. Over an unauthenticated USB CDC line a serial-monitor reconnect or a
+   cat into the wrong /dev/cu.* is enough. A token's spelling is not a gate; a different
+   binary is. */
 static void test_bringup_commands_are_absent_from_the_bench_build(void) {
   pb_test_setup();
 #if PB_BRINGUP
@@ -635,8 +571,8 @@ static void test_bringup_commands_are_absent_from_the_bench_build(void) {
   TEST_ASSERT_TRUE(cli_dispatch("cal 5880"));
   TEST_ASSERT_TRUE(cli_dispatch("noinit pattern"));
 #else
-  /* Not refused - NOT A COMMAND. `? unknown; type help` is the only correct answer, and it
-     is what bring-up 7e types at the bench binary to prove which binary is flashed. */
+  /* not refused: not a command. "? unknown; type help" is how an operator proves which binary
+     is flashed */
   TEST_ASSERT_FALSE(cli_dispatch("servo 1600 200"));
   TEST_ASSERT_FALSE(cli_dispatch("home"));
   TEST_ASSERT_FALSE(cli_dispatch("goto 3"));
@@ -644,8 +580,8 @@ static void test_bringup_commands_are_absent_from_the_bench_build(void) {
   TEST_ASSERT_FALSE(cli_dispatch("calib"));
   TEST_ASSERT_FALSE(cli_dispatch("cal 5880"));
   TEST_ASSERT_FALSE(cli_dispatch("noinit pattern"));
-  /* and the four that ship in BOTH binaries, asserted here so nobody moves them inside
-     the #if: an unattended board must still be stoppable, dry-able and releasable. */
+  /* the four that ship in both binaries: an unattended board must still be stoppable,
+     dry-able and releasable */
   TEST_ASSERT_TRUE(cli_dispatch("stop"));
   TEST_ASSERT_TRUE(cli_dispatch("dry on"));
   TEST_ASSERT_TRUE(cli_dispatch("dry off"));
@@ -653,24 +589,12 @@ static void test_bringup_commands_are_absent_from_the_bench_build(void) {
 #endif
 }
 
-/* task 29: the whole `sim ...` console family, one dispatch per injector, plus the two
-   range/parse rejections that must return false rather than crash or silently accept. */
 static void test_every_sim_command_is_parsed_and_dispatched(void) {
   pb_test_setup();
 #if PB_SIM_CLI
-  /* Fix round 1, finding 2: a routing-only check (TEST_ASSERT_TRUE on cli_dispatch's
-     return) cannot tell "float 0" from "float 1" -- both return true down the identical
-     code path. Confirmed against the committed tree: mutating src/cli.cpp:406's
-     sim_set_float(false) to sim_set_float(true), and mutating the resp handler's
-     link_fake_queue_response(body, n - 1) to (body, n), each passed the WHOLE 259-case
-     suite unchanged. Every pair below that shares one return path and differs only in its
-     argument is now followed by a read of the OBSERVABLE EFFECT through an existing,
-     unmodified host-visible route -- a HAL read, the real pulses.cpp counters, the noinit
-     struct itself, or (for `resp`) the seam-2 fake's own sock_open()/sock_read(), never an
-     added accessor and never link_fake.cpp, which this task does not modify. Commands with
-     no argument-differentiated counterpart in the grammar (flow <ml_s>, mux stuck, leak
-     on, wdt stop, wdt slow <hz>, noinit clobber, ch <ch> <raw>) are unchanged -- this
-     task's report names that boundary and why it was drawn there. */
+  /* A routing-only check cannot tell "float 0" from "float 1": both return true down one
+     path. Each argument-differentiated pair below is followed by a read of its observable
+     effect through an existing host-visible route. */
   TEST_ASSERT_TRUE(cli_dispatch("sim float 0"));
   TEST_ASSERT_EQUAL_INT_MESSAGE(PB_HIGH, hal_pin_read(PIN_HALL_FLOAT),
                                  "float 0 must read as NOT ok (spec 2.10: LOW == OK)");
@@ -688,9 +612,8 @@ static void test_every_sim_command_is_parsed_and_dispatched(void) {
 
   TEST_ASSERT_TRUE(cli_dispatch("sim mux stuck"));
 
-  /* stall's effect lives on the screw emitter, which has no getter of its own -- proved
-     by actually turning the screw and counting real pulses.cpp pulses, the same route
-     test_cart.cpp/test_sensors.cpp use against the identical fake. */
+  /* the stall's effect lives on the screw emitter, which has no getter: turn the screw and
+     count real pulses */
   pulses_begin();
   sim_set_screw_pulse_ms(50);           /* 20 Hz -- 0 would itself read as "not turning" */
   hal_servo_us(1600);                   /* off the 1500 stop point, either direction */
@@ -713,17 +636,12 @@ static void test_every_sim_command_is_parsed_and_dispatched(void) {
   TEST_ASSERT_TRUE(cli_dispatch("sim noinit clobber"));
   TEST_ASSERT_TRUE(cli_dispatch("sim ch 2 8123"));
 
-  /* resp: the confirmed mutation (link_fake_queue_response(body, n - 1) -> (body, n))
-     still returns true -- it only changes what a LATER sock_read() drains, so the
-     routing-only check above never saw it. Read it back exactly as seam 2's own consumer
-     would: link.h's unmodified sock_open()/sock_read(); link_fake.cpp itself is untouched
-     by this task, per the brief. */
+  /* resp only changes what a later sock_read() drains, so it is read back through
+     sock_open()/sock_read() as the consumer would */
   {
-    /* Double-escaped, matching the dispatch string below byte for byte: cmd_sim_'s resp
-       handler copies the body it is handed verbatim (no unescaping), so the literal
-       two-character `\n` (backslash, n) the console line carries is exactly what a real
-       sock_read() must drain back -- a single-escaped (real newline) comparison string
-       here would be testing a body nobody ever actually sends. */
+    /* double-escaped to match the dispatch line byte for byte: the resp handler copies its
+       body verbatim, so the two-character backslash-n the console line carries is what
+       sock_read() must drain */
     static const char body[] = "next=60\\ncmd=7 water=3 ml=120 cap_s=11\\n";
     link_fake_reset();
     link_begin(1);
@@ -737,10 +655,8 @@ static void test_every_sim_command_is_parsed_and_dispatched(void) {
     TEST_ASSERT_EQUAL_MEMORY(body, got, (size_t)n);
   }
 
-  /* reset warm|cold: identical shape to float/i2c/stall above -- sim_reset(true) and
-     sim_reset(false) share one function and one return path, differing only in the
-     argument. g_nv is the real noinit struct (include/noinit.h), not a sim-only fixture:
-     warm must keep it, cold must clear it (spec 2.3). */
+  /* reset warm|cold share one path and differ only in the argument; g_nv is the real noinit
+     struct: warm keeps it, cold clears it */
   g_nv.pattern = 0xABCD1234u;
   noinit_commit();
   TEST_ASSERT_TRUE(cli_dispatch("sim reset warm"));
@@ -754,23 +670,12 @@ static void test_every_sim_command_is_parsed_and_dispatched(void) {
   TEST_ASSERT_FALSE(cli_dispatch("sim ch 9 1"));       /* channel out of 0..5 */
   TEST_ASSERT_FALSE(cli_dispatch("sim nonsense"));
 #else
-  /* Deviation from the brief's literal test body, noted in this task's commit message:
-     PB_SIM_CLI undefined ([env:native_nosimcli]) makes every `sim ...` token NOT A
-     COMMAND AT ALL, so the unconditional TEST_ASSERT_TRUE calls above cannot compile true
-     in that arm. Guarded the same way test_pump_ms_is_clamped_to_the_hard_cap and every
-     other #if PB_BRINGUP case in this same file already is, so `pio test -e
-     native_nosimcli -f test_cli` reports this case IGNORED rather than FAILED - "both
-     runs green" (step 8) means zero failures, exactly like the ten pre-existing ignores
-     the baseline already carries, not that every case executes its assertions in every
-     env. */
   TEST_IGNORE_MESSAGE("PB_SIM_CLI is undefined: `sim ...` is not a command at all");
 #endif
 }
 
-/* The absence case: [env:native_nosimcli] undefines PB_SIM_CLI alone (not PB_SIM, which
-   would leave the host suite linking against no HAL at all - task 28's gate), so this
-   case is compiled twice, once per env, exactly as test_bringup_commands_are_absent_
-   from_the_bench_build above is compiled once per env:native/-UPB_BRINGUP. */
+/* native_nosimcli undefines PB_SIM_CLI alone (not PB_SIM, which would leave the suite with no
+   HAL), so this case is compiled once per env. */
 static void test_sim_commands_are_absent_from_the_bench_and_bringup_builds(void) {
 #ifdef PB_SIM_CLI
   TEST_ASSERT_TRUE(cli_dispatch("sim float 0"));
@@ -779,9 +684,7 @@ static void test_sim_commands_are_absent_from_the_bench_and_bringup_builds(void)
 #endif
 }
 
-/* EXACT, not a substring: an earlier draft had "*** SIM: D6 NOT" on the OLED and
-   "*** SIM: NO D6 *" on the LCD, and a substring check for "SIM" would have shipped that
-   truncation. Task 10's renderers, task 29's banner text. */
+/* Exact, not a substring: a substring check for "SIM" would ship a truncated banner. */
 static void test_the_sim_banner_holds_row_zero_on_both_screens(void) {
   ui_state_t s = base_state();
   s.sim = true;
