@@ -19,7 +19,7 @@
    hal_wdt_granted() computes this number instead.
    The counter is a DOWN-counter at PCLKB/8192 = 2929.7 Hz = 2.93 counts/ms, which is
    what hal_wdt_alive() measures across an UNFED window. ---- */
-#define PB_WDT_GRANTED_MS     5592
+#define PB_WDT_GRANTED_MS     5592     /* the host test derives it from the registers */
 #define PB_WDT_PROBE_MS         40     /* the ONE unfed window in the program. 40/5592 = 0.7%. */
 #define PB_WDT_PROBE_MIN_COUNTS 58     /* half of 40 * 2929.7/1000 = 117: no false negative on
                                           jitter, no false positive on a frozen counter */
@@ -44,6 +44,7 @@
    and the backend keeps the same number: change both together. ---- */
 #define PB_DOSE_MAX_ML        1000     /* == MAX_DOSE_ML: protocol parity */
 #define PB_DOSE_RIG_MAX_ML     250     /* what the dose loop actually enforces */
+static_assert(PB_DOSE_RIG_MAX_ML <= PB_DOSE_MAX_ML, "the rig ceiling is inside the protocol ceiling");
 #define PB_DOSE_CAP_MS_MAX   60000     /* == MAX_CAP_S * 1000 */
 #define PB_DOSE_MIN_GAP_MS   10000     /* every caller */
 #define PB_BOOT_GAP_MS       10000     /* no dose in the first 10 s after boot */
@@ -53,8 +54,7 @@
 /* cap_for(ml) = min(60, ml//FLOW_FLOOR_ML_S + 5) with FLOW_FLOOR_ML_S = 20 (butler.py) is a
    GUESS. At a real 30 ml/s, cap_for(500) authorises 1.8x the requested water, so the cap is
    not a bound exactly when the meter -- the thing it stands in for -- has failed. Once the
-   rate is measured, this clamps the cap to 2x the requested millilitres. It is ALSO the
-   constant -DPB_DOSE_BY_TIME=1 uses; there is no second ml/s constant. */
+   rate is measured, this clamps the cap to 2x the requested millilitres. */
 /* -D-overridable, same reason and same shape as PB_PULSES_PER_GATE below: [env:native_measured]
    defines this at 30 on the command line to compile the measured-clamp arm. Without the guard
    this unconditional #define silently WINS over the command-line -D (GCC keeps the later
@@ -226,10 +226,3 @@ commit the number, and delete -DPB_ALLOW_UNCALIBRATED from [env:uno_r4_wifi]."
 
 /* ---- .noinit ---- */
 #define PB_NOINIT_MAGIC   0x50423031u  /* "PB01" */
-
-/* ---- the seconds fallback. A by-time dose against an unmeasured rate is an unbounded
-   run, so the flag and the measurement are welded together. ---- */
-#if defined(PB_DOSE_BY_TIME) && (PB_ML_PER_S_MEASURED == 0)
-#  error "PB_DOSE_BY_TIME needs PB_ML_PER_S_MEASURED committed non-zero by bring-up 7b \
-(spec §6). Measure the rate, commit it in config.h, THEN uncomment the build flag."
-#endif
