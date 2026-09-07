@@ -19,7 +19,7 @@
    hal_wdt_granted() computes this number instead.
    The counter is a DOWN-counter at PCLKB/8192 = 2929.7 Hz = 2.93 counts/ms, which is
    what hal_wdt_alive() measures across an UNFED window. ---- */
-#define PB_WDT_GRANTED_MS     (16384u * 8192u / (24000000u / 1000u))   /* 5592 */
+#define PB_WDT_GRANTED_MS     5592     /* the host test derives it from the registers */
 #define PB_WDT_PROBE_MS         40     /* the ONE unfed window in the program. 40/5592 = 0.7%. */
 #define PB_WDT_PROBE_MIN_COUNTS 58     /* half of 40 * 2929.7/1000 = 117: no false negative on
                                           jitter, no false positive on a frozen counter */
